@@ -1,0 +1,11 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# 运行时产物
+TMP/
+OUTPUT/
+output/
+
+# 敏感配置（真实 API key，勿提交）
+.env
