@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import shlex
 import shutil
 import subprocess
@@ -83,7 +84,6 @@ def probe(path: str) -> dict:
     )
     if not res["ok"]:
         return {"path": path, "available": True, "error": res.get("stderr") or res.get("error")}
-    import json
     try:
         return {"path": path, "available": True, "data": json.loads(res["stdout"])}
     except json.JSONDecodeError:

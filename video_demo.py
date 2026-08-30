@@ -4,8 +4,7 @@
 （校验→推导→生成命令）→ 展示命令序列 → 执行（ffmpeg 未装则友好提示）→ 回验。
 
 用法：
-    export SILICONFLOW_API_KEY=sk-...
-    export MODEL_NAME=deepseek-ai/DeepSeek-V4-Flash   # 默认
+    配置写进 .env（模板 .env.example）：SILICONFLOW_API_KEY / MODEL_NAME / LangSmith
     python video_demo.py
     python video_demo.py "把 sample.mp4 前 8 秒和 test.png(3秒) 用 fade 拼接，720p"
 """
@@ -33,6 +32,7 @@ DEFAULT_TASK = (
 
 
 def main() -> None:
+    """三步流程入口：LLM 出计划 → 编译器出命令 → 执行 + 回验。"""
     task = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_TASK
     print("=" * 70)
     print("视频处理 Agent V2 —— LLM 出计划，编译器出命令")

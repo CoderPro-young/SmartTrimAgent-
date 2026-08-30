@@ -34,15 +34,14 @@
 ## 安装
 
 ```bash
-pip install "deepagents==0.7.7" langchain-openai langchain-anthropic
+pip install "deepagents==0.7.11" langchain-openai langchain-anthropic python-dotenv
 ```
 
 ## 快速开始
 
 ```bash
-# 1) 配置模型（SiliconFlow，默认 deepseek-ai/DeepSeek-V4-Flash）
-export SILICONFLOW_API_KEY=sk-...
-export MODEL_NAME=deepseek-ai/DeepSeek-V4-Flash
+# 1) 配置：复制模板为 .env，填入模型 AK（.env 已被 gitignore，不会提交）
+cp .env.example .env
 
 # 2) 运行默认演示（多素材拼接 + 转场 + 画中画 + 花字）
 python video_demo.py
@@ -83,11 +82,24 @@ deepagent-demo/
 └── docs/                # 技术方案文档
 ```
 
-## 模型配置
+## 模型与追踪配置
 
+所有配置通过 `.env` 导入（`model.py` 启动时用 python-dotenv 加载，命令行 export 的值优先）。
 模型解析优先级（`model.py`）：显式 `DEEPAGENT_MODEL=provider:model` >
 `SILICONFLOW_API_KEY`(+`MODEL_NAME`) > `OPENAI_API_KEY`(+`OPENAI_BASE_URL`/`OPENAI_MODEL`) >
-`ANTHROPIC_API_KEY`(+`ANTHROPIC_BASE_URL`/`ANTHROPIC_MODEL`)。模板见 `.env.example`。
+`ANTHROPIC_API_KEY`(+`ANTHROPIC_BASE_URL`/`ANTHROPIC_MODEL`)。
+
+可选开启 LangSmith 追踪，在 `.env` 里加：
+
+```
+LANGSMITH_TRACING=true
+LANGSMITH_ENDPOINT=https://api.smith.langchain.com
+LANGSMITH_API_KEY=lsv2_pt_xxxxxxxx
+LANGSMITH_PROJECT=DeepAgentDemo
+```
+
+打开 [smith.langchain.com](https://smith.langchain.com) 对应项目即可看到每次运行的完整
+调用链（工具调用、prompt、token 用量）。
 
 > 模型选型：`Qwen/Qwen2.5-7B-Instruct` 免费但工具调用不稳定；推荐
 > `deepseek-ai/DeepSeek-V4-Flash` 或 `Qwen/Qwen2.5-72B-Instruct`。

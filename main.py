@@ -1,11 +1,7 @@
 """DeepAgents demo — entry point.
 
 Usage:
-    # 1) Configure a model (see .env.example), e.g.:
-    export OPENAI_API_KEY=sk-...
-    export OPENAI_BASE_URL=https://api.deepseek.com/v1   # optional
-    export OPENAI_MODEL=deepseek-chat                    # optional
-
+    # 1) 把 .env.example 复制为 .env，填入模型 AK（如 SILICONFLOW_API_KEY）
     # 2) Run
     python main.py
 
@@ -32,6 +28,7 @@ DEMO_TASK = (
 
 
 def main() -> None:
+    """跑一个内置演示任务：让 agent 写一个 hello 脚本再读回来。"""
     working_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
     os.makedirs(working_dir, exist_ok=True)
 
@@ -46,9 +43,7 @@ def main() -> None:
     except RuntimeError as exc:
         print(f"\n[config] {exc}\n")
         print("Quick start:")
-        print("  export OPENAI_API_KEY=sk-...        # or ANTHROPIC_API_KEY")
-        print("  export OPENAI_BASE_URL=...          # optional (OpenAI-compatible)")
-        print("  export OPENAI_MODEL=deepseek-chat  # optional")
+        print("  cp .env.example .env   # 填入 SILICONFLOW_API_KEY 等配置")
         print("  python main.py")
         print("\nSee .env.example for all options.")
         sys.exit(2)

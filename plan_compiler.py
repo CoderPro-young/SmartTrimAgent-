@@ -20,10 +20,13 @@ import ffmpeg_exec
 from plan_schema import clip_duration, validate_plan
 
 FONT_PATH = "C:/Windows/Fonts/msyh.ttc"
-MARGIN = 20
+MARGIN = 20        # 画中画贴边距
+TEXT_MARGIN = 40   # 花字贴边距
 
 
 class CompileError(Exception):
+    """计划编译失败；errors 为中文错误列表，可直接展示或回传 LLM。"""
+
     def __init__(self, errors: list[str]):
         self.errors = errors
         super().__init__("; ".join(errors))
@@ -31,6 +34,8 @@ class CompileError(Exception):
 
 @dataclass
 class Command:
+    """一条待执行的 ffmpeg 命令：stage 区分归一化/渲染两个阶段。"""
+
     stage: str          # "normalize" | "render"
     description: str
     argv: list[str]
@@ -42,6 +47,8 @@ class Command:
 
 @dataclass
 class CompileResult:
+    """compile_plan 的完整产出，后续 execute/verify 就地填充 executes/verify。"""
+
     plan: dict
     commands: list[Command] = field(default_factory=list)
     sidecars: dict[str, str] = field(default_factory=dict)   # path -> content
@@ -50,6 +57,7 @@ class CompileResult:
     verify: dict | None = None
 
     def render_summary(self) -> str:
+        """把命令序列渲染成可读文本（demo 展示用）。"""
         lines = []
         for c in self.commands:
             lines.append(f"[{c.stage}] {c.description}\n  {c.line}")
@@ -57,6 +65,7 @@ class CompileResult:
 
 
 def _effects_to_vf(effects: list) -> str:
+    """把计划里的 effects 列表翻译成 ffmpeg -vf 滤镜串（如 `hflip,eq=...`）。"""
     parts = []
     for e in effects:
         name = e["name"]
@@ -78,30 +87,35 @@ def _effects_to_vf(effects: list) -> str:
 
 
 def _clip_by_id(plan: dict, cid: str) -> dict:
+    """按 id 查找 clip 定义（校验阶段已保证存在）。"""
     return next(c for c in plan["clips"] if c["id"] == cid)
 
 
 def _overlay_pos_expr(position: str, axis: str) -> str:
-    """画中画 overlay 的 x/y 表达式（基于 main/overlay 宽高，margin=20）。"""
+    """画中画 overlay 的 x/y 表达式（基于 main/overlay 宽高，贴边留 MARGIN）。"""
+    edge = str(MARGIN)
     if axis == "x":
         return {
-            "top-left": "20", "left": "20", "bottom-left": "20",
+            "top-left": edge, "left": edge, "bottom-left": edge,
             "top": "(main_w-overlay_w)/2", "center": "(main_w-overlay_w)/2",
             "bottom": "(main_w-overlay_w)/2",
-            "top-right": "main_w-overlay_w-20", "right": "main_w-overlay_w-20",
-            "bottom-right": "main_w-overlay_w-20",
+            "top-right": f"main_w-overlay_w-{MARGIN}",
+            "right": f"main_w-overlay_w-{MARGIN}",
+            "bottom-right": f"main_w-overlay_w-{MARGIN}",
         }[position]
     return {
-        "top-left": "20", "top": "20", "top-right": "20",
+        "top-left": edge, "top": edge, "top-right": edge,
         "left": "(main_h-overlay_h)/2", "center": "(main_h-overlay_h)/2",
         "right": "(main_h-overlay_h)/2",
-        "bottom-left": "main_h-overlay_h-20", "bottom": "main_h-overlay_h-20",
-        "bottom-right": "main_h-overlay_h-20",
+        "bottom-left": f"main_h-overlay_h-{MARGIN}",
+        "bottom": f"main_h-overlay_h-{MARGIN}",
+        "bottom-right": f"main_h-overlay_h-{MARGIN}",
     }[position]
 
 
 def _drawtext_pos(position: str) -> tuple[str, str]:
-    m = 40
+    """花字 drawtext 的 x/y 表达式（贴边留 TEXT_MARGIN，居中用文本宽高计算）。"""
+    m = TEXT_MARGIN
     x = {"left": str(m), "center": "(w-text_w)/2", "right": f"w-text_w-{m}",
          "top-left": str(m), "top": "(w-text_w)/2", "top-right": f"w-text_w-{m}",
          "bottom-left": str(m), "bottom": "(w-text_w)/2", "bottom-right": f"w-text_w-{m}",
@@ -195,11 +209,13 @@ def _normalize_commands(plan: dict, math: dict) -> tuple[list[Command], dict]:
         )
         argv = ["ffmpeg", "-y"]
         if kind == "image":
+            # 图片素材：loop 定长展示 + 静音音轨对齐时长
             d = c["duration"]
             argv += ["-loop", "1", "-t", str(d), "-i", src,
                      "-f", "lavfi", "-t", str(d), "-i", "anullsrc=r=48000:cl=stereo"]
             amap = "1:a"
         else:
+            # 视频素材：按 trim 点裁剪；探测确认无声时补静音轨
             d = math["durations"][cid]
             ts = c.get("trim_start") or 0
             te = c.get("trim_end")
@@ -227,16 +243,14 @@ def _normalize_commands(plan: dict, math: dict) -> tuple[list[Command], dict]:
 
 
 def _has_transition(plan: dict) -> bool:
+    """时间轴上是否存在任何转场（决定走快速路径还是 xfade 路径）。"""
     return any(item.get("transition") for item in plan["timeline"])
 
 
 def _overlay_abs(math: dict, ov: dict) -> tuple[float, float]:
-    """根据 math 里预计算的结果，返回 overlay 的 (start, end) 绝对时间。"""
-    for a in math["overlays"]:
-        if a["type"] == ov["type"] and a["at_clip"] == ov["at_clip"] \
-                and abs(a["start"] - (math["starts"][ov["at_clip"]] + ov["start_offset"])) < 1e-6:
-            return a["start"], a["end"]
-    raise KeyError("overlay 绝对时间未找到")
+    """计算 overlay 的 (start, end) 绝对时间：所属片段起点 S_i + 片段内偏移。"""
+    start = _round2(math["starts"][ov["at_clip"]] + ov["start_offset"])
+    return start, _round2(start + ov["duration"])
 
 
 def _render_no_transition(plan: dict, math: dict) -> tuple[list[Command], dict]:
