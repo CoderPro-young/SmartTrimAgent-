@@ -3,7 +3,7 @@
 Usage:
     # 1) 把 .env.example 复制为 .env，填入模型 AK（如 SILICONFLOW_API_KEY）
     # 2) Run
-    python main.py
+    python basic_demo/main.py
 
 The demo sends one task to the agent: create a small Python script and read it
 back, showcasing the built-in filesystem tools (write_file / read_file).
@@ -14,7 +14,9 @@ from __future__ import annotations
 import os
 import sys
 
-# So `python main.py` works regardless of the current directory.
+# 项目根目录（model.py / .env / output/ 都在根下）+ 自身目录（agent.py 平铺导入）
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from agent import build_agent, run  # noqa: E402
@@ -29,7 +31,7 @@ DEMO_TASK = (
 
 def main() -> None:
     """跑一个内置演示任务：让 agent 写一个 hello 脚本再读回来。"""
-    working_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
+    working_dir = os.path.join(ROOT, "output")
     os.makedirs(working_dir, exist_ok=True)
 
     print("=" * 60)

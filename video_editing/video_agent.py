@@ -19,7 +19,8 @@ from langgraph.graph.state import CompiledStateGraph
 import ffmpeg_exec
 from model import get_model
 
-PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+# 仓库根：INPUT/ OUTPUT/ 在根下，LocalShellBackend 也锚定到根
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 INPUT_DIR = os.path.join(PROJECT_ROOT, "INPUT")
 OUTPUT_DIR = os.path.join(PROJECT_ROOT, "OUTPUT")
 

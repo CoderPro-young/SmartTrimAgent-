@@ -5,8 +5,8 @@
 
 用法：
     配置写进 .env（模板 .env.example）：SILICONFLOW_API_KEY / MODEL_NAME / LangSmith
-    python video_demo.py
-    python video_demo.py "把 sample.mp4 前 8 秒和 test.png(3秒) 用 fade 拼接，720p"
+    python video_editing/video_demo.py
+    python video_editing/video_demo.py "把 sample.mp4 前 8 秒和 test.png(3秒) 用 fade 拼接，720p"
 """
 
 from __future__ import annotations
@@ -15,12 +15,13 @@ import json
 import os
 import sys
 
+# 项目根目录（model.py / .env / INPUT / OUTPUT 都在根下）+ 自身目录（同目录模块平铺导入）
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, PROJECT_ROOT)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import plan_compiler
 from video_agent import extract_plan, run_video_plan_task  # noqa: E402
-
-PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 DEFAULT_TASK = (
     "把 INPUT/sample.mp4 的前 8 秒和 INPUT/test.png（展示 3 秒）拼接成一段视频，"

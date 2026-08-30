@@ -44,10 +44,10 @@ pip install "deepagents==0.7.11" langchain-openai langchain-anthropic python-dot
 cp .env.example .env
 
 # 2) 运行默认演示（多素材拼接 + 转场 + 画中画 + 花字）
-python video_demo.py
+python video_editing/video_demo.py
 
 # 3) 或用自然语言自定义任务
-python video_demo.py "把 sample.mp4 前 8 秒和 test.png(3秒) 用 fade 转场拼接，输出 720p"
+python video_editing/video_demo.py "把 sample.mp4 前 8 秒和 test.png(3秒) 用 fade 转场拼接，输出 720p"
 ```
 
 > 安装 ffmpeg 后即可真实渲染：Windows `winget install ffmpeg` / macOS `brew install ffmpeg` /
@@ -56,10 +56,10 @@ python video_demo.py "把 sample.mp4 前 8 秒和 test.png(3秒) 用 fade 转场
 ## 使用示例
 
 ```bash
-python video_demo.py "把 INPUT/sample.mp4 转成 720p，水平镜像"
-python video_demo.py "把 a.mp4 和 b.avi 拼接，中间加 0.5 秒 dissolve 转场"
-python video_demo.py "在 sample.mp4 第 3 秒加一个右下角画中画 logo.png，持续 5 秒"
-python video_demo.py "把 sample.mp4 前 5 秒剪掉，剩下部分加一行花字"
+python video_editing/video_demo.py "把 INPUT/sample.mp4 转成 720p，水平镜像"
+python video_editing/video_demo.py "把 a.mp4 和 b.avi 拼接，中间加 0.5 秒 dissolve 转场"
+python video_editing/video_demo.py "在 sample.mp4 第 3 秒加一个右下角画中画 logo.png，持续 5 秒"
+python video_editing/video_demo.py "把 sample.mp4 前 5 秒剪掉，剩下部分加一行花字"
 ```
 
 运行过程会打印：LLM 生成的编辑计划 JSON、编译器换算出的时间轴（片段时长 / 起点 / 总时长）、
@@ -69,17 +69,20 @@ python video_demo.py "把 sample.mp4 前 5 秒剪掉，剩下部分加一行花�
 
 ```
 deepagent-demo/
-├── video_demo.py        # 演示入口：任务 → 计划 → 编译 → 命令展示 → 执行回验
-├── video_agent.py       # Agent 构建：probe_media / submit_plan 工具 + 计划 schema 提示词
-├── plan_schema.py       # 编辑计划 JSON 的校验（白名单 + 语义规则）
-├── plan_compiler.py     # 编译器：校验 → 换算 → 生成命令 → 执行 → 回验
-├── ffmpeg_exec.py       # ffmpeg/ffprobe 执行器（未安装时返回可读错误）
-├── model.py             # 模型解析（默认 deepseek-ai/DeepSeek-V4-Flash）
-├── main.py / agent.py   # 基础编码 Agent demo（对照）
-├── INPUT/               # 素材（sample.mp4 / test.png / logo.png）
-├── OUTPUT/              # 产物（运行时生成）
-├── TMP/                 # 归一化中间件（运行时生成，可缓存）
-└── docs/                # 技术方案文档
+├── video_editing/           # 视频剪辑 Agent（项目主体）
+│   ├── video_demo.py        # 演示入口：任务 → 计划 → 编译 → 命令展示 → 执行回验
+│   ├── video_agent.py       # Agent 构建：probe_media / submit_plan 工具 + 计划 schema 提示词
+│   ├── plan_schema.py       # 编辑计划 JSON 的校验（白名单 + 语义规则）
+│   ├── plan_compiler.py     # 编译器：校验 → 换算 → 生成命令 → 执行 → 回验
+│   └── ffmpeg_exec.py       # ffmpeg/ffprobe 执行器（未安装时返回可读错误）
+├── basic_demo/              # 基础编码 Agent demo（deepagents 最简用法对照）
+│   ├── main.py              # 入口：演示写/读文件任务
+│   └── agent.py             # 最简 deep agent 构建
+├── model.py                 # 共用：加载 .env + 按优先级解析模型
+├── INPUT/                   # 素材（sample.mp4 / test.png / logo.png）
+├── OUTPUT/                  # 产物（运行时生成）
+├── TMP/                     # 归一化中间件（运行时生成，可缓存）
+└── docs/                    # 技术方案文档
 ```
 
 ## 模型与追踪配置
