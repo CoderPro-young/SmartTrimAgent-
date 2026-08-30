@@ -1,3 +1,14 @@
-deepagents==0.7.7
+# 核心依赖（deepagents 已带上 langgraph / langchain-core 等）
+deepagents==0.7.11
+
+# 模型适配（按需，建议全装）
 langchain-openai
 langchain-anthropic
+
+# .env 配置加载
+python-dotenv
+
+# 安装方式（项目根目录）：
+#   py -m venv .venv
+#   .venv\Scripts\activate            # PowerShell: .venv\Scripts\Activate.ps1
+#   pip install -r requirements.txt

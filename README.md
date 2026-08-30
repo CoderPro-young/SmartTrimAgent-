@@ -27,15 +27,23 @@
 
 ## 环境要求
 
-- Python 3.13+（依赖 `deepagents`）
+- Python 3.13+（推荐用 `py -m venv .venv` 建项目专属环境）
 - 一个 LLM 模型接口：默认走 SiliconFlow（OpenAI 兼容），也支持任意 OpenAI / Anthropic 兼容端点
 - ffmpeg（**可选**）：真实渲染需要，未安装时仍可验证「计划 → 命令生成」全链路
 
 ## 安装
 
 ```bash
-pip install "deepagents==0.7.11" langchain-openai langchain-anthropic python-dotenv
+# 1) 创建并激活项目专属虚拟环境（推荐，避免多套 Python 混淆）
+py -m venv .venv
+.venv\Scripts\activate           # PowerShell: .venv\Scripts\Activate.ps1
+# macOS/Linux: source .venv/bin/activate
+
+# 2) 安装依赖
+pip install -r requirements.txt
 ```
+
+> 不建虚拟环境时，直接 `pip install "deepagents==0.7.11" langchain-openai langchain-anthropic python-dotenv` 也可以。
 
 ## 快速开始
 
