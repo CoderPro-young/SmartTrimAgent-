@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SmartTrimAgent 改进方向：脏活自动化 × 小白快速出片</title>
+<style>
+  :root {
+    --bg: #0f1419; --panel: #161b22; --panel2: #1c2330;
+    --fg: #d6deeb; --muted: #8a97a8; --accent: #4fa3ff;
+    --border: #2a3340; --code-bg: #0b0f14;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    line-height: 1.7; font-size: 15px;
+  }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 40px 28px 80px; }
+  h1 { font-size: 28px; border-bottom: 2px solid var(--border); padding-bottom: 14px; margin-top: 8px; }
+  h2 { font-size: 22px; margin-top: 38px; color: #fff; border-left: 4px solid var(--accent); padding-left: 12px; }
+  h3 { font-size: 18px; margin-top: 28px; color: #eaf2ff; }
+  h4 { font-size: 15px; color: var(--accent); }
+  p { margin: 12px 0; }
+  blockquote {
+    margin: 16px 0; padding: 12px 18px; background: var(--panel2);
+    border-left: 3px solid var(--accent); border-radius: 0 8px 8px 0; color: var(--muted);
+  }
+  code {
+    background: var(--code-bg); padding: 2px 6px; border-radius: 5px;
+    font-family: "SFMono-Regular", Consolas, monospace; font-size: 13px; color: #ffd9a0;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--border); border-radius: 10px;
+    padding: 16px; overflow-x: auto;
+  }
+  pre code { background: none; padding: 0; color: #cfe8ff; }
+  table {
+    border-collapse: collapse; width: 100%; margin: 18px 0; font-size: 13.5px;
+    background: var(--panel); border-radius: 8px; overflow: hidden;
+  }
+  th, td { border: 1px solid var(--border); padding: 9px 11px; text-align: left; vertical-align: top; }
+  th { background: var(--panel2); color: #fff; font-weight: 600; }
+  tr:nth-child(even) td { background: rgba(255,255,255,0.02); }
+  ul, ol { padding-left: 24px; }
+  li { margin: 6px 0; }
+  hr { border: none; border-top: 1px solid var(--border); margin: 30px 0; }
+  strong { color: #fff; }
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>SmartTrimAgent 后续改进方向 —— 脏活自动化 × 小白快速出片</h1>
+<blockquote>2026-09-13 ｜ 基于《案例对比报告》《时刻Pro/剪映补充深挖》与定位讨论收敛而成。 定位一句话：<strong>不帮用户生成高创意内容；帮新手小白和刚接触剪辑的人快速出&quot;能用&quot;的片， 把去水印、加字幕、配 BGM、转场、打码这类脏活粗活累活全部自动化。</strong></blockquote>
+<hr>
+<h2>一、为什么这个定位成立（两个 case 的交叉论证）</h2>
+<p><strong>剪映的 68 分实测恰好是定位合理性的证明。</strong> 36氪测评的结论是&quot;效率拉高几倍，但只能从 0 做到 60 分，不懂情绪递进、模板感重&quot;。 注意：<strong>这个批评对专业创作者是缺点，对小白恰恰是够用的</strong>——小白要的就是 &quot;快速得到一个结构完整、节奏规整、挑不出毛病的及格片&quot;。剪映 10 亿用户盘子里， 最大的群体本来就是这个需求。我们不碰它&quot;高光 60 分以上&quot;的地带，只做 0→60 这一段。</p>
+<p><strong>Avid 的行业调研给这个定位背书。</strong> 79% 职业剪辑师已在用 AI，最高频用途是语音转文字（60%），87% 认为 AI 的价值在于 &quot;更高效地实现自己的意图&quot;——<strong>连专业用户都优先把 AI 用在脏活上</strong>，小白更是如此。</p>
+<p><strong>时刻Pro证明&quot;快速出片&quot;本身就是一个完整产品。</strong> 87% 自然语言成功率、2025 年 1.2 亿条、83% 导出后直接分享——用户付费的就是 &quot;拿到能直接发的东西&quot;。它没有试图做创意表达（那是 PanoMind 端侧高光精选的事）， 云端时刻Pro 的卖点就是&quot;一分钟出能用的片&quot;。</p>
+<p><strong>我们的差异化：剪映的两个实测坑，恰好是我们架构的原生强项。</strong></p>
+<table><thead><tr><th>剪映实测问题</th><th>根因</th><th>我们的对应机制</th></tr></thead><tbody><tr><td>组合指令常漏执行一两项</td><td>命令式架构：子 Agent 各干各的，无全局合成层</td><td>声明式计划 JSON：编译器统一校验，漏项/越界<strong>显式报错</strong></td></tr><tr><td>&quot;生成快、审核慢&quot;，配错画面不提示</td><td>无程序化质量门禁，审核转嫁给用户</td><td>ffprobe 回验 + 程序化审阅报告（见 R3），<strong>审核也快</strong></td></tr></tbody></table>
+<hr>
+<h2>二、能力矩阵：脏活清单盘点</h2>
+<table><thead><tr><th>脏活</th><th>现状</th><th>技术路径</th><th>诚实边界</th></tr></thead><tbody><tr><td>拼接/裁剪/画幅/转场</td><td>✅ 已有</td><td>—</td><td>—</td></tr><tr><td>人脸打码</td><td>✅ 已有（YuNet）</td><td>—</td><td>—</td></tr><tr><td>花字/水印文字</td><td>✅ 已有（drawtext）</td><td>—</td><td>—</td></tr><tr><td><strong>去水印</strong></td><td>❌</td><td><code>delogo</code> 滤镜（指定区域遮盖）</td><td>是&quot;糊掉&quot;不是 AI 消除（inpainting），效果档次低于剪映，但对固定位置 logo 够用；需诚实告知用户</td></tr><tr><td><strong>加字幕</strong></td><td>❌</td><td>faster-whisper ASR → SRT/ASS → subtitles 滤镜烧录</td><td>本地小模型，免费；口播类素材效果好，嘈杂环境需人工抽查</td></tr><tr><td><strong>配 BGM</strong></td><td>❌</td><td>音频轨：<code>amix</code> + 转场 <code>acrossfade</code> + ducking</td><td>用户指定音频文件；自动选曲不做（那是音乐推荐，不是剪辑）</td></tr><tr><td><strong>自动转场</strong></td><td>⚠️ 半成品</td><td>场景切分（<code>select=&#x27;gt(scene,0.3)&#x27;</code>）+ 在切点自动插 xfade</td><td>需先有场景切分信号（恰好是脏活版内容理解的第一项）</td></tr><tr><td><strong>剪静音/剪口播</strong></td><td>❌</td><td><code>silencedetect</code> → 静音区间列表 → 编译器展开成 trim 序列</td><td>&quot;剪掉所有静音&quot;= 编译器一次循环；口播去&quot;嗯啊&quot;需 ASR 配合（二期）</td></tr><tr><td><strong>多规格一键输出</strong></td><td>❌</td><td>plan schema 的 output 改 variants 数组，编译器循环实例化</td><td>9:16/16:9/1:1；智能裁剪跟主体可后置，第一版居中裁</td></tr></tbody></table>
+<p><strong>注意</strong>：这张表里唯一需要&quot;模型&quot;的只有 ASR（L2 专用小模型）。 去水印/字幕烧录/BGM/转场/剪静音全部是 ffmpeg 确定性能力—— <strong>脏活定位的最大红利：几乎不引入 LLM 不确定性，天然落在&quot;工程正确性归程序&quot;的既有路线上。</strong></p>
+<hr>
+<h2>三、路线：三个阶段</h2>
+<h3>R1 · 能力面：Skill 注册表 + 补齐五个脏活（最优先）</h3>
+<p><strong>先修地基——Skill 注册表（原 P1-1 提级为 R1 首项）：</strong></p>
+<pre><code class="lang-python">SKILLS = {
+  &quot;delogo&quot;:       Skill(args_schema={...}, to_vf=..., prompt_doc=...),
+  &quot;subtitles&quot;:    Skill(args_schema={...}, to_vf=..., prompt_doc=...),
+  &quot;bgm&quot;:          Skill(args_schema={...}, to_af=..., prompt_doc=...),
+  &quot;auto_xfade&quot;:   Skill(args_schema={...}, needs=[&quot;scene_cuts&quot;], to_filter=..., ...),
+  &quot;trim_silence&quot;: Skill(args_schema={...}, needs=[&quot;silence_ranges&quot;], ...),
+  &quot;face_mosaic&quot;:  Skill(...),  # 现有能力迁入
+}</code></pre>
+<p>schema 校验、命令生成、提示词文档全部从注册表派生—— <strong>一处定义同时消灭&quot;新增 effect 同步三处&quot;的坑和&quot;模型猜不存在的效果名&quot;的坑。</strong> 这正是剪映 Skill 库的最小同构版：Skill = 参数 schema + 执行映射 + 给 LLM 的说明书。</p>
+<p><strong>再补五个技能</strong>（每个都是&quot;注册表 + 编译器翻译 + 提示词&quot;一次落地）：</p>
+<ol><li><code>delogo</code> 去水印（最快，纯 ffmpeg）</li><li><code>bgm</code> 背景音乐轨（amix/acrossfade，顺手修掉 v2.1 的转场音频硬切）</li><li><code>subtitles</code> ASR 字幕（引入 faster-whisper，唯一新依赖）</li><li><code>trim_silence</code> 剪静音（先做 silencedetect 信号，零成本）</li><li><code>auto_xfade</code> 场景切点自动转场（先做场景切分信号，零成本）</li></ol>
+<p><strong>Skill 的能力边界：注册表是漏斗，不是墙</strong>（2026-09-15 讨论定稿）</p>
+<p>针对&quot;注册太多 Skill 反而限制 LLM、漏注册就用不了 ffmpeg 能力&quot;的质疑，结论是三层结构：</p>
+<table><thead><tr><th>层</th><th>覆盖</th><th>机制</th><th>可靠性</th></tr></thead><tbody><tr><td>① 契约路径</td><td>高频脏活（上表约 15 个 Skill）</td><td>结构化参数 → 编译器翻译</td><td>零幻觉、全参数校验、可回验</td></tr><tr><td>② 逃生舱 <code>custom_filter</code></td><td>长尾 ffmpeg 能力</td><td>LLM 直接写滤镜串，过四道闸</td><td>能跑通，但不背质量保证</td></tr><tr><td>③ 沉淀漏斗</td><td>—</td><td>反复使用且验证稳定 → 升级为注册 Skill</td><td>上限不断变成下限</td></tr></tbody></table>
+<p>逃生舱的四道闸：</p>
+<ol><li><strong>dry-run 语法预检</strong> —— <code>ffmpeg -t 0.1 -f lavfi -i color=black:s=320x240 -vf &quot;&lt;候选链&gt;&quot; -f null -</code></li><li><strong>沙箱约束</strong> —— 禁写文件类、破坏性、超长耗时滤镜</li><li><strong>显式标记</strong> —— 检视面板标「未验证滤镜」，用户知情</li><li><strong>失败回传重试</strong> —— 复用 MAX_RETRIES 通道</li></ol>
+<p>没有第 ③ 层，逃生舱会退化成垃圾堆积场——所有脏活都堆在&quot;未验证&quot;路径里，契约路径形同虚设。 <strong>漏斗的方向永远是：逃生舱是 Skill 的候补队列，不是终点。</strong></p>
+<p><strong>为什么不做全开放</strong>：2026-09-11 的 mirror 坑证明，在<strong>仅 5 个已知 effect</strong> 的能力面下 模型仍会幻觉出不存在的能力名（README 示例&quot;水平镜像&quot; → 模型猜 <code>{&quot;name&quot;:&quot;mirror&quot;}</code>， 正确应为 <code>hflip</code>，被 plan_schema 拦下）；给它 300+ 滤镜的自由空间，幻觉率只会更高。 且剪映 / 时刻Pro / Giga / ICE 无一例外都选择受控能力面，没有先例支持全开放。</p>
+<p><strong>渐进式校验与失败回传</strong>（2026-09-15 讨论定稿）</p>
+<p>校验按&quot;由便宜到贵&quot;三层排布，每层失败都带结构化错误回传 LLM：</p>
+<table><thead><tr><th>层</th><th>成本</th><th>检查内容</th><th>现状</th></tr></thead><tbody><tr><td>① 静态 schema 校验</td><td>0 成本 / 毫秒级</td><td>效果名白名单、参数范围、时间轴数学</td><td>✅ 已有</td></tr><tr><td>② dry-run 语法预检</td><td>秒级</td><td>filtergraph 能否被 ffmpeg 解析（按 detect / normalize / render 三段分别预检，便于定位）</td><td>需新增</td></tr><tr><td>③ 真实渲染 + ffprobe 回验</td><td>分钟级</td><td>时长 / 分辨率 / 帧率断言</td><td>✅ 已有</td></tr></tbody></table>
+<p><strong>回传错误必须&quot;可定位、可操作&quot;</strong>，带 plan JSON 节点路径：</p>
+<blockquote><code>clip[2].effects[0].name=&#x27;mirror&#x27;</code> 不在可用列表 [hflip, vflip, transpose, eq, face_mosaic]；水平镜像应为 <code>hflip</code></blockquote>
+<p>这样 LLM 只改那一个节点，避免&quot;一个错误名导致整个计划重写&quot;从而引入新错误。</p>
+<ul><li><strong>错误分类</strong>：可自动修复（滤镜名错、参数越界）才重试；不可修复（素材损坏、磁盘满）</li></ul>
+<p>直接报错退出，不浪费重试次数。</p>
+<ul><li><strong>重试耗尽后显式降级或显式失败</strong>（&quot;第 3 项效果未能实现，已按最小可用版本出片&quot;），</li></ul>
+<p><strong>绝不静默漏执行</strong>——这正是剪映实测&quot;组合指令只执行一两项且不提示&quot;的坑，我们反向做。</p>
+<p><strong>校验挂载在什么位置：工具 vs 钩子</strong></p>
+<p>检查的锚点不是&quot;LLM 的每一次输出&quot;（大量输出是自然语言推理，没有可校验内容）， 而是<strong>结构化产物产生的那一刻</strong>（工具调用参数、计划提交）：</p>
+<table><thead><tr><th>形态</th><th>触发</th><th>职责</th></tr></thead><tbody><tr><td><code>submit_plan</code>（已有）</td><td>LLM 主动提交，完成任务必经之路</td><td><strong>强制关卡</strong>：所有计划必过校验，错误经 tool result 回传 LLM</td></tr><tr><td><code>validate_plan</code>（新增）</td><td>LLM 主动调用</td><td><strong>预检</strong>：试算参数、试运滤镜串，把重试轮数从 2 降到 0</td></tr><tr><td>middleware 钩子（新增）</td><td>框架自动拦截</td><td>① 自动纠正建议 ② 统计告警（触发固化漏斗判定）③ 危险滤镜拦截</td></tr></tbody></table>
+<p><strong>不做静默自动纠正</strong>：mirror→hflip 纠对了，换个场景可能把 hflip 纠成 vflip—— <strong>错误被藏起来比报出来更糟</strong>。永远&quot;显式报错 + 给出建议&quot;，改了什么也留在日志里。</p>
+<p><strong>信号分析结果必须缓存</strong>（学时刻Pro&quot;上传即索引&quot;）： 场景切分、静音区间跑一次就存进素材的 sidecar 文件（<code>TMP/probe/&lt;hash&gt;.json</code>）， 同一个素材第二次用不重跑。probe_media 返回的&quot;内容卡片&quot;第一版就是这两项 <strong>——内容理解（原 P0-1）按脏活需要裁剪，只做 L1 信号层，VLM 语义打标后置。</strong></p>
+<h3>R2 · 小白体验：参数卡片回改 + 一键多规格</h3>
+<ul><li><strong>计划回改的小白形态</strong>（原 P0-2 调整）：小白不该看到 JSON 编辑器。</li></ul>
+<p>检视面板把 plan 渲染成<strong>参数卡片</strong>（每个 clip 一张：改 trim 点滑条、换转场类型下拉框、 调 BGM 音量），点&quot;重新编译&quot;直接走 plan_compiler，<strong>不回 LLM</strong>。 这是剪映&quot;动态草稿协议&quot;的最小实现：AI 出初稿，确定性系统承接迭代。</p>
+<ul><li><strong>多规格一键输出</strong>：<code>output.variants</code> 数组，横竖方一次渲染（ICE 已验证价值）。</li><li><strong>示例任务引导</strong>：Web 首页放&quot;去水印 / 加字幕 / 打码 / 拼接&quot;四个任务模板按钮，</li></ul>
+<p>小白点按钮填参数即可，不用会写需求描述。</p>
+<h3>R3 · 质量兜底：程序化审阅报告（差异化壁垒）</h3>
+<p>小白<strong>不会检查成品</strong>——这是他们和 36氪测评作者的本质区别。 所以质量兜底必须由系统做，渲染完成自动出审阅卡片：</p>
+<table><thead><tr><th>检查项</th><th>方法</th><th>成本</th></tr></thead><tbody><tr><td>黑帧/纯色帧</td><td>帧直方图</td><td>低</td></tr><tr><td>静音段残留</td><td>复用 silencedetect</td><td>零</td></tr><tr><td>打码覆盖率</td><td>对照 detect 阶段框数</td><td>已有</td></tr><tr><td>时长/分辨率/帧率断言</td><td>ffprobe</td><td>已有</td></tr><tr><td>字幕轴完整性</td><td>ASR 时间戳 vs 烧录结果</td><td>低</td></tr></tbody></table>
+<p>卖点一句话：<strong>&quot;生成快，审核也快&quot;——直接打剪映实测最大的痛点。</strong> 这些检查项我们自测时全部手写过（A/B 对照渲染、逐帧 diff）， 只差从&quot;排障脚本&quot;变成&quot;流水线的一步&quot;。</p>
+<h3>远期（明确后置，不进近期排期）</h3>
+<ul><li>VLM 语义打标 / &quot;找有小孩的镜头&quot;（时刻Pro L3 路线，接 SiliconFlow vision 模型，按帧配额计费）</li><li>高光集锦、多素材智能选择（依赖上一条）</li><li><code>user_style</code> 偏好沉淀（时刻Pro&quot;高光评判标准&quot;路线）</li><li>叙事规划 Agent（CutClaw 路线，前提是先有内容理解，且与&quot;脏活&quot;定位无关）</li></ul>
+<hr>
+<h2>四、明确不做（Scope Guard）</h2>
+<table><thead><tr><th>不做</th><th>原因</th></tr></thead><tbody><tr><td>AI 消除式去水印（inpainting）</td><td>视觉生成模型，效果/成本比 delogo 差，非小白刚需</td></tr><tr><td>自动选曲/音乐推荐</td><td>是推荐系统不是剪辑；用户指定 BGM 文件即可</td></tr><tr><td>创意叙事/情绪递进编排</td><td>剪映有 10 亿用户和 Seedance 底模都只做到&quot;模板感&quot;，我们不碰 60 分以上地带</td></tr><tr><td>GUI 轨道编辑器</td><td>产物定位是&quot;能直接发的成品 + 可回改的计划&quot;，不做草稿生态</td></tr><tr><td>多智能体分工（导演/剪辑/审）</td><td>单计划 + 编译器 + 程序化审阅已覆盖需求；为拆而拆是空中楼阁</td></tr></tbody></table>
+<hr>
+<h2>五、验收指标（学时刻Pro选北极星）</h2>
+<p>时刻Pro 用&quot;导出率 50%→60%&quot;和&quot;83% 直接分享&quot;证明价值，我们对应：</p>
+<table><thead><tr><th>指标</th><th>定义</th><th>目标</th></tr></thead><tbody><tr><td><strong>一次通过率</strong></td><td>用户不回改、直接接受成片的任务占比</td><td>≥ 70%</td></tr><tr><td><strong>显式报错率</strong></td><td>组合指令中漏项/越界被编译器显式报出的比例</td><td>100%（架构保证）</td></tr><tr><td><strong>审阅零遗漏</strong></td><td>成品带质量报告且无未解释的黑帧/静音</td><td>100%</td></tr><tr><td><strong>复用零重算</strong></td><td>同一素材第二次任务不重跑信号分析</td><td>100%（sidecar 缓存）</td></tr></tbody></table>
+<hr>
+<h2>六、与原报告优先级的对照（为什么这么调）</h2>
+<table><thead><tr><th>原报告</th><th>新定位下</th><th>变化原因</th></tr></thead><tbody><tr><td>P0-2 计划可编辑回改</td><td>R2（形态改为参数卡片）</td><td>保留但降位：脏活技能面比回改更刚需；且小白要卡片不要 JSON</td></tr><tr><td>P0-1 probe 2.0 内容卡片</td><td>拆分：静音/场景切分进 R1，VLM 后置</td><td>内容理解只做脏活需要的 L1；&quot;找小孩&quot;类语义任务与定位无关</td></tr><tr><td>P1-1 Skill 注册表</td><td><strong>R1 首项，最高优先</strong></td><td>定位=脏活清单化，注册表是承接一切新技能的地基</td></tr><tr><td>P1-2 多规格输出</td><td>R2</td><td>保留</td></tr><tr><td>P1-3 音频轨</td><td>拆分：BGM 混音进 R1，卡点后置</td><td>BGM 是脏活刚需；音乐卡点是创作功能</td></tr><tr><td>P2-1 程序化审阅</td><td><strong>R3，升为差异化壁垒</strong></td><td>小白不审片，必须系统兜底；且直接打剪映实测痛点</td></tr><tr><td>P2-2 模板库/批量</td><td>R2 示例任务模板（轻量版）</td><td>批量后置</td></tr><tr><td>P3 叙事规划 Agent</td><td>明确不做</td><td>与定位无关</td></tr></tbody></table>
+<hr>
+<h2>七、落地顺序建议</h2>
+<pre><code>第 1 步  Skill 注册表地基 + delogo + bgm          （纯 ffmpeg，零新依赖）
+第 2 步  校验机制补完：静态错误结构化 + dry-run 预检
+         + validate_plan + custom_filter 逃生舱     （保证第 1 步起就&quot;错得看得见&quot;）
+第 3 步  静音/场景切分信号 + sidecar 缓存           （零成本信号，解锁后两项）
+第 4 步  trim_silence + auto_xfade                （消费上一步的信号）
+第 5 步  subtitles（faster-whisper，唯一新依赖）    （装进项目 .venv）
+第 6 步  middleware 钩子（纠正建议/统计告警/危险拦截）
+第 7 步  参数卡片回改 + variants 多规格             （Web 端）
+第 8 步  审阅报告卡片                               （把自测脚本产品化）</code></pre>
+<p>每一步交付后 SmartTrimAgent 都比上一步多接一类真实的&quot;帮我干脏活&quot;需求， 且始终不偏离&quot;LLM 出意图、编译器保正确&quot;的既有骨架。</p>
+<hr>
+<h2>八、待办清单</h2>
+<blockquote>2026-09-15 汇总。勾选状态以本文件为准；括号内为对应落地步骤。</blockquote>
+<h3>P0 · 第 1 步：能力地基（纯 ffmpeg，零新依赖）✅ 已完成 2026-09-15</h3>
+<ul><li>[x] <strong>T1 Skill 注册表</strong>：新增 <code>video_editing/skills.py</code> 作单一来源；</li></ul>
+<p><code>plan_schema</code> 的效果校验改为注册表派发、<code>plan_compiler._effects_to_vf</code> 改为注册表查表、 <code>V2_SYSTEM_PROMPT</code> 由 <code>render_prompt_doc()</code> 自动拼装（占位符 <code>{EFFECTS_DOC}</code>/<code>{AUDIO_DOC}</code>）。 原 5 个 effect 全部迁入。<strong>&quot;同步三处&quot;的坑与 mirror 幻觉从结构上消失。</strong></p>
+<ul><li>[x] <strong>T2 <code>delogo</code> 去水印技能</strong>：<code>args.region = [x,y,w,h]</code>（原始素材像素坐标）；</li></ul>
+<p>校验含越界/贴边检查（delogo 需四周留白）；A/B 对照渲染验证<strong>差异 99.1% 落在指定区域内</strong>。</p>
+<ul><li>[x] <strong>T3 <code>bgm</code> 背景音乐轨技能</strong>：顶层 <code>audio</code> 对象（source/volume/fade_in/fade_out/loop/ducking）；</li></ul>
+<p>顺带修掉 v2.1 音频硬切——转场处改用 <code>acrossfade</code>，<strong>与视频 xfade 缩短量一致，同时修掉音画漂移</strong>。 上传通道放开音频（<code>AUDIO_EXT</code>），纯音频只可作 BGM（<code>has_video=false</code> 的 clip 报错拦下）。</p>
+<blockquote>验证：<code>TMP/_skills_test.py</code> 59 项全过（注册表自洽 + 旧能力回归 + delogo/bgm 正反例）； <code>TMP/_render_test.py</code> 11 项全过（真实渲染 + 逐帧 diff + 响度检测）； 真实 LLM 端到端 → <code>OUTPUT/delogo_bgm_demo.mp4</code>（回验 5.0s == 5.0s）。</blockquote>
+<h3>P0 · 第 2 步：校验机制（让错误可见）— 部分完成 2026-09-16</h3>
+<ul><li>[x] <strong>T4 静态校验错误结构化</strong>：错误信息带 plan JSON 节点路径</li></ul>
+<p>（<code>clips[i].effects[j].&lt;field&gt;</code>）。</p>
+<ul><li>[x] <strong>T4a 未知字段拒绝</strong>（本次实测缺陷的修复）：计划顶层 / output / resolution /</li></ul>
+<p>clip / effect / timeline item / transition / overlay（按 pip·text 区分允许集） 全部校验未知字段。<strong>原缺陷</strong>：模型为「2 倍速」臆造 clip 级字段 <code>speed</code>， 被静默忽略 → 成品是原速、系统却报成功。现在显式报错并触发回传重试。 effect 的 args key 白名单也收敛到注册表（<code>Skill.arg_keys</code>）。</p>
+<ul><li>[x] <strong>错误信息带可操作建议</strong>：素材不存在时直接列出 <code>INPUT/</code> 里实际有哪些文件。</li><li>[x] <strong>重试闭环下沉为共用逻辑</strong>（<code>video_agent.plan_with_retry</code>）：CLI 与 Web 共用同一套语义。</li></ul>
+<p><strong>原先只有 Web 端有重试，CLI 是单次编译。</strong> 附带三条改进： ① 停止条件「连续两次相同错误」→ 提前收手，不浪费重试次数； ② <strong>模型调用抛异常也算一次失败尝试</strong>（provider 偶发 4xx 不再抛 traceback 炸穿流水线）； ③ 回传用「原任务 + 上次计划 JSON + 错误」纯文本重建，<strong>不重放消息历史</strong> （历史里的 ToolMessage/内容块可能被 provider 拒绝）。</p>
+<ul><li>[x] <strong>T8 显式降级路径</strong>：重试耗尽后给出含全部错误的明确失败说明，<strong>绝不静默漏执行</strong>。</li><li>[ ] <strong>T5 dry-run 语法预检</strong>：<code>-t 0.1 -f lavfi</code> 假输入，按 detect/normalize/render 三段分别预检</li><li>[ ] <strong>T6 <code>validate_plan</code> 预检工具</strong>：暴露给 LLM 的&quot;试算&quot;入口，降低重试轮数</li><li>[ ] <strong>T7 <code>custom_filter</code> 逃生舱</strong>：schema 字段 + 四道闸（预检 / 沙箱约束 / 检视面板标记 / 失败回传）。</li></ul>
+<p><strong>实现要点（2026-09-17 澄清）</strong>：它是一条<strong>普通 VF 类 Skill</strong>——<code>build()</code> 直接把 <code>args.vf</code> 并进滤镜链即可，编译器无需任何特殊逻辑，复用的就是既有的 <code>_effects_to_vf()</code> 拼接。 唯一的增量是 dry-run 预检要作为新阶段（<code>precheck</code>）插在「编译完成 → 执行之前」。 ⚠️ <strong>适用边界</strong>：只允许 <strong>逐帧像素变换</strong>（<code>unsharp</code>/<code>gblur</code>/<code>vignette</code>/<code>curves</code>/<code>deband</code>/<code>deshake</code> …）， <strong>不允许改变时序的滤镜</strong>（变速 <code>setpts</code>、倒放、抽帧、循环）。原因：编译器按 <code>d = trim_end - trim_start</code> 推导时长并写死 <code>-t d</code>，改变时长的滤镜会让时间轴数学失效 → 成品时长错、音画不同步。<strong>变速率能力必须走契约路径注册</strong>，并让 <code>Skill</code> 携带 &quot;本效果会缩放时长&quot; 的标记，由编译器在推导阶段修正 <code>d_i</code> / <code>D</code>。</p>
+<ul><li>[ ] <strong>T7b <code>speed</code> 变速技能（契约路径，非逃生舱）</strong>：<code>Skill</code> 增加时长缩放标记</li></ul>
+<p>（如 <code>time_scale: 1/rate</code>），编译器的 <code>_derive()</code> 据此修正片段时长与总时长； 音频同步用 <code>atempo</code>（可串联，单级限 0.5~2.0）。</p>
+<blockquote>验证：<code>TMP/_skills_test.py</code> 92 项全过（含未知字段四层、重试闭环、异常兜底、invoke 约定回归）； 真实 LLM 自纠验证 <code>TMP/_diag_retry_real.py</code>：注入未声明字段后，模型收到回传 <strong>如实承认「当前不支持倍速快放」</strong>并删掉该字段，而非静默产出原速视频。</blockquote>
+<h3>P1 · 第 3~5 步：信号与技能扩展</h3>
+<ul><li>[ ] <strong>T9 场景切分信号</strong>：<code>select=&#x27;gt(scene,0.3)&#x27;</code> → 切点列表</li><li>[ ] <strong>T10 静音区间信号</strong>：<code>silencedetect</code> → 区间列表</li><li>[ ] <strong>T11 sidecar 缓存</strong>：落 <code>TMP/probe/&lt;hash&gt;.json</code>，<code>probe_media</code> 返回内容卡片（场景 + 静音两项）</li><li>[ ] <strong>T12 <code>trim_silence</code> 技能</strong>：静音区间 → 编译器展开 trim 序列</li><li>[ ] <strong>T13 <code>auto_xfade</code> 技能</strong>：场景切点 → 自动插 xfade</li><li>[ ] <strong>T14 <code>subtitles</code> 技能</strong>：faster-whisper（装入项目 <code>.venv</code>）→ SRT/ASS → subtitles 烧录</li></ul>
+<h3>P1 · 第 6 步：钩子</h3>
+<ul><li>[ ] <strong>T15 middleware 钩子</strong>：① 未注册 effect 的&quot;纠正建议&quot;（只建议不静默改）</li></ul>
+<p>② 统计告警（触发固化漏斗判定）③ 危险滤镜拦截</p>
+<h3>P2 · 第 7~8 步：Web 端</h3>
+<ul><li>[ ] <strong>T16 参数卡片回改</strong>：plan → 表单控件 + &quot;重新编译&quot;按钮 + <code>POST /api/compile</code>（不过 LLM）</li><li>[ ] <strong>T17 多规格 variants</strong>：<code>output</code> 改数组，横竖方一次渲染</li><li>[ ] <strong>T18 审阅报告卡片</strong>：黑帧 / 静音残留 / 打码覆盖率 / 时长断言 / 字幕轴完整性</li><li>[ ] <strong>T19 首页任务模板按钮</strong>：去水印 / 加字幕 / 打码 / 拼接四个入口</li></ul>
+<h3>P3 · 沉淀（触发式，非排期）</h3>
+<ul><li>[ ] <strong>T20 固化漏斗</strong>：反复使用且验证稳定的 <code>custom_filter</code> → 升级为注册 Skill</li></ul>
+<h3>文档</h3>
+<ul><li>[x] 补充 Skill 三层方案 + 渐进式校验 + 工具/钩子挂载点（2026-09-15 完成）</li><li>[x] 案例文档拆分为 4 篇：主报告 + 资料补充 + 时刻Pro 实现细节 + 剪映实现细节（2026-09-16）</li></ul>
+</div>
+</body>
+</html>

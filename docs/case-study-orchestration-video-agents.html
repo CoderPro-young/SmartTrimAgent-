@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>编排型视频 Agent 案例对比报告</title>
+<style>
+  :root {
+    --bg: #0f1419; --panel: #161b22; --panel2: #1c2330;
+    --fg: #d6deeb; --muted: #8a97a8; --accent: #4fa3ff;
+    --border: #2a3340; --code-bg: #0b0f14;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    line-height: 1.7; font-size: 15px;
+  }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 40px 28px 80px; }
+  h1 { font-size: 28px; border-bottom: 2px solid var(--border); padding-bottom: 14px; margin-top: 8px; }
+  h2 { font-size: 22px; margin-top: 38px; color: #fff; border-left: 4px solid var(--accent); padding-left: 12px; }
+  h3 { font-size: 18px; margin-top: 28px; color: #eaf2ff; }
+  h4 { font-size: 15px; color: var(--accent); }
+  p { margin: 12px 0; }
+  blockquote {
+    margin: 16px 0; padding: 12px 18px; background: var(--panel2);
+    border-left: 3px solid var(--accent); border-radius: 0 8px 8px 0; color: var(--muted);
+  }
+  code {
+    background: var(--code-bg); padding: 2px 6px; border-radius: 5px;
+    font-family: "SFMono-Regular", Consolas, monospace; font-size: 13px; color: #ffd9a0;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--border); border-radius: 10px;
+    padding: 16px; overflow-x: auto;
+  }
+  pre code { background: none; padding: 0; color: #cfe8ff; }
+  table {
+    border-collapse: collapse; width: 100%; margin: 18px 0; font-size: 13.5px;
+    background: var(--panel); border-radius: 8px; overflow: hidden;
+  }
+  th, td { border: 1px solid var(--border); padding: 9px 11px; text-align: left; vertical-align: top; }
+  th { background: var(--panel2); color: #fff; font-weight: 600; }
+  tr:nth-child(even) td { background: rgba(255,255,255,0.02); }
+  ul, ol { padding-left: 24px; }
+  li { margin: 6px 0; }
+  hr { border: none; border-top: 1px solid var(--border); margin: 30px 0; }
+  strong { color: #fff; }
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>编排型视频 Agent 案例对比与 SmartTrimAgent 路线启发</h1>
+<blockquote>2026-09-12 ｜ 基于 7 个公开案例的调研（FilmOS / Avid×Google / Insta360 时刻Pro / 剪映 AI 助手 / Giga 视频超级工厂 / 阿里云 ICE / CutClaw），对照 SmartTrimAgent 当前实现，输出可执行的路线建议。 所有案例均经网络检索核实，关键数字标注了来源与可信度。</blockquote>
+<hr>
+<h2>一、TL;DR（一页结论）</h2>
+<ol><li><strong>&quot;编排而非生成&quot;这个方向判断是对的，我们已经在正确的赛道上。</strong> 七个案例没有一个是靠</li></ol>
+<p>&quot;生成模型更强&quot;取胜的——FilmOS 明确说自己&quot;不拼生成模型，而是把专业团队与 AI 工具结合&quot;； Avid 的调研里 87% 的剪辑师认为 AI 的最佳角色是&quot;帮他们更高效地实现自己的创意意图&quot;。 SmartTrimAgent 的&quot;LLM 出意图、编译器保证工程正确性&quot;正是这个范式。</p>
+<ol><li><strong>但我们对素材的&quot;理解&quot;是全行业最薄的，这是与所有案例的最大差距。</strong> 我们的 probe_media</li></ol>
+<p>只返回容器元数据（时长/分辨率/编码/有无音轨）；而每一个案例在动手剪辑前都先做了一层 <strong>内容理解</strong>——转写、场景切分、高光评分、语义向量化。没有这一层，&quot;剪掉静音&quot;&quot;挑高光&quot; &quot;把 30 个视频做成集锦&quot;这类任务在我们这里根本无法表达。</p>
+<ol><li><strong>四个可以直接落地的启发</strong>（按性价比排序）：</li></ol>
+<ul><li><strong>计划可编辑回改</strong>（对应剪映的&quot;动态草稿协议&quot;）——我们的 plan JSON 天然就是&quot;草稿&quot;，</li></ul>
+<p>让用户在检视面板上改参数再重编译，不用重新问 LLM。架构已支持，改动集中在 Web UI。</p>
+<ul><li><strong>能力 Skill 注册表</strong>——我们这次开发就真实踩过&quot;新增 effect 要同步三处&quot;的坑；</li></ul>
+<p>剪映/WIMO 的 Skill 化正是解法：一处定义，同时驱动校验、编译和提示词。</p>
+<ul><li><strong>probe 2.0 内容卡片</strong>——场景切分、静音检测、人脸统计（YuNet 现成）、ASR；</li></ul>
+<p>这是解锁&quot;智能选择&quot;类任务的唯一路径。</p>
+<ul><li><strong>多规格一次渲染</strong>——对应 ICE 的时间线模板 + 阿里/剪映的横竖方多版本；</li></ul>
+<p>plan schema 的 output 改成数组即可。</p>
+<ol><li><strong>多智能体（导演/剪辑/审阅分工）暂时不是我们的瓶颈。</strong> CutClaw 的三Agent结构之所以成立，</li></ol>
+<p>是因为它先有&quot;层级化多模态分解&quot;喂给 Playwriter。<strong>先有内容理解，再谈叙事规划</strong>—— 顺序反了就是空中楼阁。</p>
+<hr>
+<h2>二、案例逐一拆解</h2>
+<h3>2.1 FilmOS（重庆永川科技片场 / 达瓦科技）——&quot;剧组大脑&quot;</h3>
+<p><strong>做什么</strong>：覆盖拆解剧本、场景效果图、动态分镜、制定执行计划、数字资产制作、视频生成、 后期剪辑的全流程 AI 系统，已参与拍摄 100+ 部短剧。</p>
+<p><strong>怎么做的（关键机制）</strong>：</p>
+<ul><li><strong>以 DeepSeek、ChatGPT 为底座</strong>训练的领域系统，不是自研生成模型。</li><li><strong>独家训练数据是&quot;负样本&quot;</strong>：120TB 影视级结构化数据来自 200+ 个真实商业项目的<strong>制作全过程</strong>——</li></ul>
+<p>一部 90 分钟的电影背后三四百分钟素材里被删掉的镜头、被推翻的方案、被改十遍的台词。 达瓦的判断是&quot;真正有价值的数据在创作过程里，记录的是创作决策，包括为什么失败&quot;。</p>
+<ul><li>数字资产（1000+ 数字资产、100+ 实景、服化道）输入系统做<strong>资源精准匹配</strong>。</li></ul>
+<p><strong>效果数字（来源：重庆日报 2026-06 专访，可信度：当事方口径）</strong>： 拆解剧本两人一两周 → 15 分钟；拍摄计划 10 天 → 10 多分钟；筹备期 2-3 个月 → 1 个月。 《离歌1999》85 集、拍摄 10 天、总成本 200 万（<strong>90% 实景真人拍摄</strong>——AI 是提效不是替代）。</p>
+<p><strong>一句话本质</strong>：把&quot;隐性制片经验&quot;（尤其是失败案例）结构化成可学习的数据资产， 让 AI 做生产组织者。</p>
+<hr>
+<h3>2.2 Avid Media Composer × Google Cloud——Agent 进驻专业工具</h3>
+<p><strong>做什么</strong>：2026-04 宣布多年战略合作，把 Gemini / Vertex AI 嵌入 Media Composer 和 Content Core；2026-09 IBC 进一步发布<strong>浏览器版 Media Composer</strong>。</p>
+<p><strong>怎么做的（关键机制）</strong>：</p>
+<ul><li><strong>Content Core</strong>（云原生内容数据平台）：素材入库时自动生成转写文本和<strong>语义描述</strong>，</li></ul>
+<p>把&quot;被动存储&quot;变成&quot;可对话检索的活性库&quot;——搜索变成自然语言对话 （&quot;找画面里有 X 动作/对白/情绪的素材&quot;）。</p>
+<ul><li><strong>Ready to Edit（Agentic 能力）</strong>：自然语言指令完成同步媒体、转写对齐对白、整理项目 bin。</li><li><strong>Media Composer 内嵌 Gemini 面板</strong>：生成 B-roll、找版权素材、自动打标/记录/翻译。</li><li>定位非常克制：<strong>AI 只接手&quot;媒体发现&quot;和&quot;时间线整理&quot;两大耗时瓶颈，剪辑决策留给人</strong>。</li></ul>
+<p><strong>效果数字（来源：Avid 官方调研，可信度：行业问卷，较可信）</strong>： 79% 的职业剪辑师已在用 AI；最高频用途是语音转文字（60%）；87% 认为 AI 的价值在于 &quot;更高效地实现自己的创意意图&quot;；63% 强调 AI 必须更深地集成进现有工作流才有用。</p>
+<p><strong>一句话本质</strong>：Agent 的落点不是替代创作，而是嵌进专业人士已经在用的工具里接管&quot;脏活&quot;。</p>
+<hr>
+<h3>2.3 影石 Insta360「时刻Pro」——消费级的云端私人剪辑师</h3>
+<p><strong>做什么</strong>：2026 年发布的云端一站式智能成片应用，用户一句 &quot;帮我剪一个跟小孩在一起的视频&quot;，一分钟内出片。</p>
+<p><strong>怎么做的（关键机制，来源：亚马逊云科技官方案例，可信度：厂商联合宣传，技术细节较实）</strong>：</p>
+<ul><li>架在 <strong>AWS Agentic AI 五层栈</strong>上：EC2 GPU/SageMaker（算力）→ Bedrock 多模型</li></ul>
+<p>（Nova/Kimi/Qwen-VL，按场景路由）→ <strong>S3 Vectors + OpenSearch 做素材向量化检索</strong> → AgentCore（智能体规模化运行）→ 基于 Kiro 构建影像 Agent 应用。</p>
+<ul><li><strong>素材先&quot;资产化&quot;</strong>：海量云端素材提取向量化数据，沉淀&quot;高光评判标准&quot;，</li></ul>
+<p>大模型基于它理解素材内容与创作意图，再做检索/编排/配乐。</p>
+<ul><li>工程指标：AgentCore 把 <strong>100 个并发成片任务从 30 分钟压到 1 分钟</strong>。</li><li>与端侧「AI 导演」（X6 相机本地 PanoMind 模型，30+ 场景、1 万小时专项数据）互补：</li></ul>
+<p>端侧做&quot;零操作自动剪&quot;，云端时刻Pro做&quot;按我的想法创作&quot;。</p>
+<p><strong>效果数字</strong>：2026 Q1 App 内 AI 剪辑功能导出率 50%（内部数据）。</p>
+<p><strong>一句话本质</strong>：内容理解（向量化的高光标准）+ 专用 Agent 基础设施（并发调度）是消费级体验的底座。</p>
+<hr>
+<h3>2.4 剪映 AI 助手——Skill 化剪辑中枢</h3>
+<p><strong>做什么</strong>：把 LUI（语言交互）引入剪辑 GUI，&quot;帮我把这几段素材剪个 Vlog，配个欢快的音乐&quot;。</p>
+<p><strong>怎么做的（关键机制，来源：极客公园评测 + 多方实测，可信度：第三方实测较多，边界描述可信）</strong>：</p>
+<ul><li><strong>多 Agent 分治 + Skill 化调度</strong>：主 Agent 理解意图，分发给剪辑/配乐/调色等&quot;专家&quot;子 Agent，</li></ul>
+<p>精准调用对应 Skill，把&quot;调亮一点&quot;映射到具体的亮度轨道参数。</p>
+<ul><li><strong>动态草稿协议（最重要的设计）</strong>：AI 不是吐一个改不了的成品视频，而是**直接在用户的剪辑</li></ul>
+<p>草稿/轨道上操作**，每一步可见、可回退、可微调，云端与客户端实时同步。</p>
+<ul><li><strong>反问与反思机制</strong>：指令模糊或执行失败时主动确认需求，而不是强行乱做。</li></ul>
+<p><strong>实测边界（第三方评测，很有参考价值）</strong>： 组合指令（&quot;第三段调慢+降音量+加字幕&quot;）常只执行其中一两项；去水印限 30 秒内； 成片&quot;结构完整但模板感偏重&quot;，情绪递进和风格仍需人把关。</p>
+<p><strong>一句话本质</strong>：Skill 是标准化的执行单元，草稿是可回改的中间产物——两者共同保证&quot;人机共创&quot;而非黑盒。</p>
+<hr>
+<h3>2.5 Giga 视频超级工厂（腾讯云）——以订单为核心的量产线</h3>
+<p><strong>做什么</strong>：面向新闻/电商/文旅等场景的短视频批量生产平台。</p>
+<p><strong>怎么做的（关键机制，来源：腾讯云开发者社区，可信度：厂商材料）</strong>：</p>
+<ul><li><strong>以&quot;订单&quot;为核心抽象</strong>：用户提交订单（选场景智能体），系统自动跑完</li></ul>
+<p>脚本生成 → 数字人播报 → 多语言翻译 → 多渠道适配的完整流水线。</p>
+<ul><li><strong>场景专属精调模型</strong>（GigaLM，基于混元）替代通用模型，深度理解该场景的剪辑规则与脚本语义。</li><li><strong>多元资产向量化管理</strong>：视频/音频/图片/数字人音色统一 n 维向量化，语义检索与装配。</li><li>合规是第一约束：央视频两会报道的诉求是&quot;内容合法、合规、价值观一致&quot;。</li></ul>
+<p><strong>效果数字（厂商口径）</strong>：单条产线月产 100-140 条（约人工 3-4 倍）； 1 万条视频产线成本 18 万 vs 人工 36 万。央视频 2024 两会（政府工作报告智能拆条+多平台衍生）、 解放军新闻传播中心&quot;中国军号&quot;（图文生视频）落地。</p>
+<p><strong>一句话本质</strong>：把&quot;订单&quot;作为编排单元，用垂直精调模型换确定性与合规性。</p>
+<hr>
+<h3>2.6 阿里云 ICE 批量制作产线——时间线模板化</h3>
+<p><strong>做什么</strong>：智能媒体生产 ICE（Intelligent Cloud Editor）上搭建的 素材处理 → AI 混合剪辑 → 字幕配音 → 批量成片 → 矩阵分发 五模块产线。</p>
+<p><strong>怎么做的（关键机制，来源：阿里云开发者社区实践文章，可信度：用户实践 + 官方产品文档）</strong>：</p>
+<ul><li><strong>时间线模板是核心资产</strong>：同一时间线模板 + 不同素材 ID = 不同版本；</li></ul>
+<p><strong>横 16:9 / 竖 9:16 / 方 1:1 一次渲染输出</strong>；异步任务队列并发。</p>
+<ul><li>内置智能能力：智能拆条（按 PPT 标题/场景/关键词切长视频）、智能裁剪（横转竖跟随主体）、</li></ul>
+<p>人像抠图、绿幕、智能字幕/配音。</p>
+<ul><li>模板工厂：AE 导出高级模板，替换文字素材即可批量生产复杂动效。</li></ul>
+<p><strong>效果数字（实践方口径）</strong>：单主题多版本制作从天级 → 小时级；字幕配音环节人工介入减少 80%+。</p>
+<p><strong>一句话本质</strong>：<strong>声明式时间线（模板）让&quot;一次编排&quot;可以无限次复用</strong>——这正是我们 plan JSON 的形态。</p>
+<hr>
+<h3>2.7 CutClaw（学术，arXiv 2603.29664，北交大/大湾区大学/腾讯 ARC Lab）</h3>
+<p><strong>做什么</strong>：把数小时原始素材剪成音乐同步的短视频的<strong>自治多智能体</strong>框架，代码开源。</p>
+<p><strong>怎么做的（关键机制，可信度：论文 + 消融实验，机制描述最严谨的一个）</strong>：</p>
+<ul><li><strong>层级化多模态分解</strong>（一切的前提）：shot→scene 聚合，<strong>音频感知的分段</strong>，</li></ul>
+<p>同时捕捉细粒度特征与全局结构。</p>
+<ul><li><strong>Playwriter Agent</strong>：编排整体叙事流，把长线剧情结构化，<strong>把视觉场景锚定到音乐转折点</strong>。</li><li><strong>Editor Agent</strong>：ReAct 式搜索，把计划中的每个镜头在候选池里做时间/语义对齐，</li></ul>
+<p>迭代精修，搜索空间可自适应扩展避免死胡同。</p>
+<ul><li><strong>Reviewer Agent</strong>：严格多准则门禁——主角在场、时间不重叠、时长保真、</li></ul>
+<p>画面完整性高于广播级阈值。三者协作只让高质量片段进最终时间线。</p>
+<p><strong>效果数字</strong>：24 小时素材基准上，视觉质量 +5.1、指令遵循 +7.4， 与音乐的同步误差 ≤0.1s；2000 票用户研究中 48.8% 认为最像人剪的（第二名的一半）。 <strong>消融实验证明：音频感知分段和 Editor/Reviewer 层级缺一不可。</strong></p>
+<p><strong>一句话本质</strong>：多智能体分工的前提是先有结构化的多模态分解喂料；审阅 Agent 用硬准则而非感觉。</p>
+<hr>
+<h2>三、横向对比</h2>
+<table><thead><tr><th>维度</th><th>FilmOS</th><th>Avid×G</th><th>时刻Pro</th><th>剪映</th><th>Giga</th><th>ICE</th><th>CutClaw</th><th><strong>SmartTrimAgent</strong></th></tr></thead><tbody><tr><td>内容理解层</td><td>剧本/分镜理解</td><td>转写+语义描述</td><td>多模态+向量检索</td><td>素材分析</td><td>镜头分析</td><td>拆条/主体跟随</td><td>层级多模态分解</td><td><strong>仅容器元数据</strong></td></tr><tr><td>任务拆解</td><td>剧本→场次→计划</td><td>编辑下指令</td><td>需求→检索→编排</td><td>主Agent→子Agent</td><td>订单→流水线</td><td>模板实例化</td><td>Play→Edit→Review</td><td><strong>一句话→单计划</strong></td></tr><tr><td>执行方式</td><td>生成+人工</td><td>嵌入专业工具</td><td>云端流水线</td><td>Skill 调度</td><td>场景模型</td><td>时间线渲染</td><td>MLLM 检索+渲染</td><td><strong>LLM出计划→编译器</strong></td></tr><tr><td>产物形态</td><td>执行方案/成片</td><td>可编辑工程</td><td>成片</td><td><strong>可编辑草稿</strong></td><td>批量成片</td><td>批量成片</td><td>成片</td><td>成片（mp4）</td></tr><tr><td>多规格输出</td><td>–</td><td>–</td><td>平台适配</td><td>三画幅导出</td><td>多渠道适配</td><td><strong>一次三画幅</strong></td><td>–</td><td><strong>单一输出</strong></td></tr><tr><td>音频能力</td><td>–</td><td>Pro Tools AI</td><td><strong>配乐匹配</strong></td><td>智能踩点/人声分离</td><td>多语言配音</td><td>字幕配音</td><td><strong>音乐同步为核心</strong></td><td><strong>硬切，无BGM</strong></td></tr><tr><td>质量保障</td><td>人工审</td><td>人工审</td><td>–</td><td>反思/反问</td><td>合规审查</td><td>–</td><td><strong>Reviewer 硬门禁</strong></td><td>ffprobe 回验+重试</td></tr><tr><td>规模</td><td>100+部</td><td>–</td><td>千万级并发</td><td>10亿用户</td><td>月产百条/线</td><td>批量队列</td><td>离线</td><td>单任务锁</td></tr></tbody></table>
+<p><strong>共同点（也是对我们的验证）</strong>：所有案例都把&quot;执行层&quot;做成了<strong>确定性的工程系统</strong>（模板、 时间线、Skill、流水线），LLM 只负责意图与组织——这正是我们&quot;LLM 不写 ffmpeg&quot;的路线。</p>
+<p><strong>我们的三个空白</strong>：内容理解、可回改的中间产物、多规格输出。</p>
+<hr>
+<h2>四、对照 SmartTrimAgent：我们有什么、缺什么</h2>
+<h3>4.1 我们已经做对的（值得保持并强化）</h3>
+<pre><code>当前架构（实测已跑通的部分）：
+用户自然语言 ──► Planner Agent(LLM) ──► 编辑计划 JSON ──► plan_compiler
+                   │ ls/probe_media      │ ① schema 白名单+语义校验
+                   │ submit_plan         │ ② 时间轴数学 d_i/S_i/D/offset
+                   ▼                     │ ③ 生成 ffmpeg 命令序列
+              校验失败回传重试 ──────────►│ ④ 执行 ⑤ ffprobe 回验
+                                         ▼
+                                    OUTPUT/*.mp4 + Web 检视面板</code></pre>
+<ul><li><strong>意图与执行分离</strong>：LLM 从不手写 ffmpeg，编译器做确定性换算与校验——</li></ul>
+<p>这与 Avid&quot;AI 只接管脏活&quot;、剪映&quot;Skill 化执行&quot;、ICE&quot;时间线模板&quot;是同一设计哲学， 而且我们的<strong>可验证性</strong>（回验时长、A/B 对照渲染）比多数案例公开披露的还严。</p>
+<ul><li><strong>计划即声明式时间线</strong>：plan JSON 本质上就是 ICE 的&quot;时间线模板&quot;——这是被验证过的</li></ul>
+<p>正确抽象，只是我们还没把它当&quot;资产&quot;用（见 5.3）。</p>
+<ul><li><strong>校验错误回传 LLM 重出计划</strong>：等价于剪映的&quot;反思机制&quot;的程序化版本，已在 Web 端实现。</li><li><strong>流水线透明</strong>：检视面板把计划/换算/命令/日志全量展示——Avid 调研里 63% 的用户要的</li></ul>
+<p>就是&quot;集成进工作流且过程可见&quot;。</p>
+<h3>4.2 差距清单（按严重程度）</h3>
+<table><thead><tr><th>#</th><th>差距</th><th>现状</th><th>案例对照</th><th>后果</th></tr></thead><tbody><tr><td>1</td><td><strong>无内容理解</strong></td><td>probe_media 只读容器元数据</td><td>全部七个案例</td><td>&quot;剪掉静音/挑高光/做集锦/找有小孩的片段&quot;无法表达</td></tr><tr><td>2</td><td><strong>产物不可回改</strong></td><td>只输出最终 mp4</td><td>剪映动态草稿协议</td><td>用户想微调 trim 点只能重新提问，LLM 结果不稳定</td></tr><tr><td>3</td><td><strong>单一输出规格</strong></td><td>output 是单个分辨率对象</td><td>ICE 一次三画幅、剪映三版本导出</td><td>无法做&quot;横竖方一次出&quot;的矩阵分发</td></tr><tr><td>4</td><td><strong>音频能力弱</strong></td><td>转场处音频硬切（v2.1 已知 TODO），无 BGM/ducking/卡点</td><td>CutClaw 以音乐同步为核心、剪映智能踩点</td><td>消费级成片最影响观感的维度缺失</td></tr><tr><td>5</td><td><strong>能力扩展要改三处</strong></td><td>EFFECTS 白名单 + 编译器翻译 + 提示词手工同步（本次已真实踩坑）</td><td>剪映/WIMO Skill 化</td><td>新增能力成本高、易漏</td></tr><tr><td>6</td><td><strong>无审阅环节</strong></td><td>只有时长回验</td><td>CutClaw Reviewer 硬门禁</td><td>黑帧/无声/打码漏检等质量问题靠人眼</td></tr><tr><td>7</td><td><strong>单任务串行</strong></td><td>RUN_LOCK 全局锁，无任务持久化</td><td>Giga 订单队列</td><td>无法批量、无法复用历史计划</td></tr></tbody></table>
+<hr>
+<h2>五、路线建议（按性价比排序）</h2>
+<h3>P0-1 probe 2.0：内容卡片（解锁&quot;智能选择&quot;类任务）★★★★★</h3>
+<p><strong>做什么</strong>：probe_media 升级为返回&quot;内容卡片&quot;，全部用现成工具实现，无需大模型：</p>
+<table><thead><tr><th>分析项</th><th>实现方式</th><th>成本</th></tr></thead><tbody><tr><td>场景切分</td><td><code>ffmpeg select=&#x27;gt(scene,0.3)&#x27;</code> 或 scdet</td><td>~0</td></tr><tr><td>静音/响度</td><td><code>silencedetect</code> / <code>astats</code>，输出静音区间列表</td><td>~0</td></tr><tr><td>人脸统计</td><td>YuNet（已集成），输出每帧框数+平均脸宽</td><td>已有</td></tr><tr><td>运动能量</td><td>帧间差分均值（cv2，已有依赖）</td><td>低</td></tr><tr><td>语音转写</td><td>faster-whisper 本地 或 API</td><td>中</td></tr></tbody></table>
+<p><strong>为什么优先</strong>：这是唯一能改变&quot;任务表达上限&quot;的一项。有了静音区间列表，&quot;剪掉静音&quot;就是 编译器一次循环；有了场景列表+人脸统计，&quot;把 30 个视频做成集锦&quot;才有可依据的素材池。 七个案例无一例外都有这一层。CutClaw 的消融实验进一步证明<strong>音频感知分段</strong>是效果的关键贡献者。</p>
+<p><strong>schema 配套</strong>：新增 <code>&quot;auto_select&quot;: {&quot;criteria&quot;: &quot;no_silence+has_face&quot;, &quot;budget&quot;: 60}</code>， 由编译器展开成具体 trim 序列——选择逻辑放编译器而不是 LLM，延续&quot;工程正确性归程序&quot;的路线。</p>
+<h3>P0-2 计划可编辑回改（我们的&quot;动态草稿协议&quot;）★★★★★</h3>
+<p><strong>做什么</strong>：Web 检视面板里的计划 JSON 从&quot;展示&quot;升级为&quot;可编辑表单&quot;——改 trim 点/转场时长/ 花字内容/效果参数，点&quot;重新编译&quot;直接走 plan_compiler，<strong>不过 LLM</strong>。</p>
+<p><strong>为什么便宜</strong>：编译器本来就是确定性的，plan JSON 就是草稿。改动集中在 index.html （把 JSON 树换成表单控件 + 一个&quot;recompile&quot;按钮 + 后端 <code>/api/compile</code> 端点，约百行）。</p>
+<p><strong>为什么重要</strong>：剪映把&quot;AI 直接在草稿上动手、每步可回退&quot;列为核心突破不是偶然—— 它把 LLM 的不稳定性隔离在&quot;生成初稿&quot;这一步，后续迭代交给确定性系统和人。 我们的架构天然支持这个模式，却只差最后一步 UI。<strong>这是投入产出比最高的一项。</strong></p>
+<h3>P1-1 能力 Skill 注册表（修掉&quot;三处同步&quot;）★★★★</h3>
+<p><strong>做什么</strong>：把 effect 定义收敛为单一来源：</p>
+<pre><code class="lang-python">SKILLS = {
+  &quot;face_mosaic&quot;: Skill(
+      args_schema={&quot;mode&quot;: ..., &quot;score_threshold&quot;: (0.3, 0.99)},
+      to_vf=...,            # 编译器翻译
+      prompt_doc=&quot;...&quot;,     # 自动拼进 V2_SYSTEM_PROMPT
+  ),
+}</code></pre>
+<p>schema 校验、命令生成、提示词文档全部从注册表派生。本次开发中&quot;模型猜出 mirror 这个 不存在的效果名&quot;就是提示词与白名单脱节的直接后果——这个坑值得用结构消除而不是记忆。 对照：剪映的 Skill 库、微盟 WIMO 的 30+ 行业 Skill 是同一思路的规模化版本。</p>
+<h3>P1-2 多规格一次渲染 ★★★★</h3>
+<p><strong>做什么</strong>：plan schema 的 <code>output</code> 从单对象改为 variants 数组， <code>[{1280x720}, {1080x1920, crop: &quot;follow_subject&quot;}, {1080x1080}]</code>，编译器循环实例化。 智能裁剪（横转竖跟随主体）可以用 YuNet 的最大脸框/最大运动块作为跟随目标，复用现有依赖。</p>
+<p><strong>对照</strong>：ICE 的&quot;同一时间线模板一次渲染三画幅，人工介入减少 80%&quot;是这条路收益的最好证明。</p>
+<h3>P1-3 音频轨 ★★★☆</h3>
+<p><strong>做什么</strong>：schema 增加独立 audio 轨——BGM（音量/ducking）、转场 acrossfade（v2.1 既定计划）、 可选卡点（<code>aevalsrc</code>/节拍检测输出 cut 点候选，与 P0-1 的响度分析复用）。</p>
+<p><strong>对照</strong>：CutClaw 的存在本身说明&quot;音乐同步&quot;是编排型剪辑的核心价值维度之一； 剪映的智能踩点是高频功能。我们目前是全案例中音频最弱的。</p>
+<h3>P2-1 程序化审阅 Agent（把验证产品化）★★★</h3>
+<p><strong>做什么</strong>：渲染完成后自动跑一组确定性检查并出报告： 黑帧检测、静音检测、时长偏差、打码覆盖率（对照 detect 阶段的框数）、分辨率/帧率断言。 工具我们这次自测已经全部手写过（A/B 对照渲染、逐帧 diff、缩略图）—— <strong>只差把它们从&quot;我的排障脚本&quot;变成&quot;流水线的一步&quot;</strong>。 对照：CutClaw 的 Reviewer 用&quot;多准则硬门禁&quot;，明确不是让 LLM 凭感觉审。</p>
+<h3>P2-2 计划模板库 + 批量 ★★★</h3>
+<p><strong>做什么</strong>：把成功的 plan JSON 存为模板（参数化素材位），支持&quot;换个素材重跑&quot;和批量提交。 这就是我们自己的&quot;模板工厂/Giga 订单&quot;。价值在 P0/P1 之后才显现。</p>
+<h3>P3 叙事规划 Agent（导演/编剧分工）★★</h3>
+<p>CutClaw 的 Playwriter→Editor→Reviewer 分工值得借鉴，但<strong>前提是 P0-1 的内容理解先存在</strong>—— 没有场景列表和高光评分，&quot;编剧 Agent&quot;无事可规划。建议放在内容卡片跑通之后， 且第一版可以只是&quot;编译器里的自动选择策略&quot;，不必引入第二个 LLM。</p>
+<hr>
+<h2>六、对原始材料的三点修正</h2>
+<ol><li><strong>&quot;微盟 WIMO 封装 30+ 行业 Skill&quot;</strong> 与视频处理无直接关系（它是商业 SaaS 的能力封装），</li></ol>
+<p>有效的是<strong>模式借鉴</strong>（Skill 化），不是视频领域验证。</p>
+<ol><li><strong>FilmOS/Giga 的效率数字均为当事方口径</strong>（重庆日报专访、腾讯云开发者社区），</li></ol>
+<p>方向可信、幅度需打折；Avid 的问卷（79%/87%/63%）是目前最可信的行业信号； CutClaw 有论文、消融和开源代码，机制层面的结论最扎实。</p>
+<ol><li>原材料说&quot;编排型 Agent 的核心价值不在于生成，而在组织与执行&quot;——<strong>判断正确</strong>，</li></ol>
+<p>但需要补一半：<strong>组织的前提是理解</strong>。七个案例的编排能力全部建立在内容理解层之上， 这正是我们当前最薄的一环，也是本报告把 probe 2.0 排在 P0 的原因。</p>
+<hr>
+<h2>七、下一步建议的最小闭环</h2>
+<p>如果只做一件事：<strong>P0-2（计划可编辑回改）</strong>，一周内可交付，且立即把产品从 &quot;一次性生成器&quot;变成&quot;可迭代的剪辑工作台&quot;。</p>
+<p>如果做三件事，顺序是：<strong>P0-2 → P0-1（先静音+场景两个零成本分析）→ P1-1</strong>。 这三步完成后，SmartTrimAgent 就具备了与上述案例同构的三层： 内容理解层（probe 2.0）、编排层（LLM+计划）、确定性执行层（编译器+Skill 注册表）， 后续每一项（多规格、音频、批量、多 Agent）都是在既定骨架上增量叠加。</p>
+</div>
+</body>
+</html>

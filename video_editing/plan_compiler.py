@@ -18,8 +18,12 @@ from dataclasses import dataclass, field
 
 import ffmpeg_exec
 from plan_schema import clip_duration, validate_plan
+from skills import is_prepass, is_vf, get_skill
 
 FONT_PATH = "C:/Windows/Fonts/msyh.ttc"
+# ffmpeg 的 filtergraph 用 ':' 分隔选项，Windows 路径里的盘符冒号必须转义，
+# 否则 drawtext 解析失败（报 "Both text and text file provided"）。
+FONT_PATH_FILTER = FONT_PATH.replace(":", "\\:")
 MARGIN = 20        # 画中画贴边距
 TEXT_MARGIN = 40   # 花字贴边距
 
@@ -34,9 +38,9 @@ class CompileError(Exception):
 
 @dataclass
 class Command:
-    """一条待执行的 ffmpeg 命令：stage 区分归一化/渲染两个阶段。"""
+    """一条待执行的命令：stage 区分检测/归一化/渲染三个阶段。"""
 
-    stage: str          # "normalize" | "render"
+    stage: str          # "detect" | "normalize" | "render"
     description: str
     argv: list[str]
 
@@ -65,25 +69,39 @@ class CompileResult:
 
 
 def _effects_to_vf(effects: list) -> str:
-    """把计划里的 effects 列表翻译成 ffmpeg -vf 滤镜串（如 `hflip,eq=...`）。"""
+    """把计划里的 effects 列表翻译成 ffmpeg -vf 滤镜串（如 `hflip,eq=...`）。
+
+    翻译函数来自 skills 注册表（skill.build），本模块不再硬编码效果名。
+    PREPASS 类（face_mosaic）不并入滤镜链，由 _prepass_commands 单独处理。
+    """
     parts = []
     for e in effects:
-        name = e["name"]
-        args = e.get("args") or {}
-        if name == "hflip":
-            parts.append("hflip")
-        elif name == "vflip":
-            parts.append("vflip")
-        elif name == "transpose":
-            parts.append(f"transpose={args.get('dir', 1)}")
-        elif name == "eq":
-            kv = {k: v for k, v in args.items()
-                  if k in ("brightness", "contrast", "saturation")}
-            if kv:
-                parts.append("eq=" + ":".join(f"{k}={v}" for k, v in kv.items()))
-            else:
-                parts.append("eq")
+        name = e.get("name")
+        skill = get_skill(name)
+        if skill is None or skill.build is None:
+            continue
+        expr = skill.build(e.get("args") or {})
+        if expr:
+            parts.append(expr)
     return ",".join(parts)
+
+
+def _prepass_commands(cid: str, src: str, effects: list) -> tuple[list[Command], str]:
+    """执行 PREPASS 类技能（如人脸打码），返回 (命令列表, 替换后的输入路径)。
+
+    产出 TMP/{cid}_<skill>.mp4，供后续归一化作为输入。多个 prepass 顺序串联。
+    """
+    commands: list[Command] = []
+    for eff in effects:
+        name = eff.get("name")
+        skill = get_skill(name)
+        if skill is None or skill.prepass is None:
+            continue
+        out = f"TMP/{cid}_{name}.mp4"
+        argv = skill.prepass(src, out, eff.get("args") or {})
+        commands.append(Command("detect", f"{name} 前置处理 {cid} ({src})", argv))
+        src = out
+    return commands, src
 
 
 def _clip_by_id(plan: dict, cid: str) -> dict:
@@ -200,9 +218,14 @@ def _normalize_commands(plan: dict, math: dict) -> tuple[list[Command], dict]:
             continue
         seen.add(cid)
         src = c["source"]
+        effects = c.get("effects") or []
+        # PREPASS 类技能（face_mosaic 等）：先插入前置命令，归一化输入改为其中间产物
+        prepass_cmds, src = _prepass_commands(cid, src, effects)
+        commands.extend(prepass_cmds)
+        filter_effects = [e for e in effects if is_vf(e.get("name"))]
         out = f"TMP/{cid}_norm.mp4"
         kind = c["kind"]
-        vf = _effects_to_vf(c.get("effects") or [])
+        vf = _effects_to_vf(filter_effects)
         vf += ("," if vf else "") + (
             f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
             f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2,fps={fps},format=yuv420p,setsar=1"
@@ -253,31 +276,116 @@ def _overlay_abs(math: dict, ov: dict) -> tuple[float, float]:
     return start, _round2(start + ov["duration"])
 
 
+# --------------------------------------------------------------------------- #
+# 音频：BGM 混音（v2.2）
+# --------------------------------------------------------------------------- #
+
+def _bgm_input_args(audio: dict) -> list[str]:
+    """BGM 的输入参数。默认循环：短音乐自动铺满整条时间轴。"""
+    args: list[str] = []
+    if audio.get("loop", True):
+        args += ["-stream_loop", "-1"]
+    args += ["-i", audio["source"]]
+    return args
+
+
+def _mix_bgm(filters: list[str], voice: str, audio: dict,
+             bgm_idx: int, D: float) -> str:
+    """把 BGM 混到人声轨上，返回混音后的标签。
+
+    voice  —— 已对齐到 D 的原始音频标签，如 "[0:a]" / "[acat]"
+    bgm_idx—— BGM 在 -i 输入里的下标
+
+    处理顺序：裁到 D → 音量 → 淡入淡出 → (可选)侧链闪避 → amix。
+    """
+    vol = audio.get("volume", 0.3)
+    fade_in = audio.get("fade_in") or 0
+    fade_out = audio.get("fade_out") or 0
+
+    chain = [f"atrim=0:{D}", "asetpts=PTS-STARTPTS"]
+    if vol != 1:
+        chain.append(f"volume={vol}")
+    if fade_in:
+        chain.append(f"afade=t=in:st=0:d={fade_in}")
+    if fade_out:
+        st = _round2(max(0.0, D - fade_out))
+        chain.append(f"afade=t=out:st={st}:d={fade_out}")
+    filters.append(f"[{bgm_idx}:a]" + ",".join(chain) + "[bg]")
+
+    if audio.get("ducking"):
+        # 侧链压缩：用原始人声当触发信号，讲话时自动压低 BGM
+        filters.append(f"{voice}asplit=2[avo][asc]")
+        filters.append(
+            "[bg][asc]sidechaincompress="
+            "threshold=0.05:ratio=8:attack=20:release=300[bgd]"
+        )
+        filters.append("[avo][bgd]amix=inputs=2:duration=first:normalize=0[aout]")
+    else:
+        filters.append(f"{voice}[bg]amix=inputs=2:duration=first:normalize=0[aout]")
+    return "[aout]"
+
+
+def _audio_segments(plan: dict, math: dict) -> tuple[list[str], list[list[str]], list[str]]:
+    """按"是否有转场"把时间轴切成音频段，与视频段结构完全一致。
+
+    返回 (滤镜片段, 分段, 段末标签)；段内用 acrossfade、段间用 concat——
+    这样音频与视频的 xfade 缩短量一致，**顺带修掉 v2.1 的音频硬切与音画漂移**。
+    """
+    order = math["order"]
+    segments: list[list[str]] = []
+    cur = [order[0]]
+    for i in range(1, len(order)):
+        if math["transitions"].get(i):
+            cur.append(order[i])
+        else:
+            segments.append(cur)
+            cur = [order[i]]
+    segments.append(cur)
+
+    filters: list[str] = []
+    labels: list[str] = []
+    for seg in segments:
+        label = f"[{order.index(seg[0])}:a]"
+        for cid in seg[1:]:
+            idx = order.index(cid)
+            t = math["transitions"][idx]
+            new = f"[ax{idx}]"
+            filters.append(
+                f"{label}[{idx}:a]acrossfade=d={t['duration']}:c1=tri:c2=tri{new}"
+            )
+            label = new
+        labels.append(label)
+    return filters, segments, labels
+
+
 def _render_no_transition(plan: dict, math: dict) -> tuple[list[Command], dict]:
-    """快速路径：concat -c copy（有 overlay 则再加一步 overlay 渲染）。"""
+    """快速路径：concat -c copy。
+
+    只有「无 overlay 且无 BGM」才真正走单条 copy；
+    有 overlay 或 BGM 时先 concat 到中间件，再一条 filter_complex 收尾
+    （视频叠 overlay / 音频混 BGM 可同一条命令完成）。
+    """
     W = math["width"]
     out = plan["output"]["filename"]
+    overlays = plan.get("overlays") or []
+    audio = plan.get("audio")
     sidecars: dict[str, str] = {}
     commands: list[Command] = []
 
-    if not plan.get("overlays"):
+    if not overlays and not audio:
         argv = ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
                 "-i", "TMP/concat_list.txt", "-c", "copy", out]
         commands.append(Command("render", "拼接（快速路径 concat -c copy）", argv))
         return commands, sidecars
 
-    # 有 overlay：先 concat copy 到中间，再叠加渲染
-    mid = "TMP/_concat.mp4"
-    commands.append(Command("render", "拼接（concat -c copy）",
-                            ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
-                             "-i", "TMP/concat_list.txt", "-c", "copy", mid]))
-
-    inputs = ["-i", mid]
+    # 有 overlay 或 BGM：concat demuxer 直接当 0 号输入，
+    # 一条 filter_complex 同时完成叠图与混音（不落中间文件）
+    inputs = ["-f", "concat", "-safe", "0", "-i", "TMP/concat_list.txt"]
     filters: list[str] = []
     cur = "[0:v]"
     pip_idx = 1  # 0 号输入是拼接结果，pip 从 1 开始
     step = 0
-    for ov in plan["overlays"]:
+    for ov in overlays:
         ts, te = _overlay_abs(math, ov)
         enable = f"between(t,{ts},{te})"
         step += 1
@@ -302,17 +410,34 @@ def _render_no_transition(plan: dict, math: dict) -> tuple[list[Command], dict]:
             x, y = _drawtext_pos(ov.get("position", "center"))
             fs = ov.get("font_size", 48)
             color = ov.get("color", "#FFFFFF")
-            font = f"fontfile='{FONT_PATH}':" if os.path.isfile(FONT_PATH) else ""
+            font = f"fontfile='{FONT_PATH_FILTER}':" if os.path.isfile(FONT_PATH) else ""
             filters.append(
                 f"{cur}drawtext={font}textfile='{txt_path}':fontsize={fs}:"
                 f"fontcolor={color}:x={x}:y={y}:enable='{enable}'{label}"
             )
         cur = label
-    filters.append(f"{cur}copy[vout]")
-    argv = ["ffmpeg", "-y"] + inputs + ["-filter_complex", ";".join(filters),
-                     "-map", "[vout]", "-map", "0:a", "-c:v", "libx264", "-crf", "20",
-                     "-c:a", "copy", out]
-    commands.append(Command("render", "叠加渲染（overlay/drawtext）", argv))
+
+    # 视频：有 overlay 走滤镜重编码，否则原样 copy
+    if overlays:
+        filters.append(f"{cur}copy[vout]")
+        vmap, vcodec = "[vout]", ["-c:v", "libx264", "-crf", "20"]
+    else:
+        vmap, vcodec = "0:v", ["-c:v", "copy"]
+
+    # 音频：有 BGM 则混音（acodec 重编），否则原样 copy
+    if audio:
+        bgm_idx = pip_idx  # pip 之后的第一个输入
+        inputs += _bgm_input_args(audio)
+        amap = _mix_bgm(filters, "[0:a]", audio, bgm_idx, math["D"])
+        acodec = ["-c:a", "aac"]
+    else:
+        amap, acodec = "0:a", ["-c:a", "copy"]
+
+    argv = (["ffmpeg", "-y"] + inputs
+            + ["-filter_complex", ";".join(filters), "-map", vmap, "-map", amap]
+            + vcodec + acodec + [out])
+    desc = "叠加渲染（overlay/drawtext）" if overlays else "音频混音（BGM）"
+    commands.append(Command("render", desc, argv))
     return commands, sidecars
 
 
@@ -394,7 +519,7 @@ def _render_with_transition(plan: dict, math: dict) -> tuple[list[Command], dict
             x, y = _drawtext_pos(ov.get("position", "center"))
             fs = ov.get("font_size", 48)
             color = ov.get("color", "#FFFFFF")
-            font = f"fontfile='{FONT_PATH}':" if os.path.isfile(FONT_PATH) else ""
+            font = f"fontfile='{FONT_PATH_FILTER}':" if os.path.isfile(FONT_PATH) else ""
             filters.append(
                 f"{cur}drawtext={font}textfile='{txt_path}':fontsize={fs}:"
                 f"fontcolor={color}:x={x}:y={y}:enable='{enable}'{label}"
@@ -404,17 +529,28 @@ def _render_with_transition(plan: dict, math: dict) -> tuple[list[Command], dict
     vout = "[vout]"
     filters.append(f"{cur}copy{vout}")
 
-    # 3) 音频：所有片段 concat 后 atrim 到 D（硬切语义）
-    a_in = "".join(f"[{i}:a]" for i in range(n_clips))
-    filters.append(
-        f"{a_in}concat=n={n_clips}:v=0:a=1[a0];"
-        f"[a0]atrim=0:{math['D']},asetpts=PTS-STARTPTS[aout]"
-    )
+    # 3) 音频：与视频同构分段（段内 acrossfade、段间 concat）
+    #    这样音频与视频被 xfade 缩短的量一致 —— 修掉 v2.1 的音频硬切与音画漂移
+    a_filters, _segs, a_labels = _audio_segments(plan, math)
+    filters.extend(a_filters)
+    if len(a_labels) == 1:
+        a_cur = a_labels[0]
+    else:
+        filters.append(f"{''.join(a_labels)}concat=n={len(a_labels)}:v=0:a=1[acat]")
+        a_cur = "[acat]"
+    filters.append(f"{a_cur}atrim=0:{math['D']},asetpts=PTS-STARTPTS[avoice]")
+
+    audio = plan.get("audio")
+    if audio:
+        inputs += _bgm_input_args(audio)
+        amap = _mix_bgm(filters, "[avoice]", audio, pip_i, math["D"])
+    else:
+        amap = "[avoice]"
 
     argv = ["ffmpeg", "-y"] + inputs + ["-filter_complex", ";".join(filters),
-                     "-map", vout, "-map", "[aout]",
+                     "-map", vout, "-map", amap,
                      "-c:v", "libx264", "-crf", "20", "-c:a", "aac", out]
-    commands = [Command("render", "转场渲染（xfade 链式 + 叠加 + 音频拼接）", argv)]
+    commands = [Command("render", "转场渲染（xfade 链式 + 叠加 + 音频交错淡化）", argv)]
     return commands, sidecars
 
 

@@ -47,28 +47,87 @@ pip install -r requirements.txt
 
 ## 快速开始
 
+> **`INPUT/` 默认是空的**——素材由你自己提供（Web 界面拖拽上传，或手动放进 `INPUT/`）。
+> 想看仓库原始的演示素材，用 `git checkout -- INPUT/` 取回（`sample.mp4` / `test.png` / `logo.png`）。
+
 ```bash
 # 1) 配置：复制模板为 .env，填入模型 AK（.env 已被 gitignore，不会提交）
 cp .env.example .env
 
-# 2) 运行默认演示（多素材拼接 + 转场 + 画中画 + 花字）
-python video_editing/video_demo.py
-
-# 3) 或用自然语言自定义任务
-python video_editing/video_demo.py "把 sample.mp4 前 8 秒和 test.png(3秒) 用 fade 转场拼接，输出 720p"
+# 2) 把自己的素材放进 INPUT/，然后用自然语言下任务
+python video_editing/video_demo.py "把 INPUT/my.mp4 转成 720p，画面水平镜像，输出到 OUTPUT/out.mp4"
+python video_editing/video_demo.py "把 INPUT/a.mp4 和 INPUT/b.mp4 拼接，中间加 0.5 秒 dissolve 转场"
 ```
+
+不带参数运行 `python video_editing/video_demo.py` 会走「默认演示任务」（多素材拼接 + 转场 +
+画中画 + 花字），它需要上面那三个示例素材；缺失时脚本会直接提示，不会让 agent 空转。
 
 > 安装 ffmpeg 后即可真实渲染：Windows `winget install ffmpeg` / macOS `brew install ffmpeg` /
 > Ubuntu `sudo apt install ffmpeg`。
 
-## 使用示例
+## Web 入口
+
+不想敲命令行的话，项目自带一个零第三方依赖的 Web 界面（只用 Python 标准库）：
 
 ```bash
-python video_editing/video_demo.py "把 INPUT/sample.mp4 转成 720p，水平镜像"
-python video_editing/video_demo.py "把 a.mp4 和 b.avi 拼接，中间加 0.5 秒 dissolve 转场"
-python video_editing/video_demo.py "在 sample.mp4 第 3 秒加一个右下角画中画 logo.png，持续 5 秒"
-python video_editing/video_demo.py "把 sample.mp4 前 5 秒剪掉，剩下部分加一行花字"
+.venv\Scripts\python.exe web/server.py            # 默认 http://127.0.0.1:8000
+.venv\Scripts\python.exe web/server.py --port 9000 --max-upload-mb 2000
 ```
+
+**素材全部从界面上传**（不预置任何默认素材）。左边输入自然语言需求，右边实时看到整条流水线：
+
+- **素材区** —— 拖拽或点「+ 上传素材」把本地视频/图片传进 `INPUT/`，上传即用 ffprobe 校验；
+  支持 mp4/mov/mkv/webm/avi/flv/wmv/mpg/m2ts/3gp… 与 png/jpg/webp/bmp/gif/tiff/heic 等
+  （共 28 种扩展名，纯音频不在列）；点素材名可把 `INPUT/xxx` 插入输入框
+- **编辑计划 JSON** —— agent 提交的 `submit_plan` 原文
+- **时间轴换算** —— 片段时长 d_i / 起点 S_i / 总时长 D / 叠加与转场的绝对时间
+- **ffmpeg 命令序列** —— 编译器生成的每条命令（按 detect / normalize / render 分阶段）
+- **执行日志** —— 逐条命令的成功失败，失败时直接给出 stderr 尾巴
+- **成品** —— 内置播放器直接预览 + 下载，附 ffprobe 回验结果（实际时长 vs 预期时长）
+- **历史产物** —— 列出 `OUTPUT/` 下已有的视频
+
+素材区的几个约定：
+
+- 上传落盘在 `INPUT/`（平铺），这样 agent 用 `ls INPUT/` 就能直接看到，不需要额外提示
+- 一个素材都没有时，「运行」会被禁用并提示先上传；后端也会拦一道，不会让 agent 空转
+- 与已存在的文件重名：自己上传过的直接覆盖（方便反复替换同一素材），非上传文件则自动加序号，
+  绝不覆盖
+- 素材名的「×」只能移除**网页上传过**的（白名单记在 `TMP/uploads.json`）；
+  若运行环境禁止删除（回收站不可用），服务会自动退化为移动到 `TMP/removed/`，并在界面上说明
+- 单文件上限默认 500MB，可用 `--max-upload-mb` 调整
+
+比命令行版多一个能力：**计划校验失败时会把编译器的中文错误回传给 LLM 重新出计划**（最多 2 次），
+这也是 `plan_schema` 设计里的原意。
+
+> 服务默认只监听 `127.0.0.1`。媒体路由被限制在 `OUTPUT/` 目录内，不会把 `.env` 之类
+> 项目文件暴露出去（上传接口也只写 `INPUT/`）；若要改成 `0.0.0.0` 对外提供服务，请自行加鉴权。
+
+### 接口一览
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/health` | ffmpeg/ffprobe 状态、当前模型、上传策略 |
+| GET | `/api/inputs?probe=1` | 列出 `INPUT/` 素材（含探测信息、是否网页上传） |
+| GET | `/api/outputs` | 列出 `OUTPUT/` 已有产物 |
+| POST | `/api/run` | 运行任务，NDJSON 事件流 |
+| POST | `/api/upload?name=<文件名>` | 上传素材，请求体为裸二进制 |
+| POST | `/api/delete` | 移除素材，`{"name": "..."}` |
+| GET | `/media/OUTPUT/<名字>` | 预览产物（支持 Range） |
+
+## 使用示例
+
+素材换成你自己的（`INPUT/` 下的文件名）：
+
+```bash
+python video_editing/video_demo.py "把 INPUT/my.mp4 转成 720p，水平镜像"
+python video_editing/video_demo.py "把 INPUT/a.mp4 和 INPUT/b.avi 拼接，中间加 0.5 秒 dissolve 转场"
+python video_editing/video_demo.py "在 INPUT/my.mp4 第 3 秒加一个右下角画中画 INPUT/logo.png，持续 5 秒"
+python video_editing/video_demo.py "把 INPUT/my.mp4 前 5 秒剪掉，剩下部分加一行花字「开头」"
+python video_editing/video_demo.py "给 INPUT/my.mp4 里的人脸打码，输出到 OUTPUT/blur.mp4"
+```
+
+Web 界面里更省事：**点素材名**把 `INPUT/xxx` 插进输入框，再**点下面的短语**（转成 720p / 水平镜像 /
+加 0.5 秒 fade 转场 / 加画中画 / 加花字 / 给人脸打码 …）拼成一句话。
 
 运行过程会打印：LLM 生成的编辑计划 JSON、编译器换算出的时间轴（片段时长 / 起点 / 总时长）、
 以及完整的 ffmpeg 命令序列，方便验证与调试。
@@ -82,12 +141,16 @@ deepagent-demo/
 │   ├── video_agent.py       # Agent 构建：probe_media / submit_plan 工具 + 计划 schema 提示词
 │   ├── plan_schema.py       # 编辑计划 JSON 的校验（白名单 + 语义规则）
 │   ├── plan_compiler.py     # 编译器：校验 → 换算 → 生成命令 → 执行 → 回验
+│   ├── face_mosaic.py       # 人脸检测打码（v3.0，OpenCV YuNet）
 │   └── ffmpeg_exec.py       # ffmpeg/ffprobe 执行器（未安装时返回可读错误）
+├── web/                     # Web 入口（标准库 HTTP server + 单页前端）
+│   ├── server.py            # 路由：/ · /api/health · /api/inputs · /api/run · /api/upload · /api/delete · /media/*
+│   └── index.html           # 对话 + 素材上传 + 流水线检视 UI（NDJSON 事件流）
 ├── basic_demo/              # 基础编码 Agent demo（deepagents 最简用法对照）
 │   ├── main.py              # 入口：演示写/读文件任务
 │   └── agent.py             # 最简 deep agent 构建
 ├── model.py                 # 共用：加载 .env + 按优先级解析模型
-├── INPUT/                   # 素材（sample.mp4 / test.png / logo.png）
+├── INPUT/                   # 素材目录（默认空；Web 上传或手动放入）
 ├── OUTPUT/                  # 产物（运行时生成）
 ├── TMP/                     # 归一化中间件（运行时生成，可缓存）
 └── docs/                    # 技术方案文档

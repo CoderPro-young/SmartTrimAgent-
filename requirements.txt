@@ -8,6 +8,9 @@ langchain-anthropic
 # .env 配置加载
 python-dotenv
 
+# 人脸检测打码（v3.0）：OpenCV YuNet（MIT 许可）
+opencv-python
+
 # 安装方式（项目根目录）：
 #   py -m venv .venv
 #   .venv\Scripts\activate            # PowerShell: .venv\Scripts\Activate.ps1

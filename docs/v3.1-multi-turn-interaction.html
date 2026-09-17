@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>多轮交互与修订 · 技术方案 v3.1（第三轮）</title>
+<style>
+  :root {
+    --bg: #0f1419; --panel: #161b22; --panel2: #1c2330;
+    --fg: #d6deeb; --muted: #8a97a8; --accent: #4fa3ff;
+    --border: #2a3340; --code-bg: #0b0f14;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    line-height: 1.7; font-size: 15px;
+  }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 40px 28px 80px; }
+  h1 { font-size: 28px; border-bottom: 2px solid var(--border); padding-bottom: 14px; margin-top: 8px; }
+  h2 { font-size: 22px; margin-top: 38px; color: #fff; border-left: 4px solid var(--accent); padding-left: 12px; }
+  h3 { font-size: 18px; margin-top: 28px; color: #eaf2ff; }
+  h4 { font-size: 15px; color: var(--accent); }
+  p { margin: 12px 0; }
+  blockquote {
+    margin: 16px 0; padding: 12px 18px; background: var(--panel2);
+    border-left: 3px solid var(--accent); border-radius: 0 8px 8px 0; color: var(--muted);
+  }
+  code {
+    background: var(--code-bg); padding: 2px 6px; border-radius: 5px;
+    font-family: "SFMono-Regular", Consolas, monospace; font-size: 13px; color: #ffd9a0;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--border); border-radius: 10px;
+    padding: 16px; overflow-x: auto;
+  }
+  pre code { background: none; padding: 0; color: #cfe8ff; }
+  table {
+    border-collapse: collapse; width: 100%; margin: 18px 0; font-size: 13.5px;
+    background: var(--panel); border-radius: 8px; overflow: hidden;
+  }
+  th, td { border: 1px solid var(--border); padding: 9px 11px; text-align: left; vertical-align: top; }
+  th { background: var(--panel2); color: #fff; font-weight: 600; }
+  tr:nth-child(even) td { background: rgba(255,255,255,0.02); }
+  ul, ol { padding-left: 24px; }
+  li { margin: 6px 0; }
+  hr { border: none; border-top: 1px solid var(--border); margin: 30px 0; }
+  strong { color: #fff; }
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>多轮交互与修订 —— 技术方案（v3.1 · 第三轮修订）</h1>
+<blockquote>目标：把现在「一句话 → 一条成片 → 结束」的一次性流程，改成<strong>可持续交互</strong>的会话： 用户看完成片可以继续提修改要求，agent 在上一版基础上增量修改； 用户意图不明确、<strong>要求与素材不匹配</strong>时，agent <strong>先反问</strong>而不是硬编计划或默默截断； 模型出现<strong>幻觉</strong>时能被发现、被通知、被纠正。  承接 [v2.0-multi-material-editing.md](./v2.0-multi-material-editing.md) 的 「LLM 出计划 JSON → 编译器出命令」架构，<strong>不改变这条分工</strong>。  <strong>修订历史</strong> - 第一轮（2026-09-16）：多轮会话载体、ask_user、防静默改动、产物不覆盖。 - 第二轮（2026-09-17）：① 前端「启动新任务」入口；② 素材不匹配的反问 （含 plan_schema 确定性闸门，堵&quot;编造 probe 数据&quot;漏洞）；③ 幻觉通知三层防御 （基于 deepagents 0.7.11 源码调研，含 RubricMiddleware 与 HITL 两条原生机制）； ④ ask_user 两种实现方式对比。 - 第三轮（2026-09-17，本文）：把&quot;素材不匹配&quot;从<strong>时长一个例子</strong>升级为系统性的 <strong>Preflight 素材-需求匹配校验</strong>（§5.3c）：语义层（LLM 探测后自检）+ 计划层 （确定性 <code>check_material_fit</code>）两层，每轮必跑；<strong>关键升级：把&quot;模型修不了的错&quot; （用户可决）从重试闭环里摘出来，直接变成问用户的问题</strong>（§5.3c 末）。  状态：方案待评审，尚未实现。</blockquote>
+<hr>
+<h2>1. 需求拆解</h2>
+<table><thead><tr><th>#</th><th>子问题</th><th>本质</th><th>主要改动位置</th></tr></thead><tbody><tr><td>①</td><td>会话上下文</td><td>第二轮要知道&quot;上一版剪成什么样&quot;</td><td>后端（会话存储）+ agent（上下文构造）</td></tr><tr><td>②</td><td>意图不明确时反问</td><td>agent 需要一条「不产出计划」的合法出口</td><td>agent（<code>ask_user</code> 工具 + 提示词）+ 前端</td></tr><tr><td>③</td><td>成片可反复调整</td><td>上一版计划 → 新版计划的<strong>增量修订</strong></td><td>agent + 编译器（diff + 防静默改动）</td></tr><tr><td>④</td><td><strong>素材与要求不匹配</strong></td><td>时长超范围只是其一：还有&quot;要 BGM 但素材无声轨&quot;、&quot;PiP 素材太短&quot;、&quot;BGM 不够长又不 loop&quot;、&quot;要两段素材但只有一段&quot;……</td><td><strong>Preflight 两层校验</strong>（§5.3c）：probe 后语义自检 + 计划层确定性匹配，不匹配就反问</td></tr><tr><td>⑤</td><td><strong>模型幻觉</strong></td><td>声称做了没做的事 / 编造 probe 数据 / 引用不存在的文件</td><td>三层防御（§6），含 deepagents 原生机制</td></tr><tr><td>⑥</td><td><strong>开启新一轮</strong></td><td>前端要能从任意状态&quot;重开一局&quot;，刷新素材</td><td>前端 + 后端会话重置</td></tr></tbody></table>
+<p>①②③ 第一轮已论证，结论不变。本轮重点是 ④⑤⑥。</p>
+<hr>
+<h2>2. 现状与差距</h2>
+<h3>2.1 后端每次运行都是「无状态」的</h3>
+<p><code>web/server.py::_run_pipeline</code> 每跑一次就 <code>build_video_agent_v2()</code> 新建一个 agent， 上下文由 <code>video_agent.plan_with_retry</code> 内部写死：</p>
+<pre><code class="lang-python"># video_editing/video_agent.py:346
+messages: list = [{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: task}]</code></pre>
+<p>前端左侧那条&quot;对话&quot;只是<strong>日志展示</strong>，不是会话状态。第二轮说&quot;再改一下&quot;， 对 agent 来说等同于一个全新的、信息缺失的任务。</p>
+<h3>2.2 意图不明确时没有「合法的非计划出口」</h3>
+<p><code>plan_with_retry</code> 只有两条路径（<code>video_agent.py:355-368</code>）：拿到 <code>submit_plan</code> → 编译； 拿不到 → 记 <code>errors</code>、emit <code>error</code>、进入重试。agent 目前<strong>被要求无论输入什么都必须 交出一个计划</strong>——输入&quot;哈哈哈&quot;时只能硬编一个，然后系统报告&quot;成功 + 回验通过&quot;， 这正是项目反复要杜绝的<strong>静默错误执行</strong>。</p>
+<h3>2.3 素材与要求不匹配（④）：当前没有任何系统性校验，且&quot;修不了的错&quot;在错误通道里空转</h3>
+<p>时长只是用户举的一个例子。把&quot;素材实际能力 × 用户要求&quot;的所有错位方式列出来， 会发现它们<strong>散落在各处、有的查、有的不查、查了的也不告诉用户</strong>：</p>
+<table><thead><tr><th>不匹配类别</th><th>例子</th><th>现状</th></tr></thead><tbody><tr><td>裁剪超范围</td><td>要前 50 秒，素材只有 12.259 秒</td><td>❌ 不查（§下面的实测）</td></tr><tr><td>裁剪空段</td><td>trim_start 已经超出素材时长</td><td>❌ 不查（<code>te &gt; ts</code> 查了，但 <code>ts</code> 本身越界没人管）</td></tr><tr><td>主轨无声轨</td><td>要加 BGM / ducking，素材根本没音轨</td><td>⚠️ ducking 依赖 <code>has_audio</code>，但没人拦</td></tr><tr><td>BGM 不够长</td><td><code>loop=false</code> 但 BGM 时长 &lt; 成片时长 D</td><td>❌ 不查（音乐中途静默结束）</td></tr><tr><td>PiP 素材太短</td><td>视频 PiP 要播 5 秒，素材只有 2 秒</td><td>❌ 不查</td></tr><tr><td>素材数量不符</td><td>&quot;把那两段拼接&quot;但 INPUT 里只有一段</td><td>❌ 不查（模型可能硬编一个不存在的 source，被&quot;文件不存在&quot;拦下，但那是另一回事）</td></tr><tr><td>引用不存在 / 纯音频当 clip</td><td></td><td>✅ 已查（<code>_missing_source_msg</code> 会列出实际可用素材）</td></tr><tr><td>叠加/转场超出片段时长</td><td></td><td>✅ 已查</td></tr></tbody></table>
+<p>再以&quot;要第一个素材的前 50 秒（实际 12.259 秒）&quot;为例走一遍现在的链路：</p>
+<ol><li><code>plan_schema.validate_plan</code> 对 video clip 只校验 <code>trim_end &gt; trim_start</code></li></ol>
+<p>和&quot;时长可确定&quot;——<strong>从不把 <code>trim_end</code> 和 <code>probe.duration</code> 做交叉比对</strong>；</p>
+<ol><li>更糟的是 <code>probe</code> 字段几乎是<strong>透传袋</strong>（memory 里明确记了&quot;probe 内部不校验&quot;），</li></ol>
+<p>模型如果编造 <code>probe.duration=60</code>，&quot;前 50 秒&quot;连编译器的数学都骗过；</p>
+<ol><li>ffmpeg 按 <code>-t 50</code> 跑，实际流只有 12.259 秒 → <strong>输出被静默截断</strong>；</li><li>最后 <code>verify()</code> 发现成品时长 ≠ 预期 D → 报&quot;回验不一致&quot;。</li></ol>
+<p>也就是说：用户要在前 50 秒加的花字/转场全被悄悄扔掉了，最后只得到一句 &quot;回验不一致&quot;，<strong>没有任何环节把这个问题变成&quot;问用户&quot;</strong>。回验失败也不会触发 重出计划（verify 不在重试闭环里）。</p>
+<p><strong>更深一层的结构性问题</strong>：现在所有校验错误都进同一条通道——回传模型、 重出计划、最多重试 2 次。这对&quot;模型写得不对&quot;是对的，但对&quot;素材现实不满足&quot; 是<strong>灾难</strong>：&quot;用户要 50 秒、素材只有 12 秒&quot;这种错，<strong>模型重试多少次都修不好</strong> ——不存在能满足要求的计划，只有用户能决定（用全部 / 换素材 / 改范围）。 现状是烧 2 次 LLM 调用、重试 2 次，最后报&quot;计划连续 3 次未通过校验，已放弃&quot;， 用户依然不知道&quot;素材只有 12 秒&quot;这个真正的事实。</p>
+<p><strong>修法 = Preflight 两层 + 错误分流</strong>（§5.3c）：probe 后的语义自检（LLM）、 计划层的确定性匹配校验（程序）；校验错误按<strong>谁能修</strong>分流——模型修得了的 进重试闭环，只有用户能决的直接变成 question 问用户。</p>
+<h3>2.4 幻觉（⑤）：当前只有编译器一层在防，且防不住&quot;口头声称&quot;</h3>
+<p>已有一层确定性防御：<code>plan_schema</code> 的未知字段拒绝 + 素材存在性检查 + 效果白名单。它们能拦住&quot;编造的字段/效果/文件路径&quot;进不了编译器。</p>
+<p>但防不住两类：</p>
+<ul><li><strong>口头声称</strong>：模型在文本里说&quot;已添加背景音乐渐入&quot;，plan 里却没有 <code>audio</code> 字段——</li></ul>
+<p>schema 管的是 JSON，管不了散文。用户读文本，以为做了。</p>
+<ul><li><strong>编造的 probe 数据</strong>：见 §2.3，schema 目前不比对 probe 与 trim 的一致性。</li></ul>
+<p>而且即使 schema 报错，&quot;模型出现幻觉&quot;这个事实本身对<strong>用户不可见</strong>—— 前端只显示&quot;计划未通过校验：xxx&quot;，用户不知道这是模型在瞎编。</p>
+<h3>2.5 已有的、必须复用的约束</h3>
+<p><code>video_agent._retry_feedback</code> 注释里的实测结论（多轮设计的硬约束）：</p>
+<blockquote>刻意<strong>不重放原始消息历史</strong>：① 历史里的 AIMessage/ToolMessage 可能带 provider 不接受的内容块，原样回放会 400（SiliconFlow: &quot;Only text and image_url are supported&quot;）； ② 把上一版计划原样留在上下文里，模型容易照抄自己的错误答案。</blockquote>
+<p>外加 v2.0 的 <code>plan_schema._unknown_keys</code>：<strong>计划每一层都拒绝未知字段</strong>， 所有新机制不能成为绕过它的后门。</p>
+<hr>
+<h2>3. deepagents 0.7.11 能力调研（本轮新增）</h2>
+<p>本项目 agent 基于 <code>deepagents.create_deep_agent</code>（0.7.11，安装于 <code>.venv</code>）。 对幻觉通知和交互机制，包里<strong>已有现成的轮子</strong>，不用自己造：</p>
+<h3>3.1 自定义 Middleware 通道</h3>
+<p><code>create_deep_agent(..., middleware=[...])</code> 接受任意 <code>langchain.agents.middleware.types.AgentMiddleware</code>，可用钩子：</p>
+<table><thead><tr><th>钩子</th><th>时机</th><th>能做什么</th></tr></thead><tbody><tr><td><code>before_model</code> / <code>after_model</code></td><td>每次 LLM 调用前后</td><td>读写 state，检查/改写消息</td></tr><tr><td><code>wrap_model_call</code></td><td>包裹 LLM 调用本身</td><td>重试、降级、改写请求响应</td></tr><tr><td><code>wrap_tool_call</code></td><td>包裹每个工具执行</td><td>检查参数、改写结果、记日志</td></tr><tr><td><code>before_agent</code> / <code>after_agent</code></td><td>整轮开始/结束</td><td>汇总级检查</td></tr></tbody></table>
+<p><strong>但注意</strong>：本项目 <code>web/server.py::_stream_agent</code> 已经用 <code>agent.stream(..., stream_mode=&quot;values&quot;)</code> 拿到了每一步的完整 state—— 对 LLM 输出的<strong>可见性 host 侧本来就有</strong>，轻量检查不需要 middleware （§6 的 L1 就放在 <code>_stream_agent</code> 里）。Middleware 的价值在&quot;要在循环内 自动注入修正&quot;的场景（L2）。</p>
+<h3>3.2 RubricMiddleware —— 「幻觉通知到 agent 内部」的原生机制</h3>
+<p><code>deepagents/middleware/rubric.py</code>：<strong>self-evaluated agent iteration</strong>。</p>
+<ul><li>调用时在 state 里传 <code>rubric</code>（一段&quot;什么叫完成/合格&quot;的自然语言标准）：</li></ul>
+<p><code>agent.stream({&quot;messages&quot;: [...], &quot;rubric&quot;: &quot;...&quot;})</code>；</p>
+<ul><li>agent 每次&quot;以为自己做完了&quot;（返回无工具调用的响应）时，middleware 自动召一个</li></ul>
+<p><strong>grader 子 agent</strong> 拿 transcript 对照 rubric 打分；</p>
+<ul><li>grader 判 <code>needs_revision</code> → 把评语作为 <code>HumanMessage</code> **注入 agent 循环，</li></ul>
+<p>agent 自动重出计划**——这就是&quot;通知到 agent 内部&quot;的字面实现，不需要人工介入；</p>
+<ul><li>判 <code>satisfied</code> → 放行；判 <code>failed</code> / <code>max_iterations_reached</code> / <code>grader_error</code></li></ul>
+<p>→ 不改写模型响应，但状态里留 <code>_rubric_status</code>，并有 <code>rubric_evaluation_end</code> 流事件——host 读出来 emit 给前端，告知&quot;自动纠偏失败，请人工确认&quot;。</p>
+<ul><li>构造参数含 <code>model</code>（grader 用哪个模型）、<code>max_iterations</code>（默认有上限）、</li></ul>
+<p><code>on_evaluation</code> 回调（可拿到每次评分明细 → 正好用来 emit 幻觉事件）。</p>
+<p><strong>对本项目的映射</strong>：rubric 写成三条—— ① 计划 JSON 里声称的每个效果/叠加/音频都必须真实存在于计划对应字段； ② 引用的每个 INPUT/ 文件必须真实存在； ③ clip 的 probe 数据必须与 transcript 中 probe_media 的返回一致。</p>
+<h3>3.3 HumanInTheLoopMiddleware / interrupt_on —— 另一条交互路线</h3>
+<p><code>create_deep_agent(..., interrupt_on={...})</code>（deepagents 自己也在用它实现 filesystem 权限确认）：图执行到指定工具调用前<strong>中断挂起</strong>，人工批复后从 checkpoint 恢复继续。</p>
+<p>用于 <code>ask_user</code> 就是&quot;方案 B&quot;（§7）：agent 原地等用户回答，一轮内完成问答。 代价：需要 checkpointer + resume 端点 + 前端状态机，<code>_stream_agent</code> 的单次 流式模型要改成&quot;可中断-可恢复&quot;。</p>
+<h3>3.4 调研结论</h3>
+<table><thead><tr><th>需求</th><th>原生机制</th><th>采用</th></tr></thead><tbody><tr><td>幻觉自动纠偏（深度）</td><td><code>RubricMiddleware</code></td><td>✅ L2（§6）</td></tr><tr><td>幻觉轻量标记（便宜）</td><td>host 侧扫描（不需要 middleware）</td><td>✅ L1（§6）</td></tr><tr><td>确定性拦截</td><td><code>plan_schema</code>（已有 + 本轮增强）</td><td>✅ L0</td></tr><tr><td>原地等人回答</td><td><code>interrupt_on</code> + checkpointer</td><td>⏸ 方案 B，P2 可选</td></tr><tr><td>下一轮消息回答</td><td><code>ask_user</code> 工具直接返回</td><td>✅ 方案 A，P0 采用</td></tr></tbody></table>
+<hr>
+<h2>4. 核心设计决策</h2>
+<h3>D1. 多轮的载体是「上一版计划 JSON」，不是「消息历史」</h3>
+<p>会话状态里存结构化事实（<code>task / last_plan / last_output / last_verify / turn</code>）， 理由同第一轮：规避 provider 400（只回传纯文本）、计划是唯一可信中间态、 指代消解天然成立（&quot;那个转场&quot; = <code>last_plan.timeline[i].transition</code>）。</p>
+<h3>D2. 修订 = 带上一版计划重出<strong>完整</strong>计划 + 防静默改动闸门</h3>
+<p>不引入补丁格式（<code>plan_schema</code> 会拒未知字段）。配套：编译器 <code>diff_plans()</code> 展示变更项；后端强制产物换名（D4）。</p>
+<h3>D3. <code>ask_user</code> 作为「不产出计划」的合法出口</h3>
+<p>与 <code>submit_plan</code> <strong>互斥</strong>，同一轮只能用一个。四种触发条件（本轮加第 4 条）：</p>
+<table><thead><tr><th>触发条件</th><th>例子</th><th>期望反问</th></tr></thead><tbody><tr><td>无剪辑动作</td><td>&quot;哈哈哈&quot;</td><td>给能力菜单让用户选</td></tr><tr><td>素材指代不明</td><td>&quot;给那个视频加转场&quot;（INPUT 有 3 个）</td><td>列出真实候选</td></tr><tr><td>超出能力</td><td>&quot;做个动态贴纸&quot;</td><td>如实说做不到 + 给替代</td></tr><tr><td><strong>要求超出素材实际</strong> ⭐新</td><td>&quot;第一个素材的前 50 秒&quot;（实际 12.259s）</td><td>报真实时长，给选项：用全部 / 换素材 / 改范围</td></tr></tbody></table>
+<p>拿到 <code>ask_user</code> 时 emit <code>question</code> 事件<strong>直接返回，不重试、不算失败</strong>。</p>
+<h3>D4. 修订时产物不覆盖（后端强制）</h3>
+<p>新计划 <code>output.filename</code> 与 <code>last_output</code> 相同时自动加 <code>-r2</code> 后缀， 不靠模型自觉（否则没法对比修改前后）。纯字符串处理，模型绕不过。</p>
+<h3>D5. 规则闸门只做「高置信度负例」</h3>
+<p>纯规则拦&quot;一眼没意图&quot;的输入（&quot;哈哈哈&quot;），其余进 agent 由 <code>ask_user</code> 兜底。 规则错了最多是&quot;少问一次&quot;，不会拦死正常需求。</p>
+<h3>D6. 会话存进程内，前端持有 id；「启动新任务」= 换 id</h3>
+<p>单用户本地工具，<code>SESSIONS: dict</code> 足够。前端持 <code>crypto.randomUUID()</code> 存 localStorage。「启动新任务」按钮 = 生成新 id + 清空前端 → 对后端而言旧会话 自然失效（惰性 GC），不需要显式删除接口。<code>--force</code> 重启丢会话可接受。</p>
+<h3>D7. 幻觉防御按「成本递增」分三层，每层职责单一</h3>
+<p>L0 拦截（确定性，已有+增强）、L1 标记（毫秒级规则，只通知不拦截）、 L2 纠偏（LLM grader，自动注入修正）。详见 §6。<strong>绝不把三层揉成一层</strong>—— 成本和误伤率差着数量级。</p>
+<h3>D8. 素材-需求匹配 = 每轮必过的 Preflight，但校验点不在&quot;对话开始前&quot;，而在两个能落地的地方</h3>
+<p>用户提的方向完全正确：<strong>每轮都要校验&quot;素材 × 要求&quot;是否匹配，不匹配就不向下走</strong>。 但&quot;每次对话开始之前&quot;这个时点落不了地——那时手里只有一句自然语言， &quot;剪得更有电影感&quot;没法被确定性程序校验。必须等两样东西之一出现：</p>
+<ol><li><strong>LLM 已探测素材</strong> → 语义判断&quot;要求能否被这些素材满足&quot;（Tier 1）；</li><li><strong>计划 JSON 已生成</strong>（要求已被结构化为 plan）→ 确定性交叉比对（Tier 2）。</li></ol>
+<p>所以 Preflight 分两层，每轮（含修订轮）必跑：</p>
+<ul><li><strong>Tier 1 语义层</strong>（在 agent 内，probe 之后、submit_plan 之前）：</li></ul>
+<p>探测完先自检&quot;要求的每一项是否都能被探测事实满足&quot;，不满足 → <code>ask_user</code>。</p>
+<ul><li><strong>Tier 2 计划层</strong>（在 host，submit_plan 之后、compile 之前）：</li></ul>
+<p><code>check_material_fit(plan)</code> 确定性比对，<strong>以服务端缓存的真实 probe 为准</strong> （不是 plan 里模型自报的 probe——那正是编造数据的藏身之处）。</p>
+<p>配合一条<strong>错误分流</strong>原则（本方案最重要的结构性升级）：</p>
+<blockquote><strong>模型修得了的错 → 重试闭环；只有用户能决的错 → 直接问用户。</strong></blockquote>
+<p>&quot;素材只有 12 秒&quot;属于后者——不存在能满足要求的计划，问模型多少次都白搭。 Tier 2 输出的每个 mismatch 都带 <code>user_decidable</code> 标记，false 进重试、 true 直接 emit <code>question</code>（带真实数据 + 选项），<strong>零重试</strong>。</p>
+<hr>
+<h2>5. 具体改动</h2>
+<h3>5.0 agent 内部是怎么跑的（控制流说明，回答&quot;是不是多子任务/钩子&quot;）</h3>
+<p><strong>不是多子任务，也不是钩子函数驱动</strong>——agent 内部是<strong>单个 ReAct 循环</strong> （<code>create_deep_agent</code> 的本质）：模型读上下文 → 决定调工具 → 看结果 → 再决策，直到自己决定交 <code>submit_plan</code> 或 <code>ask_user</code>。循环里<strong>没有 phase 划分</strong>， &quot;ls → probe → 自检 → 产出&quot;是同一个循环中的步骤，节奏由模型自定 （probe 几次它说了算）。</p>
+<table><thead><tr><th>机制</th><th>在哪</th><th>性质</th></tr></thead><tbody><tr><td>可行性自检（Tier 1）</td><td>agent <strong>内部</strong>，循环里</td><td><strong>提示词协议（软约束）</strong>：Workflow 第 2.5 步把顺序写给模型看，模型大概率照做，但不保证 100%</td></tr><tr><td>素材匹配校验（Tier 2）</td><td><strong>循环外</strong>，host</td><td><strong>确定性硬闸门</strong>：<code>submit_plan</code> 是循环内的普通工具调用，没有&quot;计划已完成&quot;这个可由程序拦截的时点；可靠的拦截点只在 host 收到计划之后</td></tr><tr><td>幻觉 grader（L2）</td><td>agent 内部，但用现成钩子</td><td><code>RubricMiddleware</code> 挂在&quot;agent 以为做完了&quot;这个确定时点上——<strong>这是钩子的正确用途</strong></td></tr></tbody></table>
+<p>两个&quot;多轮&quot;不要混淆：<strong>用户驱动的多轮</strong> = 多次 HTTP 请求，每次重建 agent、 纯文本重建上下文（D1）；<strong>agent 内部的&quot;轮&quot;</strong> = ReAct 循环自身的迭代。 前者是本方案加的，后者是 deepagents 本来就有、且保持不动的。</p>
+<h3>5.1 前端：「启动新任务」入口（本轮新增）</h3>
+<ul><li>输入区 <code>[＋ 上传素材]</code> 旁新增 <code>[启动新任务]</code> 按钮（<code>.btn-side</code> 同款样式）。</li><li>点击行为：</li></ul>
+<ol><li><code>session_id = crypto.randomUUID()</code>（存回 localStorage）——对应 agent 侧</li></ol>
+<p>&quot;开启新一轮循环&quot;（turn 归零、无 base_plan）；</p>
+<ol><li>清空左侧对话（<code>#msgs</code> 重置 + 欢迎语）；</li><li><code>resetPanels()</code> 清空右栏流水线卡片（<strong>保留素材卡片</strong>）；</li><li><code>loadInputs()</code> 重新拉取 <code>/api/inputs</code>——手动丢进 <code>INPUT/</code> 的文件也会</li></ol>
+<p>在此时出现，这就是&quot;刷新之前的素材&quot;；</p>
+<ol><li>输入框 placeholder 回到第一轮的&quot;描述要剪成什么样&quot;。</li></ol>
+<ul><li><strong>会话生命周期</strong>：一个 <code>session_id</code> 从首轮一直持续到用户点「启动新任务」为止；</li></ul>
+<p>期间的每条用户消息都按&quot;修订轮&quot;处理（有 <code>pending_question</code> 按问答接续、 有 <code>last_plan</code> 按修订 brief，见 §5.4）。中途上传/删除素材<strong>不重置会话</strong>—— 修订 brief 每轮都带当前 INPUT/ 实际素材列表，素材变更自然生效。</p>
+<ul><li>正在运行（<code>busy</code>）时禁用该按钮，避免一局跑到一半开新局把右栏冲掉。</li></ul>
+<h3>5.2 agent 侧（<code>video_editing/video_agent.py</code>）</h3>
+<p><strong>(a) <code>ask_user</code> 工具</strong>（同第一轮）：</p>
+<pre><code class="lang-python">@tool
+def ask_user(question: str, options: list[str] | None = None) -&gt; str:
+    &quot;&quot;&quot;Ask the user to clarify an ambiguous, unsupported, or infeasible request.
+    Use INSTEAD of submit_plan. Args: question; options (optional candidates).&quot;&quot;&quot;
+    return &quot;问题已提交给用户，等待答复。&quot;</code></pre>
+<p>注册进 <code>build_video_agent_v2</code> 的 tools。</p>
+<p><strong>(b) 提示词新增三段</strong>（插在 <code>V2_SYSTEM_PROMPT_TEMPLATE</code> 的 Workflow 后）：</p>
+<ul><li><strong>「可行性自检」（Workflow 第 2.5 步）</strong>：把 Workflow 改成</li></ul>
+<p><code>ls → probe_media → 可行性自检 → submit_plan / ask_user</code>。自检要求：</p>
+<blockquote>对照 probe_media 返回的真实数据，逐项检查用户要求是否能被满足 （裁剪范围是否在时长内、音轨是否存在、素材数量对不对、分辨率/画面 内容是否符合要求描述的素材）。<strong>任何一项不满足，不要硬凑计划</strong>—— 调用 ask_user，如实报告探测到的事实，并给出可行的选项。</blockquote>
+<ul><li><strong>「何时先反问」</strong>：同第一轮三种条件，加第 4 条（即自检失败的出口）：</li></ul>
+<blockquote>当你通过 probe_media 发现用户要求的范围超出素材实际能力时（例如要前 50 秒 但素材只有 12.259 秒），<strong>不要硬截断、也不要编造 probe 数据凑数</strong>—— 调用 ask_user，如实报告真实时长，并给出选项（用全部 / 换素材 / 改范围）。</blockquote>
+<ul><li><strong>「probe 数据的真实性」</strong>：明确告知模型 plan 里的 <code>probe</code> 字段必须与</li></ul>
+<p>probe_media 的实际返回一致，编译器会以<strong>服务端重新探测的结果</strong>为准做 交叉校验，编造会被打回。</p>
+<p><strong>(c) <code>extract_ask(result)</code></strong> 与 <code>extract_plan</code> 同构。</p>
+<p><strong>(d) <code>_revision_brief(task, base_plan, base_output, materials)</code></strong>（同第一轮， 纯文本重建，含当前 INPUT/ 实际素材列表）。</p>
+<p><strong>(e) <code>plan_with_retry</code> 增加参数</strong> <code>base_plan / base_output / materials</code>； 拿到 <code>ask_user</code> → emit <code>question</code> → 立即 return；编译失败重试仍走 <code>_retry_feedback</code> 且保留&quot;这是修订&quot;语义。</p>
+<p><strong>(f) L2 挂 RubricMiddleware</strong>：<code>build_video_agent_v2</code> 增加可选参数 <code>rubric: str | None</code>，非空时：</p>
+<pre><code class="lang-python">from deepagents.middleware.rubric import RubricMiddleware
+create_deep_agent(..., middleware=[
+    RubricMiddleware(model=get_model(), max_iterations=2, on_evaluation=on_eval)
+])</code></pre>
+<p><code>on_evaluation</code> 回调里把每次评分 emit 成 <code>hallucination</code> 事件（level=info/warn）。 rubric 文本见 §3.2 末。用环境变量 <code>V2_RUBRIC=1</code> 控制开关，默认关（P1 再开）。</p>
+<h3>5.3 schema / 编译器侧</h3>
+<p><strong>(a) 新增 <code>plan_schema.check_material_fit(plan, project_root) -&gt; list[Mismatch]</code></strong> （Preflight Tier 2，<strong>每轮必跑</strong>，submit_plan 之后、compile 之前）</p>
+<p>返回<strong>结构化</strong> mismatch（不是纯错误字符串）：</p>
+<pre><code class="lang-python">@dataclass
+class Mismatch:
+    type: str          # 见下表
+    tag: str           # 出问题的位置，如 &quot;clips[0].trim_end&quot;
+    requested: object  # 用户/计划想要的
+    actual: object     # 素材实际有的
+    user_decidable: bool
+    message: str       # 可直接展示给用户的中文事实陈述</code></pre>
+<p>三条铁律：</p>
+<ol><li><strong>一律以服务端缓存的真实 probe 为准</strong>（<code>server._probe_file</code>，带 mtime 缓存，</li></ol>
+<p>成本毫秒级）——不信任 plan 里模型自报的 <code>probe</code> 字段；</p>
+<ol><li><strong>顺带比对 plan.probe 与真实 probe</strong>（时长/分辨率/音轨不一致即记</li></ol>
+<p><code>probe_mismatch</code>，这本身就是 L1 的幻觉信号）；</p>
+<ol><li>与 <code>validate_plan</code> <strong>分工</strong>：后者管&quot;计划合不合法&quot;（结构/白名单/引用），</li></ol>
+<p>前者管&quot;计划与素材现实合不合&quot;——两个函数，<code>compile_plan</code> 里依次调用。</p>
+<p>不匹配分类（覆盖时长之外的全部类别，即 §2.3 表）：</p>
+<table><thead><tr><th>type</th><th>判定</th><th>user_decidable</th></tr></thead><tbody><tr><td><code>over_range</code></td><td><code>trim_end</code> &gt; 真实时长</td><td>✅</td></tr><tr><td><code>empty_range</code></td><td><code>trim_start</code> ≥ 真实时长</td><td>✅</td></tr><tr><td><code>no_audio_track</code></td><td>计划要 ducking/混音但主轨 <code>has_audio=false</code></td><td>✅</td></tr><tr><td><code>bgm_too_short</code></td><td><code>audio.loop=false</code> 且 BGM 真实时长 &lt; D</td><td>✅</td></tr><tr><td><code>pip_too_short</code></td><td>视频 PiP 的 <code>duration</code> &gt; 源素材真实时长</td><td>✅</td></tr><tr><td><code>source_missing</code> / <code>no_video_track</code></td><td>引用不存在 / 纯音频当 clip</td><td>✅</td></tr><tr><td><code>probe_mismatch</code></td><td>plan.probe 与真实 probe 不符</td><td>❌（回传模型纠正）</td></tr><tr><td><code>bad_reference</code> / <code>unknown_key</code> / 数学错</td><td>schema 违规</td><td>❌</td></tr><tr><td><code>upscale</code> / <code>fps_up</code></td><td>输出分辨率 &gt; 源 2× / 帧率上调</td><td>⚠️ warn 级，<strong>不阻断</strong>，emit 提示</td></tr></tbody></table>
+<p><strong>(b) 错误分流：<code>plan_with_retry</code> 升级成三分支</strong>（本方案最重要的结构性改动）</p>
+<pre><code class="lang-python">result = invoke(messages)
+ask = extract_ask(result)
+if ask:                        # 分支 ① agent 自己反问（Tier 1 出口）
+    emit(question); return
+
+plan = extract_plan(result)
+mismatches = check_material_fit(plan, project_root)
+decidable = [m for m in mismatches if m.user_decidable]
+if decidable:                  # 分支 ② 素材现实不满足 → 问用户，零重试
+    emit(question, options=由 mismatch 生成)
+    return                     # last_plan 不变，等用户下一条消息
+errors = validate_plan(plan, project_root)
+if errors:                     # 分支 ③ 模型修得了的 → 现有重试闭环
+    ...（原逻辑，反馈里保留&quot;这是修订&quot;语义）</code></pre>
+<p>分支 ② 的 question 由 mismatch 直接生成，例如 <code>over_range</code> → &quot;素材 a.mp4 实际时长 12.259 秒，你要：1) 用全部 12.259 秒 2) 换别的素材 3) 改范围（如前 10 秒）&quot;。<strong>不再出现&quot;烧 3 次 LLM 后报放弃、用户依然不知情&quot;</strong>。</p>
+<p><strong>(c) <code>diff_plans(old, new)</code></strong>（第一轮已定）：flatten 成 <code>path→value</code> 再比对。</p>
+<h3>5.4 后端（<code>web/server.py</code>）</h3>
+<ul><li><code>SESSIONS: dict[str, dict]</code> + <code>SESSION_MAX_TURNS = 5</code>（同第一轮）。</li></ul>
+<p>会话字段：<code>task / last_plan / last_output / last_verify / turn / pending_question</code>——<code>pending_question</code> 记录最近一次 question 事件 （问题文本、选项、类型），是&quot;提问 → 回答&quot;接续的桥梁。</p>
+<ul><li><strong>每轮消息构造按优先级三选一</strong>：</li></ul>
+<ol><li><strong>有待答问题</strong>（<code>pending_question</code> 非空）→ 构造&quot;问答接续&quot;上下文：</li></ol>
+<p>&quot;你刚才问用户：…。用户回答：…。请据此继续（若是素材不匹配， 按用户的选择修正计划并重新 submit_plan；若回答与问题无关， 就当作新的要求处理）&quot;。</p>
+<ol><li><strong>有上一版计划</strong>（<code>last_plan</code> 非空）→ <code>_revision_brief</code>（修订）。</li><li><strong>都不是</strong> → 首轮单条消息。</li></ol>
+<p>一轮成功提交新计划后清除 <code>pending_question</code>；该轮再次 question 则更新它。 三种构造<strong>都只用纯文本</strong>，遵守 D1 的 provider 兼容约束。</p>
+<ul><li><code>_run_pipeline(task, emit, session_id)</code>：</li><li>取/建会话 → <code>_intent_gate(task)</code>（D5，纯函数）→ 命中 emit <code>question</code>、</li></ul>
+<p>写入 <code>pending_question</code> 后返回；</p>
+<ul><li>编译前比对 filename 与 <code>last_output</code>，同名自动加 <code>-r{n}</code>（D4）；</li><li><code>plan_with_retry(..., base_plan=..., base_output=..., materials=...)</code>，</li></ul>
+<p><strong>并把服务端的 <code>_probe_file</code> 缓存探针以 <code>probe_fn</code> 回调传进去</strong> （<code>plan_schema</code> 不能 import <code>server</code>，反向注入，Tier 2 才能拿到真实 probe）；</p>
+<ul><li>L1 幻觉扫描挂在 <code>_stream_agent</code> 的消息循环里（§6）；</li><li>拿到 <code>question</code> 更新会话（记问题、<strong>不写 last_plan</strong>）；</li><li>成功 → 更新 <code>last_plan / last_output / last_verify</code>，emit <code>plan</code> 附 <code>diff</code>。</li><li><code>/api/run</code> 请求体加 <code>session_id</code>（缺省兼容，当第一轮）。</li></ul>
+<h3>5.5 前端其余（同第一轮 + 本轮新增）</h3>
+<ul><li><code>handleEvent</code> 新增 <code>question</code> 与 <code>hallucination</code> 两种事件；</li><li><code>question</code> → agent 气泡 + 可点选项（点击填进输入框，不自动提交）；</li><li><code>hallucination</code> → 在对应消息旁打标记（见 §6 L1 的展示约定）；</li><li>输入框 placeholder 随轮次变化；</li><li>右栏「本次修订」卡片展示 diff（P1）。</li></ul>
+<hr>
+<h2>6. 幻觉三层防御（本轮重点）</h2>
+<pre><code>LLM 输出（计划 JSON + 文本声明）
+        │
+  L0  plan_schema 确定性校验        ← 已有 + 本轮交叉校验增强
+        │ 拦截：未知字段/效果/文件不存在/超时长 → 错误回传重出（现有闭环）
+        ▼
+  L1  host 侧启发式扫描              ← 新增，毫秒级，只标记不拦截
+        │ 命中：emit hallucination(warn)，前端在消息旁显示&quot;此处疑似与实际不符&quot;
+        ▼
+  L2  RubricMiddleware grader       ← 新增，LLM 评审，needs_revision 自动注入修正
+        │ failed / max_iterations：emit hallucination(error)，告知用户人工确认
+        ▼
+  交付（成片 + 可能的幻觉标记）</code></pre>
+<h3>L0 —— 编译器/schema（拦截层）</h3>
+<p>已有：未知字段拒绝、效果白名单、素材存在性。 本轮增强：<code>check_material_fit</code>（§5.3a）——以服务端真实 probe 为准的 素材-需求匹配校验族（超范围 / 空段 / 无声轨 / BGM 太短 / PiP 太短……），堵住 &quot;编造 probe 数据让超范围需求过检&quot;的漏洞（§2.3 的实测路径）。</p>
+<p>职责：<strong>让幻觉进不了编译器</strong>。误伤率 ≈ 0，成本 ≈ 0。</p>
+<h3>L1 —— host 侧扫描（标记层，纯规则）</h3>
+<p>在 <code>_stream_agent</code> 的既有消息循环里，对每条新 <code>AIMessage</code> 跑 <code>_hallucination_scan(msg, inputs, probe_results)</code>：</p>
+<table><thead><tr><th>信号</th><th>判定</th></tr></thead><tbody><tr><td>文本声称的效果名不在 <code>skills.SKILLS</code> 注册表</td><td>&quot;声称做了不存在的能力&quot;</td></tr><tr><td>文本/工具参数里出现的 <code>INPUT/xxx</code> 不在实际目录</td><td>&quot;引用了不存在的素材&quot;</td></tr><tr><td><code>probe_media</code> 返回错误，模型仍按成功结果引用其数据</td><td>&quot;用了失败的探测结果&quot;</td></tr><tr><td>文本声称的叠加/音频，plan 里无对应字段</td><td>&quot;声称与计划不符&quot;</td></tr></tbody></table>
+<p>命中 → emit <code>{&quot;type&quot;:&quot;hallucination&quot;, &quot;level&quot;:&quot;warn&quot;, &quot;signal&quot;:..., &quot;evidence&quot;:...}</code>。 <strong>只通知、不拦截</strong>：启发式有误报，打断正常流程的代价大于收益。</p>
+<p>前端展示约定：<code>warn</code> 在该条消息右上角加琥珀色「疑似幻觉」徽标， hover 显示 evidence；<code>error</code>（来自 L2 失败）用红色。</p>
+<p>职责：<strong>让用户看见&quot;模型这话靠不住&quot;</strong>。成本毫秒级，可常开。</p>
+<h3>L2 —— RubricMiddleware 自动纠偏（深度层）</h3>
+<p>见 §3.2。agent 每次&quot;以为做完了&quot;时 grader 子 agent 对照 rubric 审 transcript： <code>needs_revision</code> → 评语注入循环、自动重出计划； <code>satisfied</code> → 放行；<code>failed/max_iterations_reached</code> → host 读出 <code>_rubric_status</code> emit <code>hallucination(error)</code> 告知用户。</p>
+<p>职责：<strong>在不惊动用户的前提下自动纠偏</strong>。成本 = 每轮 1~N 次 grader LLM 调用， 用 <code>V2_RUBRIC=1</code> 开关控制，P1 阶段默认开（多轮修订时尤其值得： 修订请求往往只点一处，grader 能抓&quot;顺手乱改&quot;）。</p>
+<h3>为什么必须三层</h3>
+<ul><li>只有 L0：口头声称无人管（§2.4），且&quot;回验失败&quot;这种后置信号太迟；</li><li>加 L1：用户能看见了，但模型不知道自己错了，不会改；</li><li>加 L2：模型被自动纠正了，但 grader 又贵又慢，不能什么事都惊动它。</li></ul>
+<p>所以 L1 常开（便宜）、L2 开关控制（贵）、L0 永远在（免费）。</p>
+<hr>
+<h2>7. ask_user 实现方式对比（A/B）</h2>
+<table><thead><tr><th></th><th>方案 A：工具直返（第一轮方案）</th><th>方案 B：deepagents 原生 HITL</th></tr></thead><tbody><tr><td>机制</td><td><code>ask_user</code> 立即返回；问题推给前端；用户<strong>下一轮消息</strong>作答</td><td><code>interrupt_on={&quot;ask_user&quot;: ...}</code> + checkpointer；图在工具前中断，<strong>原地等</strong>用户答案 POST 回来后恢复</td></tr><tr><td>架构改动</td><td>无（与现有单次请求-响应流兼容）</td><td>大：checkpointer、resume 端点、前端状态机、<code>_stream_agent</code> 改可中断-恢复</td></tr><tr><td>用户体验</td><td>问答隔一轮，自然符合&quot;对话&quot;心智</td><td>一轮内完成，更像表单</td></tr><tr><td>会话关系</td><td>答案天然成为下一轮输入，与 D1 会话机制<strong>同构</strong></td><td>答案注入当前线程，需与会话存储额外打通</td></tr><tr><td>风险</td><td>模型可能在拿到答案前继续乱跑（靠&quot;ask_user 后停止&quot;提示词约束）</td><td>中断/恢复的边界情况多（超时、并发、刷新）</td></tr></tbody></table>
+<p><strong>推荐：P0 用 A</strong>（改动小、与 v3.1 其余机制自洽），<strong>B 作为 P2 可选项</strong>—— 如果实际使用中&quot;问答隔一轮&quot;被用户明确诟病，再切换到 B，届时 D1 的会话机制 依然复用（B 只是把&quot;下一轮消息&quot;换成&quot;同轮 resume&quot;）。</p>
+<hr>
+<h2>8. 交互时序（更新版）</h2>
+<pre><code>【第 1 局 · 第 1 轮】用户：&quot;把 INPUT/a.mp4 和 b.mp4 拼起来，中间加 0.5 秒 fade&quot;
+  规则闸门 → agent(probe×2) → submit_plan → L0 通过
+  → L1 扫描无异常 → 渲染执行 → verify ok
+  会话：turn=1, last_plan=P1, last_output=OUTPUT/final.mp4
+
+【第 2 轮】用户：&quot;第一个素材的前 50 秒加一行花字&quot;
+  Tier 1：agent probe 发现素材只有 12.259s → 可行性自检不过 → ask_user：
+    &quot;素材 a.mp4 实际时长 12.259 秒，没有 50 秒。你要：
+     1) 用全部 12.259 秒  2) 换别的素材  3) 改范围（如前 10 秒）&quot;
+  （若模型没自检、硬出 trim_end=50：Tier 2 check_material_fit 以真实 probe
+   判定 over_range → 直接 question 问用户，零重试；
+   若编造 probe.duration=60：Tier 2 以服务端缓存真实 probe 为准 + probe_mismatch
+   双重打回——编造数据骗不过 Tier 2）
+
+【第 2.5 轮】用户回答：&quot;那就用全部时长&quot;
+  会话里 pending_question 非空 → 构造问答接续上下文（原问题 + 用户回答 +
+  &quot;按选择修正计划重新提交&quot;的指令）→ agent 产出 trim_end=12.259 的计划
+  → 正常编译执行；pending_question 清除
+
+【第 3 轮】用户：&quot;输出换成 1080p&quot;
+  后端自动改名 final-r2.mp4（D4）→ 修订 brief 带 P1
+  → agent 只改 output.resolution → diff 卡片只显示这一条
+  → L2 grader 复核：&quot;除分辨率外与上一版一致&quot; → satisfied
+
+【用户点「启动新任务」】session_id 换新 → 对话清空 → 素材列表刷新
+  → 后端见新 id 建空会话 —— 新一轮循环开始</code></pre>
+<hr>
+<h2>9. 风险与缓解</h2>
+<table><thead><tr><th>风险</th><th>表现</th><th>缓解</th></tr></thead><tbody><tr><td>provider 400</td><td>回放带内容块的历史</td><td>D1：只回传纯文本 plan（沿用既有约束）</td></tr><tr><td>静默改动</td><td>模型顺手改用户没提的字段</td><td>产物改名强制 + diff 展示 + L2 grader</td></tr><tr><td>编造 probe 数据</td><td>&quot;前 50 秒&quot;配 <code>probe.duration=60</code></td><td>L0 交叉校验（§5.3a）+ prompt 明示</td></tr><tr><td>规则闸门误伤</td><td>&quot;剪掉前5秒&quot;被当闲聊</td><td>只做负例 + 关键词表覆盖剪辑动词</td></tr><tr><td>反问过于敏感</td><td>频繁反问惹人烦</td><td>限定四种触发条件 + 正反例提示词</td></tr><tr><td>L1 误报</td><td>正常消息被打&quot;疑似幻觉&quot;</td><td>只标记不拦截；L2 用 LLM 复核兜底</td></tr><tr><td>L2 成本</td><td>每轮多烧 grader 调用</td><td><code>V2_RUBRIC</code> 开关 + <code>max_iterations=2</code> 封顶</td></tr><tr><td>会话丢失</td><td><code>--force</code> 重启</td><td>无状态兜底（未知 id 当第一轮），产物在 OUTPUT/ 可查</td></tr><tr><td>重试语义混淆</td><td>用户修订失败被自动重试烧算力</td><td>重试反馈保留&quot;这是修订&quot;；连续同错提前收手（现有逻辑）</td></tr></tbody></table>
+<hr>
+<h2>10. 分期</h2>
+<h3>P0 —— 最小可交互闭环</h3>
+<ul><li><code>ask_user</code> 工具 + <code>extract_ask</code> + <code>_revision_brief</code> + <code>plan_with_retry</code> 修订参数与三分支（§5.3b）</li><li><code>SESSIONS</code> + <code>/api/run</code> 带 <code>session_id</code> + 后端强制改名</li><li><strong>前端「启动新任务」入口（§5.1）</strong></li><li><strong>Preflight Tier 1：Workflow 加可行性自检 + 提示词（§5.2b）</strong></li><li><strong>Preflight Tier 2：<code>check_material_fit</code> + 错误分流（§5.3a/b）——每轮必跑</strong></li><li><strong>L1 host 幻觉扫描 + 前端标记（§6）</strong></li><li>前端 <code>question</code> / <code>hallucination</code> 事件渲染</li><li>目标：能连续对话；&quot;哈哈哈&quot;被反问；&quot;前 50 秒&quot;及各类素材不匹配被拦下并反问</li></ul>
+<p>（零无效重试）；模型的可疑声称对用户可见</p>
+<h3>P1 —— 可观测与自动纠偏</h3>
+<ul><li><code>_intent_gate</code> 规则闸门（D5）</li><li><code>diff_plans</code> + 右栏「本次修订」卡片</li><li><strong>L2 RubricMiddleware（默认开，V2_RUBRIC 可关）</strong></li><li>目标：省掉无谓 LLM 调用；用户看清 agent 改了什么；</li></ul>
+<p>幻觉在到达用户前被自动纠正</p>
+<h3>P2 —— 深化（可选）</h3>
+<ul><li>会话落 <code>TMP/sessions.json</code>（重启不丢）</li><li>用户未要求的字段被改动时高亮告警</li><li><strong>ask_user 方案 B（HITL 原地问答，§7）</strong></li><li>「历史产物」支持选一版作为修订基线（回滚）</li></ul>
+<hr>
+<h2>11. 验收测试</h2>
+<p><code>TMP/_multi_turn_test.py</code>（真实 LLM，e2e；<code>_intent_gate</code> / <code>diff_plans</code> / 交叉校验 / L1 扫描另配离线单测，毫秒级）：</p>
+<table><thead><tr><th>#</th><th>输入 / 动作</th><th>期望</th></tr></thead><tbody><tr><td>1</td><td>&quot;拼接两段 + fade&quot;</td><td>产出成片；会话落 last_plan；filename=final.mp4</td></tr><tr><td>2</td><td>&quot;哈哈哈&quot;</td><td>零 ffmpeg 命令；收到 <code>question</code>；last_plan 未动</td></tr><tr><td>3</td><td>&quot;输出换成 1080p&quot;</td><td>新计划仅 resolution 变；产物自动改名 final-r2.mp4；旧成片仍在</td></tr><tr><td>4</td><td>&quot;第一个素材的前 50 秒加花字&quot;（素材 12.259s）</td><td><strong>收到 question</strong>（含真实时长 + 三个选项）；或 Tier 1 自检反问 / Tier 2 over_range 直接问用户；<strong>绝不静默截断，且零重试</strong></td></tr><tr><td>4b</td><td>接用例 4，用户回答&quot;用全部时长&quot;</td><td>下一轮上下文含原问题 + 用户回答（问答接续）；产出 trim_end=12.259 的计划并成功渲染；<code>pending_question</code> 清除</td></tr><tr><td>5</td><td>用例 4 的 plan 里塞 <code>probe.duration=60</code></td><td>Tier 2 以真实 probe 判 over_range + <code>probe_mismatch</code>，直接 question（编造数据骗不过）</td></tr><tr><td>5b</td><td>&quot;给视频加 BGM 渐入&quot;（素材无声轨）</td><td><code>no_audio_track</code> → question（选项：换素材 / 只要画面）</td></tr><tr><td>5c</td><td>&quot;配首 BGM&quot;（BGM 文件 8s，成片 20s，<code>loop</code> 缺省）</td><td><code>bgm_too_short</code> → question（选项：自动 loop / 换曲 / 接受中途静默）</td></tr><tr><td>5d</td><td>输出分辨率设成源的 3 倍</td><td>⚠️ <code>upscale</code> warn 事件，<strong>不阻断</strong>，前端提示</td></tr><tr><td>6</td><td>文本声称&quot;已加背景音乐&quot;但 plan 无 audio</td><td>L1 emit <code>hallucination(warn)</code>，前端出现标记</td></tr><tr><td>7</td><td>&quot;给那个视频加转场&quot;（INPUT 3 个素材）</td><td>question 列出 3 个候选，不猜</td></tr><tr><td>8</td><td>&quot;帮我做个动态贴纸&quot;</td><td>question 说明能力边界 + 替代，不臆造 effect</td></tr><tr><td>9</td><td>第 2 轮人为塞不存在的 source</td><td>走现有重试闭环，反馈保留&quot;这是修订&quot;语义</td></tr><tr><td>10</td><td>点「启动新任务」</td><td>前端对话清空、素材列表刷新、session_id 更换；后端旧会话失效</td></tr></tbody></table>
+<hr>
+<h2>12. 与现有设计原则的一致性</h2>
+<ol><li><strong>不靠模型自觉，靠结构性约束</strong>（v2.0 方法论）</li></ol>
+<p>→ 产物改名后端强制；交叉校验确定性；L0 永远在；幻觉通知有专门事件通道。</p>
+<ol><li><strong>失败要显性，不能静默</strong>（<code>plan_schema</code> 注释原话）</li></ol>
+<p>→ <code>ask_user</code> 让&quot;做不到/说不清/素材不够&quot;变成正常可见事件； <code>hallucination</code> 事件让&quot;模型在瞎编&quot;从&quot;回验不一致&quot;这种模糊信号 变成<strong>具体、可定位、分级</strong>的显性通知。</p>
+<ol><li><strong>LLM 出意图、编译器出工程</strong></li></ol>
+<p>→ 本轮所有新增（交叉校验、L1 扫描、diff）都是确定性程序，没有一个滤镜/命令是 LLM 写的； RubricMiddleware 的 grader 只负责&quot;判断对错&quot;，改计划的仍然是主 agent。</p>
+<ol><li><strong>优先用平台原生机制</strong>（本轮新增）</li></ol>
+<p>→ RubricMiddleware / interrupt_on 是 deepagents 0.7.11 自带的能力， 方案优先复用而不是自造轮子；自造的部分（L1、交叉校验）都是 <code>agent.stream</code> 可见性够得着的轻量逻辑。</p>
+</div>
+</body>
+</html>

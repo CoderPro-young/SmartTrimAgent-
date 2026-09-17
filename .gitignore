@@ -8,8 +8,17 @@ TMP/
 OUTPUT/
 output/
 
+# 用户素材（Web 上传 / 手动放进 INPUT/），避免误提交大文件。
+# 注意：仓库历史里的示例素材仍是已跟踪文件，gitignore 不影响它们，
+# `git checkout -- INPUT/` 依然能正常取回。
+INPUT/*
+!INPUT/.gitkeep
+
 # 敏感配置（真实 API key，勿提交）
 .env
 
 # 编辑器本机配置（含本机解释器路径）
 .vscode/
+
+# 工作区会话数据（记忆 / 日志 / 本地脚本，勿提交）
+.workbuddy/
