@@ -907,9 +907,25 @@ $('#send').onclick = () => {
   $('#task').style.height = 'auto';
   run(v);
 };
-/* 「启动新任务」：换新 session_id（后端旧会话惰性失效）+ 清对话 + 刷新素材 */
-$('#newTaskBtn').onclick = () => {
+/* 「启动新任务」：清空上一任务上传的全部素材（后端以白名单为准），
+   再重开一局；清理失败（如任务运行中）则保持当前会话不变 */
+$('#newTaskBtn').onclick = async () => {
   if (busy) return;
+  const old = sessionId;
+  try {
+    const r = await fetch('/api/session/reset', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: old })
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok){
+      addError('启动新任务失败：' + (j.error || ('HTTP ' + r.status)) + '，当前会话保持不变。');
+      return;
+    }
+  } catch (e){
+    addError('启动新任务失败：' + e.message + '，当前会话保持不变。');
+    return;
+  }
   sessionId = _newSessionId();
   localStorage.setItem('st_session', sessionId);
   turnCount = 0;

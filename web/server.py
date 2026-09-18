@@ -227,13 +227,13 @@ def _retire(full: str, name: str) -> tuple[str, str]:
     不可用时直接报错），退化成一个改名操作——移到 TMP/removed/。改名不受那套
     机制限制，而且可恢复，效果上同样让素材从 agent 视野里消失。
 
-    返回 (mode, detail)，mode ∈ {"deleted", "moved"}；彻底失败则抛 OSError。
+    返回 (mode, detail)，mode ∈ {"deleted", "moved"}；彻底失败抛原异常。
     """
     try:
         os.remove(full)
         return "deleted", ""
-    except OSError as exc:
-        first_exc = exc
+    except Exception as first_exc:   # 宽捕获：safe-delete 钩子的异常未必是 OSError
+        pass
 
     trash = os.path.join(PROJECT_ROOT, "TMP", "removed")
     os.makedirs(trash, exist_ok=True)
@@ -243,7 +243,11 @@ def _retire(full: str, name: str) -> tuple[str, str]:
         target = os.path.join(trash, f"{stem}-{int(time.time())}{ext}")
     try:
         os.replace(full, target)
-    except OSError:
+    except Exception as exc2:
+        # 降级也失败：把两次异常都记进服务日志，便于定位是哪种拦截
+        sys.stderr.write(f"[retire] 真删失败: {type(first_exc).__name__}: {first_exc}\n")
+        sys.stderr.write(f"[retire] 降级移动也失败: {type(exc2).__name__}: {exc2}\n")
+        sys.stderr.flush()
         raise first_exc
     return "moved", os.path.relpath(target, PROJECT_ROOT).replace("\\", "/")
 
@@ -252,7 +256,7 @@ def _retire_quietly(path: str) -> None:
     """丢弃上传失败的临时文件（同理：真删不行就挪进 TMP/removed/）。"""
     try:
         _retire(path, os.path.basename(path))
-    except OSError:
+    except Exception:
         pass
 
 
@@ -635,6 +639,8 @@ class Handler(BaseHTTPRequestHandler):
 
         没有用 multipart/form-data：标准库解析 multipart 又长又容易出错，
         而前端 `fetch(url, {body: file})` 直接发裸体更简单、更快。
+        归属不按会话记账：进白名单（TMP/uploads.json）即视为本任务素材，
+        「启动新任务」时白名单整体清空。
         """
         name = _safe_name(raw_name)
         if not name:
@@ -720,6 +726,41 @@ class Handler(BaseHTTPRequestHandler):
             "probe": info,
         })
 
+    def _handle_session_reset(self, payload: dict) -> None:
+        """「启动新任务」：清掉全部网页上传的素材，然后废弃会话。
+
+        归属不按会话记账：登记只存进程内存（SESSIONS）的话，服务一重启就丢，
+        旧任务的素材便永远清不掉——而 INPUT/ 对 agent 是全局可见的，必须清得掉。
+        因此以 TMP/uploads.json 白名单为准，一次清空其中全部文件；
+        手动放进 INPUT/ 的文件与示例素材不在白名单内，不受影响。
+        单个素材清不掉（被锁等）不阻断其余，errors 里逐条说明。
+        """
+        sid = (payload.get("session_id") or "").strip()
+        if not sid:
+            self._fail(400, "缺少 session_id。")
+            return
+        if RUN_LOCK.locked():
+            self._fail(409, "有任务正在运行，等它结束再启动新任务。")
+            return
+        with _SESSION_LOCK:
+            SESSIONS.pop(sid, None)
+        cleared: list[str] = []
+        errors: list[str] = []
+        for name in _load_ledger():
+            full = self._resolve_under(INPUT_DIR, name)
+            if not full:
+                continue
+            try:
+                _retire(full, name)
+                cleared.append(name)
+            except Exception as exc:     # 宽捕获：一个失败不拖垮整组
+                errors.append(f"{name}: {exc}")
+            _PROBE_CACHE.pop(full, None)
+        if cleared:
+            gone = set(cleared)
+            _save_ledger([n for n in _load_ledger() if n not in gone])
+        self._send_json({"ok": True, "cleared": cleared, "errors": errors})
+
     def _handle_delete(self, payload: dict) -> None:
         """移除素材：只允许动网页上传过的（白名单在 TMP/uploads.json）。
 
@@ -739,7 +780,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             mode, detail = _retire(full, name)
-        except OSError as exc:
+        except Exception as exc:     # 宽捕获：钩子异常类型不确定（见 _retire 注释）
             self._fail(500, f"移除失败：{exc}")
             return
         _PROBE_CACHE.pop(full, None)
@@ -901,6 +942,10 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/delete":
             self._handle_delete(payload)
+            return
+
+        if path == "/api/session/reset":
+            self._handle_session_reset(payload)
             return
 
         if path != "/api/run":

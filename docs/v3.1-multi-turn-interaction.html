@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>多轮交互与修订 · 技术方案 v3.1（第三轮）</title>
+<title>多轮交互与修订 · 技术方案 v3.1</title>
 <style>
   :root {
     --bg: #0f1419; --panel: #161b22; --panel2: #1c2330;
@@ -51,7 +51,7 @@
 <body>
 <div class="wrap">
 <h1>多轮交互与修订 —— 技术方案（v3.1 · 第三轮修订）</h1>
-<blockquote>目标：把现在「一句话 → 一条成片 → 结束」的一次性流程，改成<strong>可持续交互</strong>的会话： 用户看完成片可以继续提修改要求，agent 在上一版基础上增量修改； 用户意图不明确、<strong>要求与素材不匹配</strong>时，agent <strong>先反问</strong>而不是硬编计划或默默截断； 模型出现<strong>幻觉</strong>时能被发现、被通知、被纠正。  承接 [v2.0-multi-material-editing.md](./v2.0-multi-material-editing.md) 的 「LLM 出计划 JSON → 编译器出命令」架构，<strong>不改变这条分工</strong>。  <strong>修订历史</strong> - 第一轮（2026-09-16）：多轮会话载体、ask_user、防静默改动、产物不覆盖。 - 第二轮（2026-09-17）：① 前端「启动新任务」入口；② 素材不匹配的反问 （含 plan_schema 确定性闸门，堵&quot;编造 probe 数据&quot;漏洞）；③ 幻觉通知三层防御 （基于 deepagents 0.7.11 源码调研，含 RubricMiddleware 与 HITL 两条原生机制）； ④ ask_user 两种实现方式对比。 - 第三轮（2026-09-17，本文）：把&quot;素材不匹配&quot;从<strong>时长一个例子</strong>升级为系统性的 <strong>Preflight 素材-需求匹配校验</strong>（§5.3c）：语义层（LLM 探测后自检）+ 计划层 （确定性 <code>check_material_fit</code>）两层，每轮必跑；<strong>关键升级：把&quot;模型修不了的错&quot; （用户可决）从重试闭环里摘出来，直接变成问用户的问题</strong>（§5.3c 末）。  状态：方案待评审，尚未实现。</blockquote>
+<blockquote>目标：把现在「一句话 → 一条成片 → 结束」的一次性流程，改成<strong>可持续交互</strong>的会话： 用户看完成片可以继续提修改要求，agent 在上一版基础上增量修改； 用户意图不明确、<strong>要求与素材不匹配</strong>时，agent <strong>先反问</strong>而不是硬编计划或默默截断； 模型出现<strong>幻觉</strong>时能被发现、被通知、被纠正。  承接 [v2.0-multi-material-editing.md](./v2.0-multi-material-editing.md) 的 「LLM 出计划 JSON → 编译器出命令」架构，<strong>不改变这条分工</strong>。  <strong>修订历史</strong> - 第一轮（2026-09-16）：多轮会话载体、ask_user、防静默改动、产物不覆盖。 - 第二轮（2026-09-17）：① 前端「启动新任务」入口；② 素材不匹配的反问 （含 plan_schema 确定性闸门，堵&quot;编造 probe 数据&quot;漏洞）；③ 幻觉通知三层防御 （基于 deepagents 0.7.11 源码调研，含 RubricMiddleware 与 HITL 两条原生机制）； ④ ask_user 两种实现方式对比。 - 第三轮（2026-09-17，本文）：把&quot;素材不匹配&quot;从<strong>时长一个例子</strong>升级为系统性的 <strong>Preflight 素材-需求匹配校验</strong>（§5.3c）：语义层（LLM 探测后自检）+ 计划层 （确定性 <code>check_material_fit</code>）两层，每轮必跑；<strong>关键升级：把&quot;模型修不了的错&quot; （用户可决）从重试闭环里摘出来，直接变成问用户的问题</strong>（§5.3c 末）。  状态：<strong>P0 已实现并验证</strong>（2026-09-17，离线 31 项 + e2e 4 例全绿）；P1（规则闸门已随 P0 提前落地、diff 卡片、L2 RubricMiddleware）与 P2 待做。 实现与验证细节见当日 memory 日志；离线回归 <code>TMP/_multi_turn_test.py</code>。</blockquote>
 <hr>
 <h2>1. 需求拆解</h2>
 <table><thead><tr><th>#</th><th>子问题</th><th>本质</th><th>主要改动位置</th></tr></thead><tbody><tr><td>①</td><td>会话上下文</td><td>第二轮要知道&quot;上一版剪成什么样&quot;</td><td>后端（会话存储）+ agent（上下文构造）</td></tr><tr><td>②</td><td>意图不明确时反问</td><td>agent 需要一条「不产出计划」的合法出口</td><td>agent（<code>ask_user</code> 工具 + 提示词）+ 前端</td></tr><tr><td>③</td><td>成片可反复调整</td><td>上一版计划 → 新版计划的<strong>增量修订</strong></td><td>agent + 编译器（diff + 防静默改动）</td></tr><tr><td>④</td><td><strong>素材与要求不匹配</strong></td><td>时长超范围只是其一：还有&quot;要 BGM 但素材无声轨&quot;、&quot;PiP 素材太短&quot;、&quot;BGM 不够长又不 loop&quot;、&quot;要两段素材但只有一段&quot;……</td><td><strong>Preflight 两层校验</strong>（§5.3c）：probe 后语义自检 + 计划层确定性匹配，不匹配就反问</td></tr><tr><td>⑤</td><td><strong>模型幻觉</strong></td><td>声称做了没做的事 / 编造 probe 数据 / 引用不存在的文件</td><td>三层防御（§6），含 deepagents 原生机制</td></tr><tr><td>⑥</td><td><strong>开启新一轮</strong></td><td>前端要能从任意状态&quot;重开一局&quot;，刷新素材</td><td>前端 + 后端会话重置</td></tr></tbody></table>
@@ -127,8 +127,9 @@ messages: list = [{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: task
 <p>新计划 <code>output.filename</code> 与 <code>last_output</code> 相同时自动加 <code>-r2</code> 后缀， 不靠模型自觉（否则没法对比修改前后）。纯字符串处理，模型绕不过。</p>
 <h3>D5. 规则闸门只做「高置信度负例」</h3>
 <p>纯规则拦&quot;一眼没意图&quot;的输入（&quot;哈哈哈&quot;），其余进 agent 由 <code>ask_user</code> 兜底。 规则错了最多是&quot;少问一次&quot;，不会拦死正常需求。</p>
-<h3>D6. 会话存进程内，前端持有 id；「启动新任务」= 换 id</h3>
-<p>单用户本地工具，<code>SESSIONS: dict</code> 足够。前端持 <code>crypto.randomUUID()</code> 存 localStorage。「启动新任务」按钮 = 生成新 id + 清空前端 → 对后端而言旧会话 自然失效（惰性 GC），不需要显式删除接口。<code>--force</code> 重启丢会话可接受。</p>
+<h3>D6. 会话存进程内，前端持有 id；「启动新任务」= 换 id + 清上一任务的素材</h3>
+<p>单用户本地工具，<code>SESSIONS: dict</code> 足够。前端持 <code>crypto.randomUUID()</code> 存 localStorage。「启动新任务」先调 <code>POST /api/session/reset</code> 把上一任务上传的 素材清除，再换新 id 开始新一轮循环；未知 id 无状态兜底（当第一轮）。</p>
+<p><strong>素材归属不按会话记在内存里</strong>——<code>SESSIONS</code> 一重启就丢，旧任务的素材会 永远清不掉（INPUT/ 对 agent 又是全局可见的）。归属以落盘的 <code>TMP/uploads.json</code> 白名单为准：上传即进白名单，reset 一次清空白名单里全部 文件（单个失败不拖垮整组），重启也不受影响；手动放进 <code>INPUT/</code> 的文件与 示例素材不在白名单内，不会被 reset 清除。任务运行中（<code>RUN_LOCK</code> 占用） reset 直接拒绝，防止删掉正在渲染的源文件。会话本身仍只在内存 （<code>--force</code> 重启丢对话上下文可接受，素材清理不受影响）。</p>
 <h3>D7. 幻觉防御按「成本递增」分三层，每层职责单一</h3>
 <p>L0 拦截（确定性，已有+增强）、L1 标记（毫秒级规则，只通知不拦截）、 L2 纠偏（LLM grader，自动注入修正）。详见 §6。<strong>绝不把三层揉成一层</strong>—— 成本和误伤率差着数量级。</p>
 <h3>D8. 素材-需求匹配 = 每轮必过的 Preflight，但校验点不在&quot;对话开始前&quot;，而在两个能落地的地方</h3>
@@ -149,12 +150,16 @@ messages: list = [{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: task
 <table><thead><tr><th>机制</th><th>在哪</th><th>性质</th></tr></thead><tbody><tr><td>可行性自检（Tier 1）</td><td>agent <strong>内部</strong>，循环里</td><td><strong>提示词协议（软约束）</strong>：Workflow 第 2.5 步把顺序写给模型看，模型大概率照做，但不保证 100%</td></tr><tr><td>素材匹配校验（Tier 2）</td><td><strong>循环外</strong>，host</td><td><strong>确定性硬闸门</strong>：<code>submit_plan</code> 是循环内的普通工具调用，没有&quot;计划已完成&quot;这个可由程序拦截的时点；可靠的拦截点只在 host 收到计划之后</td></tr><tr><td>幻觉 grader（L2）</td><td>agent 内部，但用现成钩子</td><td><code>RubricMiddleware</code> 挂在&quot;agent 以为做完了&quot;这个确定时点上——<strong>这是钩子的正确用途</strong></td></tr></tbody></table>
 <p>两个&quot;多轮&quot;不要混淆：<strong>用户驱动的多轮</strong> = 多次 HTTP 请求，每次重建 agent、 纯文本重建上下文（D1）；<strong>agent 内部的&quot;轮&quot;</strong> = ReAct 循环自身的迭代。 前者是本方案加的，后者是 deepagents 本来就有、且保持不动的。</p>
 <h3>5.1 前端：「启动新任务」入口（本轮新增）</h3>
-<ul><li>输入区 <code>[＋ 上传素材]</code> 旁新增 <code>[启动新任务]</code> 按钮（<code>.btn-side</code> 同款样式）。</li><li>点击行为：</li></ul>
+<ul><li>输入区工具栏有 <code>[启动新任务]</code> 扁平按钮（<code>.btn-flat</code>）。</li><li>点击行为：</li></ul>
+<ol><li>先 <code>POST /api/session/reset</code>（带旧 session_id）——**把上一任务上传的</li></ol>
+<p>素材全部清除**（后端以 <code>TMP/uploads.json</code> 白名单为准整组清空，单删失败 不拖垮整组；任务运行中后端拒绝，前端报错并<strong>保持当前会话不变</strong>）；</p>
 <ol><li><code>session_id = crypto.randomUUID()</code>（存回 localStorage）——对应 agent 侧</li></ol>
 <p>&quot;开启新一轮循环&quot;（turn 归零、无 base_plan）；</p>
-<ol><li>清空左侧对话（<code>#msgs</code> 重置 + 欢迎语）；</li><li><code>resetPanels()</code> 清空右栏流水线卡片（<strong>保留素材卡片</strong>）；</li><li><code>loadInputs()</code> 重新拉取 <code>/api/inputs</code>——手动丢进 <code>INPUT/</code> 的文件也会</li></ol>
-<p>在此时出现，这就是&quot;刷新之前的素材&quot;；</p>
+<ol><li>清空左侧对话（<code>#msgs</code> 重置 + 欢迎语）；</li><li><code>resetPanels()</code> 清空右栏流水线卡片（<strong>保留素材卡片</strong>）；</li><li><code>loadInputs()</code> 重新拉取 <code>/api/inputs</code>——此时列表就是清空后的新素材组，</li></ol>
+<p>手动丢进 <code>INPUT/</code> 的文件也会在此刻出现；</p>
 <ol><li>输入框 placeholder 回到第一轮的&quot;描述要剪成什么样&quot;。</li></ol>
+<ul><li><strong>素材归属</strong>：上传即记入落盘白名单 <code>TMP/uploads.json</code>（不按会话记内存，</li></ul>
+<p>服务重启不丢）；单个删除（<code>/api/delete</code>）同步从白名单移除。 手动放进 <code>INPUT/</code> 的文件和示例素材<strong>不在白名单内，不会被 reset 清除</strong>。</p>
 <ul><li><strong>会话生命周期</strong>：一个 <code>session_id</code> 从首轮一直持续到用户点「启动新任务」为止；</li></ul>
 <p>期间的每条用户消息都按&quot;修订轮&quot;处理（有 <code>pending_question</code> 按问答接续、 有 <code>last_plan</code> 按修订 brief，见 §5.4）。中途上传/删除素材<strong>不重置会话</strong>—— 修订 brief 每轮都带当前 INPUT/ 实际素材列表，素材变更自然生效。</p>
 <ul><li>正在运行（<code>busy</code>）时禁用该按钮，避免一局跑到一半开新局把右栏冲掉。</li></ul>
