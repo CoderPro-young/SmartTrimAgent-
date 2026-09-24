@@ -159,7 +159,7 @@ messages: list = [{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: task
 <p>手动丢进 <code>INPUT/</code> 的文件也会在此刻出现；</p>
 <ol><li>输入框 placeholder 回到第一轮的&quot;描述要剪成什么样&quot;。</li></ol>
 <ul><li><strong>素材归属</strong>：上传即记入落盘白名单 <code>TMP/uploads.json</code>（不按会话记内存，</li></ul>
-<p>服务重启不丢）；单个删除（<code>/api/delete</code>）同步从白名单移除。 手动放进 <code>INPUT/</code> 的文件和示例素材<strong>不在白名单内，不会被 reset 清除</strong>。</p>
+<p>服务重启不丢）；单个删除（<code>/api/delete</code>）同步从白名单移除。 手动放进 <code>INPUT/</code> 的文件和示例素材<strong>不在白名单内，不会被 reset 清除</strong>， 但可在界面上手动删除（<code>/api/delete</code> 允许删 INPUT/ 里任何文件； 白名单只决定 reset 是否自动清，不再限制手动删除）。</p>
 <ul><li><strong>会话生命周期</strong>：一个 <code>session_id</code> 从首轮一直持续到用户点「启动新任务」为止；</li></ul>
 <p>期间的每条用户消息都按&quot;修订轮&quot;处理（有 <code>pending_question</code> 按问答接续、 有 <code>last_plan</code> 按修订 brief，见 §5.4）。中途上传/删除素材<strong>不重置会话</strong>—— 修订 brief 每轮都带当前 INPUT/ 实际素材列表，素材变更自然生效。</p>
 <ul><li>正在运行（<code>busy</code>）时禁用该按钮，避免一局跑到一半开新局把右栏冲掉。</li></ul>

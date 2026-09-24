@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 
 import ffmpeg_exec
 from plan_schema import clip_duration, validate_plan
-from skills import is_prepass, is_vf, get_skill
+from skills import is_prepass, is_vf, get_skill, time_scale_of
 
 FONT_PATH = "C:/Windows/Fonts/msyh.ttc"
 # ffmpeg 的 filtergraph 用 ':' 分隔选项，Windows 路径里的盘符冒号必须转义，
@@ -51,12 +51,13 @@ class Command:
 
 @dataclass
 class CompileResult:
-    """compile_plan 的完整产出，后续 execute/verify 就地填充 executes/verify。"""
+    """compile_plan 的完整产出，后续 execute/verify 就地填充 prechecks/executes/verify。"""
 
     plan: dict
     commands: list[Command] = field(default_factory=list)
     sidecars: dict[str, str] = field(default_factory=dict)   # path -> content
     math: dict = field(default_factory=dict)                 # 推导结果，供展示/调试
+    prechecks: list[dict] = field(default_factory=list)      # dry-run 预检结果（T5）
     executes: list[dict] = field(default_factory=list)       # 执行结果
     verify: dict | None = None
 
@@ -169,7 +170,13 @@ def _derive(plan: dict) -> dict:
     prev_d = 0.0
     for i, item in enumerate(timeline):
         cid = item["clip"]
-        d = clip_duration(_clip_by_id(plan, cid))
+        clip = _clip_by_id(plan, cid)
+        d = clip_duration(clip)
+        # T7b：缩放类效果（speed 等）修正 d_i。d_i 是全部时间轴数学的唯一源头，
+        # 起点/转场 offset/总时长/overlay 绝对时间随之一并正确。
+        scale = time_scale_of((clip or {}).get("effects") or [])
+        if scale != 1.0 and d is not None:
+            d = _round2(d * scale)
         durations[cid] = d
         order.append(cid)
         t = item.get("transition")
@@ -230,6 +237,14 @@ def _normalize_commands(plan: dict, math: dict) -> tuple[list[Command], dict]:
             f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
             f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2,fps={fps},format=yuv420p,setsar=1"
         )
+        # 音频效果（如 speed 的 atempo）：收集 abuild 拼一条 -af。
+        # 音频在归一化阶段变速，下游 concat/xfade 用的都是已变速的 norm 文件。
+        af_parts = []
+        for e in effects:
+            s = get_skill(e.get("name")) if isinstance(e, dict) else None
+            if s and s.abuild:
+                af_parts.append(s.abuild(e.get("args") or {}))
+        af = ",".join(af_parts)
         argv = ["ffmpeg", "-y"]
         if kind == "image":
             # 图片素材：loop 定长展示 + 静音音轨对齐时长
@@ -252,8 +267,10 @@ def _normalize_commands(plan: dict, math: dict) -> tuple[list[Command], dict]:
                 amap = "1:a"
             else:
                 amap = "0:a:0?"
-        argv += ["-vf", vf,
-                 "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+        argv += ["-vf", vf]
+        if af:
+            argv += ["-af", af]
+        argv += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
                  "-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2",
                  "-t", str(d),
                  "-map", "0:v:0", "-map", amap, out]
@@ -577,12 +594,194 @@ def compile_plan(plan: dict, project_root: str) -> CompileResult:
     )
 
 
+# --------------------------------------------------------------------------- #
+# dry-run 语法预检（T5）：编译完成 → 执行之前
+#
+# 静态校验（plan_schema）只保证「效果名合法、参数在范围内」，不保证编译器拼出的
+# filtergraph 能被 ffmpeg 解析——这类错误原本要到渲染中途才以 stderr 炸出，慢且
+# 不可回传。预检把每条带滤镜的命令先在 0.5s 合成素材上跑一遍，秒级暴露语法错误。
+# --------------------------------------------------------------------------- #
+
+PRECHECK_DUR = 0.5      # dry-run 只处理 0.5 秒合成素材
+PRECHECK_TIMEOUT = 60   # 单条预检超时（真实渲染可几分钟，预检必须秒级收场）
+_AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".flac", ".ogg", ".aac"}
+
+
+def _ensure_precheck_refs(project_root: str, W: int, H: int) -> tuple[str, str] | None:
+    """生成/复用 dry-run 用的合成参考素材（相对项目根的路径）。
+
+    vref —— 输出分辨率的黑帧 + 静音轨。render 阶段所有 TMP/*_norm.mp4 都是 WxH 且
+            必有音轨（归一化对无声素材补过 anullsrc），用 vref 顶替能保持
+            filter_complex 里 [i:v]/[i:a] 引用的流布局不变。
+    aref —— 纯静音音频，顶替 BGM 等纯音频输入。
+    """
+    vref = f"TMP/_precheck_{W}x{H}.mp4"
+    aref = "TMP/_precheck_audio.m4a"
+    if not os.path.isfile(os.path.join(project_root, vref)):
+        res = ffmpeg_exec.run(
+            ["ffmpeg", "-y", "-hide_banner", "-v", "error",
+             "-f", "lavfi", "-i", f"color=black:s={W}x{H}:r=25:d={PRECHECK_DUR}",
+             "-f", "lavfi", "-i", f"anullsrc=r=48000:cl=stereo:d={PRECHECK_DUR}",
+             "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac",
+             "-shortest", vref],
+            cwd=project_root)
+        if not res["ok"]:
+            return None
+    if not os.path.isfile(os.path.join(project_root, aref)):
+        res = ffmpeg_exec.run(
+            ["ffmpeg", "-y", "-hide_banner", "-v", "error",
+             "-f", "lavfi", "-i", f"anullsrc=r=48000:cl=stereo:d={PRECHECK_DUR}",
+             "-c:a", "aac", aref],
+            cwd=project_root)
+        if not res["ok"]:
+            return None
+    return vref, aref
+
+
+def _src_dims(plan: dict, src: str) -> tuple[int, int]:
+    """源素材分辨率：先按 source 匹配 clip；PREPASS 替换过的 TMP/<cid>_*.mp4 按 cid 回查。
+
+    归一化输入可能是 face_mosaic 等前置命令的中间产物，文件名形如 TMP/c1_masked.mp4，
+    而 delogo 等效果的坐标是按【原始素材】像素校验的，所以尺寸必须追回原 clip 的 probe。
+    """
+    probe: dict = {}
+    for c in plan.get("clips") or []:
+        if c.get("source") == src:
+            probe = c.get("probe") or {}
+            break
+    else:
+        cid = os.path.basename(src).split("_")[0]
+        for c in plan.get("clips") or []:
+            if c.get("id") == cid:
+                probe = c.get("probe") or {}
+                break
+    return int(probe.get("width") or 1280), int(probe.get("height") or 720)
+
+
+def _dry_argv_normalize(argv: list[str], plan: dict) -> list[str]:
+    """归一化命令的 dry-run：合成黑帧替换输入，重建最小等价命令。
+
+    归一化的 -vf 链先跑效果（原始像素坐标，如 delogo 的 region）再 scale/pad，
+    所以黑帧尺寸必须取【源素材探测分辨率】——用输出分辨率会让大坐标的 delogo
+    被假越界误报。取不到 probe 时兜底 1280x720。
+    """
+    vf = argv[argv.index("-vf") + 1]
+    src = argv[argv.index("-i") + 1]
+    w, h = _src_dims(plan, src)
+    out = ["ffmpeg", "-y", "-hide_banner", "-v", "error",
+           "-f", "lavfi", "-i", f"color=black:s={w}x{h}:r=25:d={PRECHECK_DUR}",
+           "-f", "lavfi", "-i", f"anullsrc=r=48000:cl=stereo:d={PRECHECK_DUR}",
+           "-vf", vf]
+    # 音频链（如 speed 的 atempo）一并预检：不带上则 atempo 语法不受检
+    if "-af" in argv:
+        out += ["-af", argv[argv.index("-af") + 1]]
+    out += ["-t", str(PRECHECK_DUR), "-f", "null", "-"]
+    return out
+
+
+def _dry_argv_render(argv: list[str], vref: str, aref: str) -> list[str]:
+    """渲染命令（filter_complex）的 dry-run：外科手术式替换，索引与流布局不动。
+
+      - 真实文件输入 → 合成参考（纯音频扩展名 → aref，其余 → vref；
+        图片画中画输入统一 vref，graph 里只会引用它的 [i:v]）
+      - concat demuxer（-f concat -safe 0）→ 撤掉封装标记当普通视频输入
+      - -ss / -stream_loop / -loop 删除（对 0.5s 参考素材无意义甚至死循环）
+      - 所有 -t 截到 PRECHECK_DUR
+      - 末尾输出路径 → -f null -
+    """
+    out: list[str] = []
+    i, n = 0, len(argv)
+    while i < n:
+        tok = argv[i]
+        if tok in ("-ss", "-stream_loop", "-loop", "-safe"):
+            i += 2
+            continue
+        if tok == "-t":
+            out += ["-t", str(PRECHECK_DUR)]
+            i += 2
+            continue
+        if tok == "-i":
+            path = argv[i + 1]
+            if out[-2:] == ["-f", "concat"]:
+                del out[-2:]
+            ext = os.path.splitext(path)[1].lower()
+            out += ["-i", aref if ext in _AUDIO_EXTS else vref]
+            i += 2
+            continue
+        out.append(tok)
+        i += 1
+    # 渲染命令最后一个参数必为输出路径；换成 null 不落盘
+    if out and not out[-1].startswith("-"):
+        out[-1:] = ["-f", "null", "-"]
+    return out
+
+
+def precheck(result: CompileResult, project_root: str) -> CompileResult:
+    """T5 dry-run 语法预检：所有带滤镜的 ffmpeg 命令先在合成素材上试跑。
+
+    结果记录在 result.prechecks（Web/CLI 可展示）；失败抛 CompileError，
+    错误中文、带 ffmpeg stderr 尾巴，可直接进回传重试通道。
+    跳过项（记 note，不算失败）：非 ffmpeg 命令（detect 阶段 Python 子进程）、
+    无 -vf/-filter_complex 的命令（concat -c copy 快速路径没有滤镜图可检）。
+    """
+    if not ffmpeg_exec.ffmpeg_available():
+        result.prechecks.append({"ok": True, "note": "ffmpeg 未安装，跳过 dry-run 预检。"})
+        return result
+
+    W = int(result.math.get("width") or 1280)
+    H = int(result.math.get("height") or 720)
+    refs = _ensure_precheck_refs(project_root, W, H)
+    if refs is None:
+        result.prechecks.append({"ok": True, "note": "合成参考素材生成失败，跳过预检。"})
+        return result
+    vref, aref = refs
+
+    errors: list[str] = []
+    for c in result.commands:
+        if not c.argv or c.argv[0] != "ffmpeg":
+            result.prechecks.append({"ok": True, "stage": c.stage,
+                                     "description": c.description,
+                                     "note": "非 ffmpeg 命令，预检跳过"})
+            continue
+        if "-filter_complex" not in c.argv and "-vf" not in c.argv:
+            result.prechecks.append({"ok": True, "stage": c.stage,
+                                     "description": c.description,
+                                     "note": "无滤镜图（流复制），预检跳过"})
+            continue
+        if "-filter_complex" in c.argv:
+            dry = _dry_argv_render(c.argv, vref, aref)
+        else:
+            dry = _dry_argv_normalize(c.argv, result.plan)
+        res = ffmpeg_exec.run(dry, cwd=project_root, timeout=PRECHECK_TIMEOUT)
+        rec = {"ok": bool(res["ok"]), "stage": c.stage, "description": c.description}
+        if not res["ok"]:
+            lines = (res.get("stderr") or res.get("error") or "").strip().splitlines()
+            # 优先抓实质错误行（如 "No such filter: 'xxx'"）——它通常在 stderr 前部，
+            # 尾部几行往往只是 "Error opening output files" 这类泛化收尾
+            key = [l for l in lines if any(
+                k in l.lower() for k in ("no such filter", "invalid", "error",
+                                         "unable", "failed", "cannot", "找"))]
+            tail = "\n".join((key[:3] or lines[-3:]))[-400:] if lines else "(无 stderr)"
+            rec["stderr_tail"] = tail
+            errors.append(
+                f"[{c.stage}] {c.description}：dry-run 语法预检失败（命令未执行）。\n"
+                f"  ffmpeg 报错：{tail}"
+            )
+        result.prechecks.append(rec)
+
+    if errors:
+        raise CompileError(errors)
+    return result
+
+
 def execute(result: CompileResult, project_root: str) -> CompileResult:
-    """④ 执行：写 sidecar 文件 + 逐条运行命令（cwd 锚定项目根）。"""
+    """④ 执行：写 sidecar 文件 → dry-run 预检 → 逐条运行命令（cwd 锚定项目根）。"""
     os.makedirs(os.path.join(project_root, "TMP"), exist_ok=True)
     for path, content in result.sidecars.items():
         with open(os.path.join(project_root, path), "w", encoding="utf-8") as f:
             f.write(content)
+    # drawtext 的 textfile 是 sidecar，所以预检必须在写完 sidecar 之后
+    precheck(result, project_root)  # 失败抛 CompileError，命令一条都不会真跑
     for c in result.commands:
         res = ffmpeg_exec.run(c.argv, cwd=project_root)
         result.executes.append({"description": c.description, **res})

@@ -18,7 +18,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-from skills import SKILLS, check_args_keys, effects_menu, validate_audio
+from skills import SKILLS, check_args_keys, effects_menu, validate_audio, time_scale_of
 
 # ---- 白名单 ----
 
@@ -309,6 +309,16 @@ def validate_plan(plan: dict, project_root: str) -> list[str]:
                 errors.append(f"{tag}.position 必须是九宫格之一：{sorted(POSITIONS)}。")
 
     # ---- 转场时长 < 相邻片段时长（需要片段时长可得）----
+    # 片段长度取「变速后的有效时长」（T7b）：转场发生在渲染时间轴上，
+    # 4s 素材 2 倍速后实际只有 2s，用它跟转场时长比才有意义。
+    def _effective_duration(c: dict | None):
+        if not c:
+            return None
+        d = clip_duration(c)
+        if d is None:
+            return None
+        return round(d * time_scale_of(c.get("effects") or []), 3)
+
     for i in range(1, len(timeline)):
         item = timeline[i]
         if not isinstance(item, dict):
@@ -318,12 +328,14 @@ def validate_plan(plan: dict, project_root: str) -> list[str]:
             continue
         prev_c = next((c for c in clips if c.get("id") == timeline[i - 1].get("clip")), None)
         cur_c = next((c for c in clips if c.get("id") == item.get("clip")), None)
-        d_prev = clip_duration(prev_c) if prev_c else None
-        d_cur = clip_duration(cur_c) if cur_c else None
+        d_prev = _effective_duration(prev_c)
+        d_cur = _effective_duration(cur_c)
         if d_prev and tr["duration"] >= d_prev:
-            errors.append(f"timeline[{i}] 转场时长 {tr['duration']}s 不小于前一片段长度 {d_prev}s。")
+            errors.append(f"timeline[{i}] 转场时长 {tr['duration']}s 不小于前一片段"
+                          f"（变速后）长度 {d_prev}s。")
         if d_cur and tr["duration"] >= d_cur:
-            errors.append(f"timeline[{i}] 转场时长 {tr['duration']}s 不小于当前片段长度 {d_cur}s。")
+            errors.append(f"timeline[{i}] 转场时长 {tr['duration']}s 不小于当前片段"
+                          f"（变速后）长度 {d_cur}s。")
 
     return errors
 

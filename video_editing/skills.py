@@ -15,6 +15,12 @@ pipeline 三种取值：
   VF       —— 并入 -vf 滤镜链（大多数视觉滤镜）
   PREPASS  —— 需要独立前置命令 + 输入替换（如 face_mosaic 的人脸检测）
 音频轨（BGM）不是逐 clip 效果，走 AUDIO 规格（validate_audio + AUDIO_PROMPT_DOC）。
+
+T7b 起新增两个通用维度（speed 首个使用者，将来的倒放/抽帧/循环复用）：
+  abuild      —— 音频滤镜表达式（并入归一化命令的 -af，如 speed 的 atempo 链）
+  time_scale  —— args -> 时长缩放系数（1.0 = 不变）。编译器 _derive 用它修正 d_i，
+                 时间轴数学（起点/转场/总时长/overlay 绝对时间）随 d_i 自动正确；
+                 plan_schema 里「输出时间语义」的校验（转场 < 片段长度）也用它。
 """
 
 from __future__ import annotations
@@ -41,8 +47,10 @@ class Skill:
     arg_keys    —— args 的合法 key 集合；多写的 key 由 plan_schema 统一报错拦下
     validate    —— (args, tag, clip) -> 错误列表；tag 形如 clips[0].effects[1]
                    只负责「值的合法性」，key 的合法性由 arg_keys 保证
-    build       —— args -> 滤镜表达式（仅 VF 类）
+    build       —— args -> 视频滤镜表达式（仅 VF 类）
+    abuild      —— args -> 音频滤镜表达式（可选；并入归一化的 -af）
     prepass     —— (input_path, output_path, args) -> argv（仅 PREPASS 类）
+    time_scale  —— args -> 时长缩放系数（可选；None = 不改变时长）
     prompt_doc  —— 多行用法说明（进提示词）
     """
 
@@ -52,7 +60,9 @@ class Skill:
     arg_keys: frozenset[str] = frozenset()
     validate: Callable[[dict, str, dict], list[str]] | None = None
     build: Callable[[dict], str] | None = None
+    abuild: Callable[[dict], str] | None = None
     prepass: Callable[[str, str, dict], list[str]] | None = None
+    time_scale: Callable[[dict], float] | None = None
     prompt_doc: str = ""
 
 
@@ -259,15 +269,82 @@ SKILL_FACE_MOSAIC = Skill(
 
 
 # --------------------------------------------------------------------------- #
+# speed（变速，T7b：首个携带 abuild + time_scale 的技能）
+# --------------------------------------------------------------------------- #
+
+def _val_speed(args: dict, tag: str, clip: dict) -> list[str]:
+    errors: list[str] = []
+    f = args.get("factor")
+    if not _num(f):
+        return [f"{tag}.args.factor 必须是数字（2 = 2 倍速，0.5 = 慢放一半）。"]
+    if not (0.25 <= f <= 4.0):
+        errors.append(f"{tag}.args.factor 必须在 0.25~4.0 内。")
+    if (clip or {}).get("kind") == "image":
+        errors.append(f"{tag} 不能用于图片素材：图片时长是显式指定的，变速无意义。")
+    return errors
+
+
+def _build_atempo(args: dict) -> str:
+    """音频变速。atempo 单级只支持 0.5~2.0，超出范围链式拆分（4x = 2x∘2x）。"""
+    f = float(args.get("factor", 1.0))
+    stages: list[str] = []
+    while f > 2.0 + 1e-9:
+        stages.append("atempo=2.0")
+        f /= 2.0
+    while f < 0.5 - 1e-9:
+        stages.append("atempo=0.5")
+        f /= 0.5
+    stages.append(f"atempo={f:g}")
+    return ",".join(stages)
+
+
+SKILL_SPEED = Skill(
+    name="speed",
+    summary="change playback speed (2 = twice as fast, 0.5 = slow motion).",
+    arg_keys=frozenset({"factor"}),
+    validate=_val_speed,
+    build=lambda args: f"setpts=PTS/{args['factor']:g}",
+    abuild=_build_atempo,
+    time_scale=lambda args: 1.0 / float(args["factor"]),
+    prompt_doc=(
+        "  Required `args.factor`: 0.25..4.0 (2 = 2x faster, 0.5 = half speed).\n"
+        "  Speed changes the clip DURATION (4s at 2x becomes 2s). The compiler\n"
+        "  re-derives the whole timeline (starts / transitions / overlay times /\n"
+        "  total length) from the sped-up duration — overlay `start_offset` is\n"
+        "  counted on the FINAL (sped-up) clip time.\n"
+        "  Audio tempo is adjusted automatically (atempo chain).\n"
+        "  Example: {\"name\":\"speed\",\"args\":{\"factor\":2}}\n"
+        "  NOT for image clips."
+    ),
+)
+
+
+# --------------------------------------------------------------------------- #
 # 注册表
 # --------------------------------------------------------------------------- #
 
 SKILLS: dict[str, Skill] = {
     s.name: s for s in (
         SKILL_HFLIP, SKILL_VFLIP, SKILL_TRANSPOSE, SKILL_EQ,
-        SKILL_DELOGO, SKILL_FACE_MOSAIC,
+        SKILL_DELOGO, SKILL_FACE_MOSAIC, SKILL_SPEED,
     )
 }
+
+
+def time_scale_of(effects: list) -> float:
+    """effects 的综合时长缩放系数（1.0 = 不变）。
+
+    供编译器 _derive（修正 d_i）与 plan_schema（输出时间语义校验）共用，
+    缩放逻辑不落第二处。多个缩放类效果连乘。
+    """
+    scale = 1.0
+    for e in effects or []:
+        if not isinstance(e, dict):
+            continue
+        s = SKILLS.get(e.get("name"))
+        if s and s.time_scale:
+            scale *= float(s.time_scale(e.get("args") or {}))
+    return scale
 
 
 def get_skill(name: str) -> Skill | None:
