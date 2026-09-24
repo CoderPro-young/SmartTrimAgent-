@@ -11,6 +11,8 @@
 
 - **自然语言驱动**：一句话描述剪辑需求，无需手写 ffmpeg 命令
 - **多素材拼接**：自动把异构素材（mp4 / avi / 图片、不同分辨率 / 编码 / 帧率 / 声道）归一化成统一中间格式再拼接
+- **多模态内容理解（V4）**：`analyze_media` 建立镜头级语义索引（人数 / 场景 / 活动 / 情绪 / 画质）——
+  "帮我剪和朋友一起的时光""只留有人的画面"这类语义任务可直接表达；结果缓存复用，无 VLM key 时自动降级为纯场景切分
 - **裁剪与转场**：支持剪掉片段头尾、片段间转场（fade / dissolve / 各种 wipe 等）
 - **画中画 + 花字**：在任意素材的指定时间点叠加小窗画面或文字
 - **计划校验 + 时间轴数学**：转场重叠导致的总时长缩短、overlay 绝对时间，全部由程序自动计算
@@ -20,7 +22,7 @@
 
 ```
 用户自然语言
-   → Agent（LLM）：探测素材 → 提交「编辑计划 JSON」
+   → Agent（LLM）：探测素材 →（语义任务时）analyze_media 建立镜头索引 → 提交「编辑计划 JSON」
    → plan_compiler：校验 → 换算时间轴 → 生成 ffmpeg 命令 → 执行 → 回验
    → OUTPUT/ 产物
 ```
@@ -29,6 +31,7 @@
 
 - Python 3.13+（推荐用 `py -m venv .venv` 建项目专属环境）
 - 一个 LLM 模型接口：默认走 SiliconFlow（OpenAI 兼容），也支持任意 OpenAI / Anthropic 兼容端点
+- 一个视觉模型接口（**可选**，V4 内容理解用）：默认复用 SiliconFlow key，零配置；不配则降级为纯场景切分
 - ffmpeg（**可选**）：真实渲染需要，未安装时仍可验证「计划 → 命令生成」全链路
 
 ## 安装
@@ -79,6 +82,8 @@ python video_editing/video_demo.py "把 INPUT/a.mp4 和 INPUT/b.mp4 拼接，中
 - **素材区** —— 拖拽或点「+ 上传素材」把本地视频/图片传进 `INPUT/`，上传即用 ffprobe 校验；
   支持 mp4/mov/mkv/webm/avi/flv/wmv/mpg/m2ts/3gp… 与 png/jpg/webp/bmp/gif/tiff/heic 等
   （共 28 种扩展名，纯音频不在列）；点素材名可把 `INPUT/xxx` 插入输入框
+- **内容索引 · 镜头卡（V4）** —— 语义任务自动调用 analyze_media，逐素材展示镜头级标签
+  （时间区间 / 人数 / 场景 / 活动 / 情绪 / 画质），分析进度实时可见，结果缓存复用
 - **编辑计划 JSON** —— agent 提交的 `submit_plan` 原文
 - **时间轴换算** —— 片段时长 d_i / 起点 S_i / 总时长 D / 叠加与转场的绝对时间
 - **ffmpeg 命令序列** —— 编译器生成的每条命令（按 detect / normalize / render 分阶段）
@@ -124,6 +129,7 @@ python video_editing/video_demo.py "把 INPUT/a.mp4 和 INPUT/b.avi 拼接，中
 python video_editing/video_demo.py "在 INPUT/my.mp4 第 3 秒加一个右下角画中画 INPUT/logo.png，持续 5 秒"
 python video_editing/video_demo.py "把 INPUT/my.mp4 前 5 秒剪掉，剩下部分加一行花字「开头」"
 python video_editing/video_demo.py "给 INPUT/my.mp4 里的人脸打码，输出到 OUTPUT/blur.mp4"
+python video_editing/video_demo.py "帮我剪出和朋友一起的时光：从 INPUT/ 里挑多人聚在一起的镜头，拼成一段 15 秒左右的视频"
 ```
 
 Web 界面里更省事：**点素材名**把 `INPUT/xxx` 插进输入框，再**点下面的短语**（转成 720p / 水平镜像 /
@@ -138,7 +144,8 @@ Web 界面里更省事：**点素材名**把 `INPUT/xxx` 插进输入框，再**
 deepagent-demo/
 ├── video_editing/           # 视频剪辑 Agent（项目主体）
 │   ├── video_demo.py        # 演示入口：任务 → 计划 → 编译 → 命令展示 → 执行回验
-│   ├── video_agent.py       # Agent 构建：probe_media / submit_plan 工具 + 计划 schema 提示词
+│   ├── video_agent.py       # Agent 构建：probe_media / analyze_media / submit_plan 工具 + 提示词
+│   ├── content_analysis.py  # V4 感知层：场景切分 + VLM 打标 + 内容卡片 + sidecar 缓存
 │   ├── plan_schema.py       # 编辑计划 JSON 的校验（白名单 + 语义规则）
 │   ├── plan_compiler.py     # 编译器：校验 → 换算 → 生成命令 → 执行 → 回验
 │   ├── face_mosaic.py       # 人脸检测打码（v3.0，OpenCV YuNet）
@@ -149,7 +156,8 @@ deepagent-demo/
 ├── basic_demo/              # 基础编码 Agent demo（deepagents 最简用法对照）
 │   ├── main.py              # 入口：演示写/读文件任务
 │   └── agent.py             # 最简 deep agent 构建
-├── model.py                 # 共用：加载 .env + 按优先级解析模型
+├── tests/                   # 离线单测（content_analysis 等，全 mock 不联网）
+├── model.py                 # 共用：加载 .env + 按优先级解析模型（含 V4 的 get_vlm_model）
 ├── INPUT/                   # 素材目录（默认空；Web 上传或手动放入）
 ├── OUTPUT/                  # 产物（运行时生成）
 ├── TMP/                     # 归一化中间件（运行时生成，可缓存）
@@ -178,14 +186,32 @@ LANGSMITH_PROJECT=DeepAgentDemo
 > 模型选型：`Qwen/Qwen2.5-7B-Instruct` 免费但工具调用不稳定；推荐
 > `deepseek-ai/DeepSeek-V4-Flash` 或 `Qwen/Qwen2.5-72B-Instruct`。
 
+### V4 感知层的 VLM 配置（可选）
+
+内容理解（`analyze_media`）默认复用上面的 SiliconFlow key，零配置即可用。想单独调整时：
+
+```
+VLM_MODEL=zai-org/GLM-4.5V          # 打标默认（实测更准）；备选 Qwen/Qwen3-VL-30B-A3B-Instruct
+VLM_FRAME_BUDGET=24                  # 每素材抽帧上限（成本闸，约几分钱/文件·一次性）
+VLM_BATCH=6                          # 每次请求带几帧
+# 换独立供应商时再配：
+# VLM_API_KEY=...                    # 配了它就不再复用 SiliconFlow
+# VLM_BASE_URL=...                   # 独立供应商必须显式给 OpenAI 兼容端点
+```
+
+详见 [docs/v4.0-multimodal-perception.md](docs/v4.0-multimodal-perception.md)。
+
 ## 技术文档
 
+- [docs/v4.0-multimodal-perception.md](docs/v4.0-multimodal-perception.md) —— V4 多模态感知层（analyze_media / 内容卡片 / 实测记录）
+- [docs/v3.1-multi-turn-interaction.md](docs/v3.1-multi-turn-interaction.md) —— 多轮交互与会话设计（V3.1）
 - [docs/v2.0-overview.md](docs/v2.0-overview.md) —— 整体方案（workflow + 模块职责，简明）
 - [docs/v2.0-multi-material-editing.md](docs/v2.0-multi-material-editing.md) —— v2 详细设计（schema / 时间轴数学 / 扩展点）
 - [docs/v1.0-architecture.md](docs/v1.0-architecture.md) —— v1 单命令版（对照）
 
 ## 已知限制 / 路线图
 
-- 转场处音频当前为硬切（v2.1 计划加入 acrossfade 交叉淡变）
+- 语义筛选依赖 VLM 标签质量（音频内容暂不参与理解，笑声/欢呼声信号待 T10/ASR 进卡片）
+- 场景切分阈值 0.3 / 长镜头粒度 12s 为经验值，真实素材漏切或碎切时再调
 - 画布策略当前为 pad 黑边，blur-fill / crop-fill 留 v2.1
 - 计划 schema 已预留三个扩展点（clip 效果 / overlay 区域 / timeline 布局块），新增能力无需重构

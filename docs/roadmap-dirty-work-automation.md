@@ -173,7 +173,7 @@ schema 校验、命令生成、提示词文档全部从注册表派生——
 
 ### 远期（明确后置，不进近期排期）
 
-- VLM 语义打标 / "找有小孩的镜头"（时刻Pro L3 路线，接 SiliconFlow vision 模型，按帧配额计费）
+- ~~VLM 语义打标~~（✅ 2026-09-24 V4 已落地：`analyze_media` 工具 + 镜头级内容卡片，接 SiliconFlow `zai-org/GLM-4.5V`、帧预算控成本，见 [v4.0-multimodal-perception.md](./v4.0-multimodal-perception.md)）；"找有小孩的镜头"类筛选现已可用（`has_children` 标签）
 - 高光集锦、多素材智能选择（依赖上一条）
 - `user_style` 偏好沉淀（时刻Pro"高光评判标准"路线）
 - 叙事规划 Agent（CutClaw 路线，前提是先有内容理解，且与"脏活"定位无关）
@@ -242,6 +242,8 @@ schema 校验、命令生成、提示词文档全部从注册表派生——
 ## 八、待办清单
 
 > 2026-09-15 汇总。勾选状态以本文件为准；括号内为对应落地步骤。
+> **2026-09-21**：落地顺序重排（T7b 提前、T7 后移、信号层上调）与 Skill 架构
+> 设计决策纪要见 [dev-notes-2026-09-21.md](./dev-notes-2026-09-21.md)，编号不变。
 
 ### P0 · 第 1 步：能力地基（纯 ffmpeg，零新依赖）✅ 已完成 2026-09-15
 
@@ -276,7 +278,16 @@ schema 校验、命令生成、提示词文档全部从注册表派生——
   ③ 回传用「原任务 + 上次计划 JSON + 错误」纯文本重建，**不重放消息历史**
   （历史里的 ToolMessage/内容块可能被 provider 拒绝）。
 - [x] **T8 显式降级路径**：重试耗尽后给出含全部错误的明确失败说明，**绝不静默漏执行**。
-- [ ] **T5 dry-run 语法预检**：`-t 0.1 -f lavfi` 假输入，按 detect/normalize/render 三段分别预检
+- [x] **T5 dry-run 语法预检**（2026-09-21 完成）：`precheck()` 作为新阶段插在
+  「写 sidecar → 真实执行」之间；normalize 命令重建为合成黑帧命令（黑帧尺寸取
+  **源素材 probe 分辨率**，避免 delogo 大坐标被假越界误报），render 命令外科手术式
+  替换（真实输入 → 合成参考 mp4/m4a，保证 `[i:v]/[i:a]` 流布局不变；concat demuxer
+  标记撤除；`-t` 截到 0.5s；输出 → `-f null -`）。报错优先抓 stderr 实质行
+  （如 `No such filter: 'xxx'`）再进 CompileError 回传通道；CLI/Web 调用方已接入
+  预检失败的显式失败（绝不静默）。非 ffmpeg 命令与无滤镜命令记 note 跳过。
+  验证：`TMP/_precheck_test.py` 25 项（好链秒过 / 坏链拦截 / 三类跳过 /
+  真实素材全链 / 注入坏滤镜后命令零执行）；顺手修复 `_skills_test.py` 5 项既存断裂
+  （v3.1 Preflight 加入后测试夹具未注入假探针）。详见 [dev-notes-2026-09-21.md](./dev-notes-2026-09-21.md)。
 - [ ] **T6 `validate_plan` 预检工具**：暴露给 LLM 的"试算"入口，降低重试轮数
 - [ ] **T7 `custom_filter` 逃生舱**：schema 字段 + 四道闸（预检 / 沙箱约束 / 检视面板标记 / 失败回传）。
   **实现要点（2026-09-17 澄清）**：它是一条**普通 VF 类 Skill**——`build()` 直接把 `args.vf`
@@ -287,9 +298,16 @@ schema 校验、命令生成、提示词文档全部从注册表派生——
   `d = trim_end - trim_start` 推导时长并写死 `-t d`，改变时长的滤镜会让时间轴数学失效 →
   成品时长错、音画不同步。**变速率能力必须走契约路径注册**，并让 `Skill` 携带
   "本效果会缩放时长" 的标记，由编译器在推导阶段修正 `d_i` / `D`。
-- [ ] **T7b `speed` 变速技能（契约路径，非逃生舱）**：`Skill` 增加时长缩放标记
-  （如 `time_scale: 1/rate`），编译器的 `_derive()` 据此修正片段时长与总时长；
-  音频同步用 `atempo`（可串联，单级限 0.5~2.0）。
+- [x] **T7b `speed` 变速技能（契约路径，非逃生舱）**（2026-09-21 完成）：
+  `Skill` 新增两个通用字段——`abuild`（音频滤镜链，进归一化 `-af`）与
+  `time_scale`（args → 时长缩放系数，callable）；`skills.time_scale_of(effects)`
+  作为唯一缩放计算点，`_derive()` 在 d_i 源头乘上它，起点/转场 offset/总时长 D/
+  overlay 绝对时间/BGM `atrim=0:D` 全链自动正确；plan_schema 的「转场 < 片段长度」
+  校验同步换用变速后有效时长（错误信息标注「变速后」）。音频 `atempo` 自动链式
+  （单级 0.5~2.0，4x = 两级）；图片素材拒绝；dry-run 预检携带 `-af`。
+  验证：`TMP/_speed_test.py` 33 项（校验/翻译/时间轴数学/预检/E2E 4s×2x→成品
+  ≈2s 回验/BGM 传导）；回归 96 项全过。`abuild`/`time_scale` 为倒放/抽帧/循环
+  预留了同构扩展位。
 
 > 验证：`TMP/_skills_test.py` 92 项全过（含未知字段四层、重试闭环、异常兜底、invoke 约定回归）；
 > 真实 LLM 自纠验证 `TMP/_diag_retry_real.py`：注入未声明字段后，模型收到回传
@@ -297,9 +315,9 @@ schema 校验、命令生成、提示词文档全部从注册表派生——
 
 ### P1 · 第 3~5 步：信号与技能扩展
 
-- [ ] **T9 场景切分信号**：`select='gt(scene,0.3)'` → 切点列表
+- [x] **T9 场景切分信号**：`select='gt(scene,0.3)'` → 切点列表（✅ 2026-09-24 随 V4 感知层落地，见 [v4.0-multimodal-perception.md](./v4.0-multimodal-perception.md)）
 - [ ] **T10 静音区间信号**：`silencedetect` → 区间列表
-- [ ] **T11 sidecar 缓存**：落 `TMP/probe/<hash>.json`，`probe_media` 返回内容卡片（场景 + 静音两项）
+- [x] **T11 sidecar 缓存**：落 `TMP/probe/<hash>.json`（✅ 2026-09-24 随 V4 落地；内容卡片挂在新增的 `analyze_media` 工具返回里，场景项已含、静音项待 T10 并入）
 - [ ] **T12 `trim_silence` 技能**：静音区间 → 编译器展开 trim 序列
 - [ ] **T13 `auto_xfade` 技能**：场景切点 → 自动插 xfade
 - [ ] **T14 `subtitles` 技能**：faster-whisper（装入项目 `.venv`）→ SRT/ASS → subtitles 烧录

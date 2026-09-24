@@ -20,8 +20,23 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import content_analysis
 import plan_compiler
 from video_agent import make_cli_invoker, plan_with_retry  # noqa: E402
+
+
+def _cli_progress(ev: dict) -> None:
+    """感知层（V4）进度打到终端，让「分析中」可见。"""
+    stage = ev.get("stage")
+    if stage == "start":
+        print(f"[感知] 开始分析 {ev.get('file')}（{ev.get('kind')}）：场景切分 + 抽帧…")
+    elif stage == "sample":
+        print(f"[感知] {ev.get('file')}：抽帧完成（{ev.get('shots')} 个镜头），VLM 打标中…")
+    elif stage == "tag":
+        print(f"[感知] {ev.get('file')}：VLM 打标 {ev.get('done')}/{ev.get('total')} 批")
+    elif stage == "done":
+        cached = "（缓存命中，零计算）" if ev.get("cached") else ""
+        print(f"[感知] {ev.get('file')}：索引完成{cached} —— {ev.get('summary') or ''}")
 
 DEFAULT_TASK = (
     "把 INPUT/sample.mp4 的前 8 秒和 INPUT/test.png（展示 3 秒）拼接成一段视频，"
@@ -59,6 +74,7 @@ def main() -> None:
     # 其余打印的总开关：默认只打印每次 LLM 的输出；
     # 需要看完整流程时设 DEMO_VERBOSE=1。
     verbose = os.environ.get("DEMO_VERBOSE") == "1"
+    content_analysis.set_progress_hook(_cli_progress)
     if len(sys.argv) > 1:
         task = sys.argv[1]
     else:
@@ -105,8 +121,18 @@ def main() -> None:
 
         # 3) 执行 + 回验（ffmpeg 未装则友好跳过）
         print("\n—— 第 3 步：执行 + 回验 ——")
-    plan_compiler.execute(compiled, PROJECT_ROOT)
+    try:
+        plan_compiler.execute(compiled, PROJECT_ROOT)
+    except plan_compiler.CompileError as exc:
+        # dry-run 语法预检失败：命令一条都没真跑，错误可直接展示/回传
+        print("\n[dry-run 预检失败] 已停止执行：")
+        for e in exc.errors:
+            print(" -", e)
+        sys.exit(2)
     if verbose:
+        for pc in compiled.prechecks:
+            if pc.get("note"):
+                print(f"  [预检跳过] {pc.get('description') or ''} {pc['note']}")
         for ex in compiled.executes:
             status = "OK" if ex.get("ok") else "跳过/失败"
             note = ex.get("error") or (ex.get("stderr") or "")[:120]

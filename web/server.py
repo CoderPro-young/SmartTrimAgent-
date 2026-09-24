@@ -43,6 +43,7 @@ WEB_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, PROJECT_ROOT)
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "video_editing"))
 
+import content_analysis  # noqa: E402
 import ffmpeg_exec  # noqa: E402
 import plan_compiler  # noqa: E402
 from langchain_core.messages import AIMessage  # noqa: E402
@@ -442,6 +443,10 @@ def _run_pipeline(task: str, emit, session_id: str | None = None) -> None:
     seen: set = set()
     existing = set(materials)
 
+    # V4 感知层进度 → NDJSON analysis 事件（RUN_LOCK 串行，全局 hook 安全）
+    content_analysis.set_progress_hook(
+        lambda ev: emit({"type": "analysis", **ev}))
+
     def on_llm(text: str, tool_calls: list) -> None:
         for sig in _l1_scan(text, tool_calls, existing):
             emit({"type": "hallucination", "level": "warn", **sig})
@@ -496,7 +501,15 @@ def _run_pipeline(task: str, emit, session_id: str | None = None) -> None:
     })
 
     emit({"type": "status", "text": "开始执行命令（归一化 → 渲染）…"})
-    plan_compiler.execute(compiled, PROJECT_ROOT)
+    try:
+        plan_compiler.execute(compiled, PROJECT_ROOT)
+    except plan_compiler.CompileError as exc:
+        # dry-run 语法预检失败：命令未真跑、无产物；错误结构化给前端流水线区
+        emit({"type": "compile_error", "errors": exc.errors})
+        emit({"type": "error",
+              "message": "dry-run 语法预检失败，已停止执行（未产生成品）：\n- "
+                         + "\n- ".join(exc.errors)})
+        return
     for ex in compiled.executes:
         ok = bool(ex.get("ok"))
         emit({
@@ -535,6 +548,7 @@ def _safe_run(task: str, emit, session_id: str | None = None) -> None:
         emit({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
         emit({"type": "traceback", "text": traceback.format_exc()[-2000:]})
     finally:
+        content_analysis.set_progress_hook(None)   # 感知层钩子不跨请求泄漏
         RUN_LOCK.release()
         emit(None)  # 结束哨兵
 
@@ -762,17 +776,19 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json({"ok": True, "cleared": cleared, "errors": errors})
 
     def _handle_delete(self, payload: dict) -> None:
-        """移除素材：只允许动网页上传过的（白名单在 TMP/uploads.json）。
+        """移除素材：允许删 INPUT/ 里的任何文件。
+
+        早期只允许删网页上传的（白名单），后来示例素材基本移出 git、
+        且真删了也能从 git 历史恢复（git ls-files INPUT/ 仅剩 sample.mp4），
+        一刀切保护反而让手动放进来的素材在界面上清不掉。白名单只用于
+        reset 语义：不在名单里的（手动放置的）不会被「启动新任务」自动
+        清除，但仍可在这里手动删。
 
         真删还是移到 TMP/removed/ 由 _retire 决定，响应里的 mode 会告诉前端。
         """
         name = _safe_name(payload.get("name") or "")
         if not name:
             self._fail(400, "文件名不合法。")
-            return
-        ledger = _load_ledger()
-        if name not in ledger:
-            self._fail(403, "只能删除网页上传的素材；示例素材受保护。")
             return
         full = self._resolve_under(INPUT_DIR, name)
         if not full:
@@ -784,7 +800,9 @@ class Handler(BaseHTTPRequestHandler):
             self._fail(500, f"移除失败：{exc}")
             return
         _PROBE_CACHE.pop(full, None)
-        _save_ledger([n for n in ledger if n != name])
+        ledger = _load_ledger()
+        if name in ledger:           # 上传过的顺手出名单，保持一致
+            _save_ledger([n for n in ledger if n != name])
         self._send_json({"ok": True, "name": name, "mode": mode, "detail": detail})
 
     def _serve_media(self) -> None:
@@ -892,6 +910,9 @@ class Handler(BaseHTTPRequestHandler):
                     }
                     if with_probe:
                         item["probe"] = _probe_file(full)
+                        # V4 内容卡片（sidecar 命中才读得到，零计算成本）
+                        item["content"] = content_analysis.load_cached_card(
+                            PROJECT_ROOT, "INPUT/" + name)
                     items.append(item)
             items.sort(key=lambda x: (not x["uploaded"], -x["mtime"]))
             self._send_json({"inputs": items})

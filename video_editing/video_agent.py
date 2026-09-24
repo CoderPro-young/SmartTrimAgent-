@@ -17,6 +17,7 @@ from langchain_core.messages import AIMessage
 from langchain_core.tools import tool
 from langgraph.graph.state import CompiledStateGraph
 
+import content_analysis
 import ffmpeg_exec
 import plan_compiler
 import plan_schema
@@ -170,12 +171,26 @@ with the `submit_plan` tool.
 1. Use `ls` (or the built-in filesystem tools) to list files in INPUT/.
 2. Use `probe_media` on each source you plan to use, to learn its real
    duration / resolution / whether it has audio.
-3. **Feasibility self-check**: compare the user's request against the probed
+3. If the request depends on WHAT IS IN the footage (finding / picking /
+   filtering by content — e.g. "moments with friends", "only the parts with
+   people", "the best three segments", "scenes with kids"), call
+   `analyze_media` on each involved source and READ the content card it
+   returns: shot-level time ranges with semantic labels. Pick the shot
+   ranges that match the user's intent and write them as explicit
+   `trim_start`/`trim_end` values in your clips.
+   - NEVER invent trim ranges for a content-based selection without a
+     content card. If `analyze_media` returns an error, or the card shows
+     no matching shots, call `ask_user` with the real facts instead.
+   - The content card is a read-only signal. Do not copy its fields into
+     the plan — clips keep exactly the schema fields below.
+   - Shot boundaries in the card come from deterministic scene detection,
+     so they are safe to use as trim values.
+4. **Feasibility self-check**: compare the user's request against the probed
    facts (duration range / audio track / resolution / how many files exist).
    If every part of the request can be satisfied by the real materials,
-   continue to step 4; otherwise go to step 5.
-4. Call `submit_plan` with a valid plan object.
-5. Only when the self-check fails — or the request is ambiguous / has no
+   continue to step 5; otherwise go to step 6.
+5. Call `submit_plan` with a valid plan object.
+6. Only when the self-check fails — or the request is ambiguous / has no
    actionable operation / asks for a capability you don't have — call
    `ask_user` instead: state the real facts you probed and offer concrete
    options the user can pick from.
@@ -187,6 +202,9 @@ Call `ask_user` INSTEAD of `submit_plan` when ANY of these holds:
 - The target material is ambiguous ("that video" while INPUT/ holds several).
 - The request needs a capability that is not in the effect list — say so
   honestly and offer the closest available alternative.
+- A content-based request where the content card shows no matching shots
+  (e.g. "moments with friends" but the card says no multi-person shots) —
+  report what the card actually contains and offer alternatives.
 - The probed facts show the request exceeds what the material can do
   (e.g. "the first 50 seconds" but the clip is only 12.259s) — do NOT
   hard-clamp and do NOT fabricate probe numbers to make it fit; report the
@@ -291,6 +309,29 @@ def probe_media(path: str) -> str:
 
 
 @tool
+def analyze_media(path: str) -> str:
+    """Analyze the CONTENT of a media file and return a content card (JSON).
+
+    The card lists shots with deterministic time ranges and semantic labels
+    per shot (person_count / has_children / scene / activity / mood / tags /
+    quality). Results are cached in TMP/probe/, so calling twice is free.
+
+    Call this BEFORE writing trims whenever the task depends on what appears
+    in the footage (e.g. "moments with friends", "keep only segments with
+    people", "pick the best parts"). Time ranges come from scene detection
+    and are safe to use as trim_start/trim_end. Do NOT invent content-based
+    trim ranges without this card.
+
+    Args:
+        path: Path relative to the project root, e.g. `INPUT/sample.mp4`.
+    """
+    # 感知层（V4）：时间由 ffmpeg 场景切分产生，语义由 VLM 产生；
+    # 图片只在本工具内部的一次性请求里出现，永远不进 agent 消息流。
+    card = content_analysis.analyze_media(path, PROJECT_ROOT)
+    return json.dumps(card, ensure_ascii=False)
+
+
+@tool
 def submit_plan(plan: dict) -> str:
     """Submit an editing plan (JSON object) for compilation and execution.
 
@@ -318,7 +359,7 @@ def ask_user(question: str, options: list[str] | None = None) -> str:
 
 
 def build_video_agent_v2() -> CompiledStateGraph:
-    """V2 agent：probe_media + submit_plan + ask_user，输出编辑计划而非 ffmpeg 命令。"""
+    """V2+V4 agent：probe_media + analyze_media + submit_plan + ask_user。"""
     os.makedirs(INPUT_DIR, exist_ok=True)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     model = get_model()
@@ -326,7 +367,7 @@ def build_video_agent_v2() -> CompiledStateGraph:
     return create_deep_agent(
         model=model,
         system_prompt=V2_SYSTEM_PROMPT,
-        tools=[probe_media, submit_plan, ask_user],
+        tools=[probe_media, analyze_media, submit_plan, ask_user],
         backend=backend,
         name="video-editing-planner-v2",
     )
