@@ -42,17 +42,31 @@ POSITIONS = {
 # 2026-09-16 实测：模型为「2 倍速」臆造了 clip 级字段 "speed"，校验返回 0 错误、
 # 成品是原速、系统却报告成功。这是最坏的失败模式，必须堵死。
 
-PLAN_KEYS = {"schema_version", "output", "clips", "timeline", "overlays", "audio"}
+PLAN_KEYS = {"schema_version", "output", "clips", "timeline", "overlays", "audio", "select"}
 OUTPUT_KEYS = {"filename", "resolution", "fps"}
 RESOLUTION_KEYS = {"width", "height"}
 CLIP_KEYS = {"id", "source", "kind", "trim_start", "trim_end", "duration",
-             "probe", "effects"}
+             "probe", "effects", "cut_silence", "cut_black"}
 EFFECT_KEYS = {"name", "args"}
 TIMELINE_KEYS = {"clip", "transition"}
 TRANSITION_KEYS = {"type", "duration"}
 OVERLAY_BASE_KEYS = {"type", "at_clip", "start_offset", "duration", "position"}
 OVERLAY_PIP_KEYS = OVERLAY_BASE_KEYS | {"source", "kind", "scale"}
 OVERLAY_TEXT_KEYS = OVERLAY_BASE_KEYS | {"text", "font_size", "color"}
+
+# V5 粗剪：clip 级编译期展开参数（不是 effects skill——它们改变片段结构，
+# 一个 clip 展开为 N 个保留子段，由编译器在 _derive 之前处理）
+CUT_SILENCE_KEYS = {"noise_db", "min_silence", "keep_padding", "min_keep"}
+CUT_BLACK_KEYS = {"min_duration", "keep_padding", "min_keep"}
+
+# V5 粗剪：select 批量筛选宏（LLM 只写条件，编译器从内容卡片生成 clips）
+SELECT_KEYS = {"sources", "where", "budget_seconds", "order"}
+SELECT_WHERE_KEYS = {"scene_any", "activity_any", "mood_any", "tag_any",
+                     "person_count_min", "person_count_max", "has_children",
+                     "quality_in", "min_duration", "max_duration",
+                     "max_silence_ratio"}
+SELECT_ORDERS = {"as_listed", "best_first"}
+QUALITY_VALUES = {"good", "ok", "poor"}
 
 SCHEMA_VERSION = "2.0"
 
@@ -91,6 +105,65 @@ def _num(x) -> bool:
     return isinstance(x, (int, float)) and not isinstance(x, bool)
 
 
+def _validate_cut(cut, allowed: set, tag: str) -> list[str]:
+    """校验 clip 的 cut_silence / cut_black 参数块。"""
+    if not isinstance(cut, dict):
+        return [f"{tag} 必须是对象。"]
+    errors = _unknown_keys(cut, allowed, tag)
+    ranges = {
+        "noise_db": (-60.0, -20.0), "min_silence": (0.2, 5.0),
+        "min_duration": (0.2, 10.0), "keep_padding": (0.0, 1.0),
+        "min_keep": (0.1, 10.0),
+    }
+    for key, (lo, hi) in ranges.items():
+        if key in cut and not (_num(cut[key]) and lo <= cut[key] <= hi):
+            errors.append(f"{tag}.{key} 必须是 {lo}~{hi} 之间的数（收到 {cut[key]!r}）。")
+    return errors
+
+
+def _validate_select(sel, project_root: str) -> list[str]:
+    """校验顶层 select 筛选宏块。"""
+    errors = _unknown_keys(sel, SELECT_KEYS, "select")
+    sources = sel.get("sources")
+    if not isinstance(sources, list) or not sources:
+        return errors + ["select.sources 不能为空（至少一个 INPUT/ 素材）。"]
+    for i, s in enumerate(sources):
+        if not isinstance(s, str) or not s.startswith("INPUT/"):
+            errors.append(f"select.sources[{i}] 必须以 INPUT/ 开头。")
+        elif not os.path.isfile(os.path.join(project_root, s)):
+            errors.append(_missing_source_msg(f"select.sources[{i}]", s, project_root))
+    where = sel.get("where")
+    if where is not None:
+        if not isinstance(where, dict):
+            errors.append("select.where 必须是对象（筛选条件）。")
+        else:
+            errors.extend(_unknown_keys(where, SELECT_WHERE_KEYS, "select.where"))
+            for f in ("scene_any", "activity_any", "mood_any", "tag_any"):
+                v = where.get(f)
+                if v is not None and (not isinstance(v, list) or not v
+                                      or not all(isinstance(x, str) for x in v)):
+                    errors.append(f"select.where.{f} 必须是非空字符串数组。")
+            for f in ("person_count_min", "person_count_max", "min_duration",
+                      "max_duration", "max_silence_ratio"):
+                v = where.get(f)
+                if v is not None and not _num(v):
+                    errors.append(f"select.where.{f} 必须是数字。")
+            hc = where.get("has_children")
+            if hc is not None and not isinstance(hc, bool):
+                errors.append("select.where.has_children 必须是布尔值。")
+            qi = where.get("quality_in")
+            if qi is not None and (not isinstance(qi, list) or not qi
+                                   or not all(q in QUALITY_VALUES for q in qi)):
+                errors.append(f"select.where.quality_in 只能取 {sorted(QUALITY_VALUES)} 的子集。")
+    budget = sel.get("budget_seconds")
+    if budget is not None and not (_num(budget) and budget > 0):
+        errors.append("select.budget_seconds 必须为正数（目标成片总时长上限）。")
+    order = sel.get("order", "as_listed")
+    if order not in SELECT_ORDERS:
+        errors.append(f"select.order 必须是 {sorted(SELECT_ORDERS)} 之一。")
+    return errors
+
+
 def clip_duration(clip: dict) -> float | None:
     """计算 clip 裁剪后的片段时长 d_i；信息不足返回 None。
 
@@ -119,6 +192,21 @@ def validate_plan(plan: dict, project_root: str) -> list[str]:
 
     errors.extend(_unknown_keys(plan, PLAN_KEYS, "计划顶层"))
 
+    # ---- select（V5 筛选宏）：与 clips/timeline/overlays 互斥 ----
+    has_select = "select" in plan
+    if has_select:
+        if not isinstance(plan["select"], dict):
+            errors.append("select 必须是对象（筛选宏）。")
+            has_select = False
+        else:
+            errors.extend(_validate_select(plan["select"], project_root))
+            if plan.get("clips"):
+                errors.append("select 与 clips 互斥：筛选宏由编译器生成 clips，请二选一。")
+            if plan.get("timeline"):
+                errors.append("select 与 timeline 互斥：筛选宏由编译器生成 timeline。")
+            if plan.get("overlays"):
+                errors.append("select 与 overlays 互斥（宏生成的片段 id 由编译器决定）。")
+
     # ---- output ----
     out = plan.get("output")
     if not isinstance(out, dict):
@@ -141,7 +229,9 @@ def validate_plan(plan: dict, project_root: str) -> list[str]:
 
     # ---- clips ----
     clips = plan.get("clips")
-    if not isinstance(clips, list) or not clips:
+    if has_select:
+        clips = clips or []       # 宏模式：clips 由编译器生成，这里只跳过
+    elif not isinstance(clips, list) or not clips:
         errors.append("clips 不能为空（至少一个素材进入时间轴）。")
         clips = []
     ids: set[str] = set()
@@ -191,6 +281,14 @@ def validate_plan(plan: dict, project_root: str) -> list[str]:
                     f"音频请放到顶层 audio.source 作 BGM。"
                 )
 
+        # V5 粗剪：cut_silence / cut_black（编译期展开为保留子段，仅 video）
+        for ckey, callowed in (("cut_silence", CUT_SILENCE_KEYS),
+                               ("cut_black", CUT_BLACK_KEYS)):
+            if ckey in c:
+                errors.extend(_validate_cut(c[ckey], callowed, f"{tag}.{ckey}"))
+                if kind == "image":
+                    errors.append(f"{tag}.{ckey} 只适用于 video 素材（图片没有静音/黑场）。")
+
         # effects（v2 扩展点①）：校验逻辑派发到 skills 注册表
         for j, eff in enumerate(c.get("effects") or []):
             tag_eff = f"{tag}.effects[{j}]"
@@ -226,7 +324,9 @@ def validate_plan(plan: dict, project_root: str) -> list[str]:
 
     # ---- timeline ----
     timeline = plan.get("timeline")
-    if not isinstance(timeline, list) or not timeline:
+    if has_select:
+        timeline = timeline or []  # 宏模式：timeline 由编译器生成
+    elif not isinstance(timeline, list) or not timeline:
         errors.append("timeline 不能为空（至少一个条目）。")
         timeline = []
     for i, item in enumerate(timeline):
@@ -466,6 +566,13 @@ def check_material_fit(plan: dict, project_root: str, probe_fn=None) -> list[Mis
                 user_decidable=False,
                 message=f"{tag}.probe 声称时长 {pp.get('duration')}s，"
                         f"与真实探测结果 {dur}s 不符。"))
+        if c.get("cut_silence") is not None and info.get("ok") \
+                and info.get("has_audio") is False:
+            out.append(Mismatch(
+                "cut_no_audio", f"{tag}.cut_silence", "剪掉静音/停顿",
+                "该素材没有音轨",
+                message=f"素材 {src} 没有任何音轨，无从检测静音——"
+                        f"{tag}.cut_silence 无效。"))
         if isinstance(pp, dict) and "has_audio" in pp and "has_audio" in info \
                 and bool(pp["has_audio"]) != bool(info["has_audio"]):
             out.append(Mismatch(

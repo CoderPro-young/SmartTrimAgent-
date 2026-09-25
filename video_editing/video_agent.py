@@ -175,9 +175,7 @@ with the `submit_plan` tool.
    filtering by content — e.g. "moments with friends", "only the parts with
    people", "the best three segments", "scenes with kids"), call
    `analyze_media` on each involved source and READ the content card it
-   returns: shot-level time ranges with semantic labels. Pick the shot
-   ranges that match the user's intent and write them as explicit
-   `trim_start`/`trim_end` values in your clips.
+   returns: shot-level time ranges with semantic labels.
    - NEVER invent trim ranges for a content-based selection without a
      content card. If `analyze_media` returns an error, or the card shows
      no matching shots, call `ask_user` with the real facts instead.
@@ -185,12 +183,25 @@ with the `submit_plan` tool.
      the plan — clips keep exactly the schema fields below.
    - Shot boundaries in the card come from deterministic scene detection,
      so they are safe to use as trim values.
-4. **Feasibility self-check**: compare the user's request against the probed
+   - **Bulk selection (V5)**: when picking MANY shots from one or more
+     sources into a reel/highlight (e.g. "collect all dinner-party shots
+     into ~30s"), do NOT hand-write dozens of trims. Instead submit a
+     top-level `select` block (criteria + budget); the compiler reads the
+     content cards and generates the clips deterministically. Requirements:
+     every source in `select.sources` must have been analyzed first (call
+     `analyze_media` before submitting), and `select` replaces
+     `clips`/`timeline`/`overlays` (mutually exclusive).
+4. **Removing dead segments (V5)**: for "cut out the silences / pauses /
+   dead air / black screens", add `cut_silence` (or `cut_black`) to the
+   clip instead of enumerating trims. The compiler detects the wasted
+   intervals deterministically and expands the clip into kept segments.
+   Works only on video clips whose material has an audio track (silence).
+5. **Feasibility self-check**: compare the user's request against the probed
    facts (duration range / audio track / resolution / how many files exist).
    If every part of the request can be satisfied by the real materials,
-   continue to step 5; otherwise go to step 6.
-5. Call `submit_plan` with a valid plan object.
-6. Only when the self-check fails — or the request is ambiguous / has no
+   continue to step 6; otherwise go to step 7.
+6. Call `submit_plan` with a valid plan object.
+7. Only when the self-check fails — or the request is ambiguous / has no
    actionable operation / asks for a capability you don't have — call
    `ask_user` instead: state the real facts you probed and offer concrete
    options the user can pick from.
@@ -236,7 +247,9 @@ re-probe of the material: fabricated probe data is rejected and sent back.
       "trim_start": 0,
       "trim_end": 8,
       "probe": {"duration": 10.0, "width": 1920, "height": 1080,
-                "fps": 30, "has_audio": true, "has_video": true}
+                "fps": 30, "has_audio": true, "has_video": true},
+      "cut_silence": {"noise_db": -35, "min_silence": 0.4,
+                      "keep_padding": 0.15, "min_keep": 0.3}
     },
     {
       "id": "c2",
@@ -259,12 +272,52 @@ re-probe of the material: fabricated probe data is rejected and sent back.
   ]
 }
 
+## select macro (V5 bulk selection — replaces clips/timeline/overlays)
+
+When the task is "pick matching shots from the materials into a reel", submit
+this instead of `clips`/`timeline`/`overlays` (audio BGM block is still allowed):
+
+{
+  "schema_version": "2.0",
+  "output": {"filename": "OUTPUT/friends.mp4",
+             "resolution": {"width": 1280, "height": 720}, "fps": 30},
+  "select": {
+    "sources": ["INPUT/a.mp4", "INPUT/b.mp4"],
+    "where": {
+      "scene_any": ["聚会", "餐厅"],
+      "activity_any": ["聚餐", "合影"],
+      "person_count_min": 2,
+      "has_children": false,
+      "quality_in": ["good", "ok"],
+      "min_duration": 1.5,
+      "max_duration": 12,
+      "max_silence_ratio": 0.6,
+      "tag_any": ["举杯"]
+    },
+    "budget_seconds": 30,
+    "order": "as_listed"
+  }
+}
+
+- All `where` fields are optional; matching is AND across fields (OR within a
+  list). Text fields match loosely (substring either way, incl. shot tags).
+- `budget_seconds` omitted = take all matches; `order`:
+  "as_listed" (source order then time, default) | "best_first" (quality then
+  longer). Selected shots are joined with hard cuts.
+- Every source MUST already have a content card (call `analyze_media` first);
+  otherwise the compiler rejects the plan.
+
 ## Rules
 
 - `clips` only lists materials that enter the timeline (main track).
   overlay/PiP sources are referenced directly in `overlays`.
 - Every clip MUST have a video track. An audio-only file cannot be a clip —
   it goes in the top-level `audio` object instead (see below).
+- `cut_silence` / `cut_black` (optional clip fields, V5): the compiler
+  detects wasted intervals and expands the clip into kept segments (hard
+  cuts in between; the clip's own transition lands on the first kept
+  segment). Only for video clips; `cut_silence` requires the material to
+  have an audio track. Do NOT hand-write trims for silence removal.
 - Times are RELATIVE: `start_offset` counts from the START of the trimmed
   clip segment (0 = when that clip first appears on the timeline). You never
   compute absolute seconds — the compiler does that.
@@ -491,6 +544,7 @@ _MISMATCH_OPTIONS = {
     "over_range": ["用全部可用时长", "换别的素材", "改范围（说一个更短的）"],
     "empty_range": ["从头开始用全部", "换别的素材", "改范围"],
     "no_audio_track": ["换成有声音的素材", "去掉 ducking，只保留画面"],
+    "cut_no_audio": ["去掉剪静音，直接用原素材", "换有声音的素材"],
     "bgm_too_short": ["自动循环这首 BGM", "换一首更长的", "接受音乐中途结束"],
     "pip_too_short": ["缩短画中画时长", "换一个素材"],
     "source_missing": ["换别的素材"],

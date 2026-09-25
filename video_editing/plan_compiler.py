@@ -17,8 +17,9 @@ import os
 from dataclasses import dataclass, field
 
 import ffmpeg_exec
-from plan_schema import clip_duration, validate_plan
-from skills import is_prepass, is_vf, get_skill, time_scale_of
+import signal_detection
+from plan_schema import clip_duration, time_scale_of, validate_plan
+from skills import is_prepass, is_vf, get_skill
 
 FONT_PATH = "C:/Windows/Fonts/msyh.ttc"
 # ffmpeg 的 filtergraph 用 ':' 分隔选项，Windows 路径里的盘符冒号必须转义，
@@ -34,6 +35,10 @@ class CompileError(Exception):
     def __init__(self, errors: list[str]):
         self.errors = errors
         super().__init__("; ".join(errors))
+
+
+class Cancelled(Exception):
+    """任务被用户取消（Web 端「取消」按钮）。"""
 
 
 @dataclass
@@ -57,6 +62,7 @@ class CompileResult:
     commands: list[Command] = field(default_factory=list)
     sidecars: dict[str, str] = field(default_factory=dict)   # path -> content
     math: dict = field(default_factory=dict)                 # 推导结果，供展示/调试
+    expansions: dict = field(default_factory=dict)           # V5 粗剪展开报告（select/cuts）
     prechecks: list[dict] = field(default_factory=list)      # dry-run 预检结果（T5）
     executes: list[dict] = field(default_factory=list)       # 执行结果
     verify: dict | None = None
@@ -571,12 +577,283 @@ def _render_with_transition(plan: dict, math: dict) -> tuple[list[Command], dict
     return commands, sidecars
 
 
+# --------------------------------------------------------------------------- #
+# V5 粗剪：编译期计划展开（select 宏 / cut_silence / cut_black）
+#
+# 全部发生在校验之后、_derive 之前——展开产物是一份普通计划，时间轴数学、
+# dry-run 预检、执行、回验对它一视同仁，不需要任何特判。
+# --------------------------------------------------------------------------- #
+
+def _expand_select(plan: dict, project_root: str) -> tuple[dict, dict]:
+    """select 筛选宏 → 从内容卡片确定性生成 clips/timeline。
+
+    LLM 只写条件（where + budget），「挑哪些镜头」由 shot_select 纯函数完成，
+    杜绝模型手抄多区间 trim 的漏抄/错抄。卡片必须已由 analyze_media 建好
+    （缓存 sidecar）；缺卡返回可回传 LLM 的错误（模型补 analyze 后重提即可）。
+    """
+    import content_analysis
+    import shot_select
+
+    sel = plan["select"]
+    cards: dict[str, dict] = {}
+    missing = []
+    for src in sel["sources"]:
+        card = content_analysis.load_cached_card(project_root, src)
+        if card and card.get("shots"):
+            cards[src] = card
+        else:
+            missing.append(src)
+    if missing:
+        raise CompileError([
+            "select.sources 里的素材还没有内容索引：" + "、".join(missing) +
+            "。请先对每个素材调用 analyze_media 建立内容卡片，再重新提交计划。"
+        ])
+
+    res = shot_select.select_shots(cards, sel)
+    if not res["clips"]:
+        if res.get("matched"):
+            raise CompileError([
+                f"select 有 {res['matched']} 个镜头满足条件，但单个最短也有 "
+                f"{res.get('min_matched_duration')}s，装不进 "
+                f"{sel.get('budget_seconds')}s 预算。请调大 budget_seconds。"
+            ])
+        raise CompileError([
+            "select 没有命中任何镜头（条件：" + json.dumps(sel.get("where") or {},
+                                                          ensure_ascii=False) +
+            "）。请放宽条件重试；若素材里确实没有匹配内容，请改用 ask_user "
+            "向用户如实说明卡片里实际有什么。"
+        ])
+
+    new_plan = {k: v for k, v in plan.items()
+                if k not in ("select", "clips", "timeline", "overlays")}
+    new_plan["clips"] = res["clips"]
+    new_plan["timeline"] = res["timeline"]
+    report = {
+        "picked": [{"source": c["source"], "start": c["start"], "end": c["end"],
+                    "duration": c["duration"], "label": c["label"]}
+                   for c in res["picked"]],
+        "total_seconds": round(sum(c["duration"] for c in res["picked"]), 3),
+    }
+    return new_plan, report
+
+
+def _probe_has_audio(project_root: str, src: str, clip: dict) -> bool:
+    """clip 是否有音轨：先信计划自报的 probe，没有就现场 ffprobe。"""
+    pp = clip.get("probe") or {}
+    if "has_audio" in pp:
+        return bool(pp["has_audio"])
+    full = os.path.join(project_root, src)
+    streams = (ffmpeg_exec.probe(full).get("data") or {}).get("streams") or []
+    return any(s.get("codec_type") == "audio" for s in streams)
+
+
+def _clip_trim_range(plan: dict, clip: dict, project_root: str) -> tuple[float, float]:
+    """clip 的裁剪范围 [ts, te]；te 缺失时现场 ffprobe 补齐。"""
+    ts = clip.get("trim_start") or 0
+    te = clip.get("trim_end")
+    if te is None:
+        pp = clip.get("probe") or {}
+        dur = pp.get("duration")
+        if dur is None:
+            full = os.path.join(project_root, clip["source"])
+            data = ffmpeg_exec.probe(full).get("data") or {}
+            raw = (data.get("format") or {}).get("duration")
+            try:
+                dur = float(raw)
+            except (TypeError, ValueError):
+                dur = None
+        if dur is None:
+            raise CompileError([f"clip {clip.get('id')} 无法确定素材时长，"
+                                f"无法展开剪除区间。"])
+        te = dur
+    return float(ts), float(te)
+
+
+def _expand_cuts(plan: dict, project_root: str, run_fn=None) -> tuple[dict, list[dict]]:
+    """cut_silence / cut_black：一个 clip 展开为 N 个保留子段。
+
+    - 检测在编译期实时跑（确定性、不依赖缓存卡），范围锚定 [trim_start, trim_end]
+    - 保留区间 = 废段补集 + keep_padding 收缩 + min_keep 过滤（signal_detection）
+    - 子段继承原 clip 的 effects/probe；子段之间是硬切；原 timeline 条目的
+      转场落在首个子段条目；overlay 按「源时间包含关系」重新指到子段
+    """
+    clips = plan.get("clips") or []
+    if not any(c.get("cut_silence") is not None or c.get("cut_black") is not None
+               for c in clips):
+        return plan, []
+
+    run = run_fn or ffmpeg_exec.run
+    new_clips: list[dict] = []
+    id_map: dict[str, list[str]] = {}      # 原 id -> 子段 id 列表（保持顺序）
+    reports: list[dict] = []
+
+    for clip in clips:
+        cut_sil = clip.get("cut_silence")
+        cut_blk = clip.get("cut_black")
+        if cut_sil is None and cut_blk is None:
+            new_clips.append(clip)
+            continue
+        cid = clip["id"]
+        src = clip["source"]
+        ts, te = _clip_trim_range(plan, clip, project_root)
+        windows: list = []
+
+        if cut_sil is not None:
+            if not _probe_has_audio(project_root, src, clip):
+                raise CompileError([
+                    f"clip {cid}（{src}）没有音轨，cut_silence 无法检测静音；"
+                    f"请去掉该参数，或换有声音的素材。"
+                ])
+            res = signal_detection.detect_silences(
+                src, offset=ts, limit=te - ts,
+                noise_db=float(cut_sil.get("noise_db", signal_detection.DEFAULT_NOISE_DB)),
+                min_silence=float(cut_sil.get("min_silence", signal_detection.DEFAULT_MIN_SILENCE)),
+                run_fn=run, cwd=project_root)
+            if not res.get("ok"):
+                raise CompileError([f"clip {cid}（{src}）静音检测失败：{res.get('error')}"])
+            windows += res["intervals"]
+
+        if cut_blk is not None:
+            res = signal_detection.detect_blacks(
+                src, offset=ts, limit=te - ts,
+                min_duration=float(cut_blk.get("min_duration", signal_detection.DEFAULT_BLACK_MIN_DUR)),
+                run_fn=run, cwd=project_root)
+            if not res.get("ok"):
+                raise CompileError([f"clip {cid}（{src}）黑场检测失败：{res.get('error')}"])
+            windows += res["intervals"]
+
+        cut_opts = cut_sil if cut_sil is not None else cut_blk
+        pad = float(cut_opts.get("keep_padding", signal_detection.DEFAULT_KEEP_PADDING))
+        min_keep = float(cut_opts.get("min_keep", signal_detection.DEFAULT_MIN_KEEP))
+        kept = signal_detection.kept_intervals(windows, ts, te, pad=pad, min_keep=min_keep)
+        if not kept:
+            raise CompileError([
+                f"clip {cid}（{src}）在 [{ts:.2f}, {te:.2f}] 内剪除静音/黑场后没有"
+                f"剩余内容——请放宽阈值（降低噪声门限/加长最短静音）或扩大裁剪范围。"
+            ])
+
+        sub_ids: list[str] = []
+        keep_effects = clip.get("effects")
+        for k, (ks, ke) in enumerate(kept):
+            sub = {
+                "id": f"{cid}__k{k}",
+                "source": src,
+                "kind": "video",
+                "trim_start": ks,
+                "trim_end": ke,
+            }
+            if "probe" in clip:
+                sub["probe"] = clip["probe"]
+            if keep_effects:
+                sub["effects"] = keep_effects
+            new_clips.append(sub)
+            sub_ids.append(sub["id"])
+        id_map[cid] = sub_ids
+
+        removed = round(sum(e - s for s, e in signal_detection.merge_intervals(windows, ts, te)), 3)
+        reports.append({
+            "clip": cid, "source": src,
+            "original_seconds": round(te - ts, 3),
+            "kept_segments": len(kept),
+            "removed_seconds": removed,
+            "removed_segments": len(signal_detection.merge_intervals(windows, ts, te)),
+            "kept_ranges": kept,
+        })
+
+    # timeline 重映射：首个子段条目继承原条目的转场，其余为硬切
+    new_timeline: list[dict] = []
+    for item in plan.get("timeline") or []:
+        cid = item.get("clip")
+        subs = id_map.get(cid)
+        if not subs:
+            new_timeline.append(item)
+            continue
+        for k, sub_id in enumerate(subs):
+            entry = {"clip": sub_id}
+            if k == 0 and item.get("transition"):
+                entry["transition"] = item["transition"]
+            new_timeline.append(entry)
+
+    # overlay 重映射：按源时间落点指到包含它的子段，offset 换算为子段内相对时间
+    sub_clip_by_id = {c["id"]: c for c in new_clips}
+    for ov in plan.get("overlays") or []:
+        subs = id_map.get(ov.get("at_clip"))
+        if not subs:
+            continue
+        base = next(c for c in plan["clips"] if c["id"] == ov["at_clip"])
+        src_time = (base.get("trim_start") or 0) + ov.get("start_offset", 0)
+        target = None
+        for sub_id in subs:
+            sub = sub_clip_by_id[sub_id]
+            if sub["trim_start"] <= src_time < sub["trim_end"]:
+                target = sub
+                break
+        if target is None:
+            # 落点在被剪除的废段里：就近挂到下一个子段（没有就挂最后一个）
+            for sub_id in subs:
+                if sub_clip_by_id[sub_id]["trim_start"] > src_time:
+                    target = sub_clip_by_id[sub_id]
+                    src_time = target["trim_start"]
+                    break
+            if target is None:
+                target = sub_clip_by_id[subs[-1]]
+                src_time = target["trim_end"] - 0.01
+        ov["at_clip"] = target["id"]
+        ov["start_offset"] = round(max(0.0, src_time - target["trim_start"]), 3)
+
+    new_plan = dict(plan)
+    new_plan["clips"] = new_clips
+    new_plan["timeline"] = new_timeline
+
+    # 展开可能产生比转场还短的子段——xfade 会渲染失败，提前拦下（可回传重试）
+    _check_transition_fit(new_plan)
+    return new_plan, reports
+
+
+def _check_transition_fit(plan: dict) -> None:
+    """转场时长必须小于相邻片段（变速后）长度；违反抛 CompileError。"""
+    by_id = {c.get("id"): c for c in plan.get("clips") or []}
+    for i in range(1, len(plan.get("timeline") or [])):
+        item = plan["timeline"][i]
+        tr = item.get("transition")
+        if not (isinstance(tr, dict) and tr.get("duration")):
+            continue
+        for side, which in ((plan["timeline"][i - 1].get("clip"), "前一片段"),
+                            (item.get("clip"), "当前片段")):
+            c = by_id.get(side)
+            if not c:
+                continue
+            d = clip_duration(c)
+            if d is None:
+                continue
+            d = round(d * time_scale_of(c.get("effects") or []), 3)
+            if tr["duration"] >= d:
+                raise CompileError([
+                    f"timeline[{i}] 转场时长 {tr['duration']}s 不小于片段 {side}"
+                    f"（剪除废段/变速后仅 {d}s）。请缩短转场时长，或调大 "
+                    f"min_keep 保留更长的片段。"
+                ])
+
+
+def _expand_plan(plan: dict, project_root: str, run_fn=None) -> tuple[dict, dict]:
+    """V5 计划展开总入口：select 宏 → clips；cut 参数 → 保留子段。"""
+    expansions: dict = {}
+    if plan.get("select"):
+        plan, report = _expand_select(plan, project_root)
+        expansions["select"] = report
+    plan, cuts = _expand_cuts(plan, project_root, run_fn=run_fn)
+    if cuts:
+        expansions["cuts"] = cuts
+    return plan, expansions
+
+
 def compile_plan(plan: dict, project_root: str) -> CompileResult:
-    """校验 → 推导 → 生成命令。失败抛 CompileError(errors)。"""
+    """校验 → 展开（V5）→ 推导 → 生成命令。失败抛 CompileError(errors)。"""
     errors = validate_plan(plan, project_root)
     if errors:
         raise CompileError(errors)
 
+    plan, expansions = _expand_plan(plan, project_root)
     math = _derive(plan)
     norm_cmds, norm_sidecars = _normalize_commands(plan, math)
 
@@ -591,6 +868,7 @@ def compile_plan(plan: dict, project_root: str) -> CompileResult:
         commands=norm_cmds + render_cmds,
         sidecars=sidecars,
         math=math,
+        expansions=expansions,
     )
 
 
@@ -774,8 +1052,12 @@ def precheck(result: CompileResult, project_root: str) -> CompileResult:
     return result
 
 
-def execute(result: CompileResult, project_root: str) -> CompileResult:
-    """④ 执行：写 sidecar 文件 → dry-run 预检 → 逐条运行命令（cwd 锚定项目根）。"""
+def execute(result: CompileResult, project_root: str, should_stop=None) -> CompileResult:
+    """④ 执行：写 sidecar 文件 → dry-run 预检 → 逐条运行命令（cwd 锚定项目根）。
+
+    should_stop() 返回 True 时在命令边界抛 Cancelled（Web 取消按钮用；
+    ffmpeg 进程本身由 ffmpeg_exec.kill_all() 硬终止，这里是软检查点）。
+    """
     os.makedirs(os.path.join(project_root, "TMP"), exist_ok=True)
     for path, content in result.sidecars.items():
         with open(os.path.join(project_root, path), "w", encoding="utf-8") as f:
@@ -783,6 +1065,8 @@ def execute(result: CompileResult, project_root: str) -> CompileResult:
     # drawtext 的 textfile 是 sidecar，所以预检必须在写完 sidecar 之后
     precheck(result, project_root)  # 失败抛 CompileError，命令一条都不会真跑
     for c in result.commands:
+        if should_stop is not None and should_stop():
+            raise Cancelled(f"已取消：未执行「{c.description}」")
         res = ffmpeg_exec.run(c.argv, cwd=project_root)
         result.executes.append({"description": c.description, **res})
     return result

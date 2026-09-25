@@ -10,8 +10,59 @@ import json
 import shlex
 import shutil
 import subprocess
+import threading
 
 FFMPEG_TIMEOUT = 600
+
+# 正在运行的 ffmpeg/ffprobe 子进程登记（取消按钮用：/api/cancel 时全部终止）。
+# RUN_LOCK 保证同一时刻只有一个「任务」，但后台内容分析也会起 ffmpeg，
+# 因此用集合 + 锁，而不是单例句柄。
+_PROC_LOCK = threading.Lock()
+_PROCS: set[subprocess.Popen] = set()
+
+
+def kill_all() -> int:
+    """终止当前登记的所有子进程，返回杀掉的数量（用于「取消任务」）。"""
+    with _PROC_LOCK:
+        procs = list(_PROCS)
+        _PROCS.clear()
+    n = 0
+    for p in procs:
+        try:
+            if p.poll() is None:
+                p.kill()
+                n += 1
+        except Exception:
+            pass
+    return n
+
+
+def _run_tracked(argv: list[str], timeout: int, cwd: str | None) -> dict:
+    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, cwd=cwd)
+    with _PROC_LOCK:
+        _PROCS.add(proc)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+        returncode = proc.returncode
+        timed_out = False
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        try:
+            out, err = proc.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            out, err = "", ""
+        returncode = proc.returncode
+        timed_out = True
+    finally:
+        with _PROC_LOCK:
+            _PROCS.discard(proc)
+    if timed_out:
+        return {"ok": False, "returncode": returncode,
+                "stdout": out or "", "stderr": err or "",
+                "error": f"命令超时（>{timeout}s）", "command": argv}
+    return {"ok": returncode == 0, "returncode": returncode,
+            "stdout": out or "", "stderr": err or "", "command": argv}
 
 
 def which(name: str) -> str | None:
@@ -31,6 +82,7 @@ def run(cmd: str | list[str], timeout: int = FFMPEG_TIMEOUT, cwd: str | None = N
     """执行命令，返回 {ok, returncode, stdout, stderr, command}。
 
     ffmpeg/ffprobe 不在 PATH 时返回 ok=False 且 error 说明"未安装"。
+    进程被 kill_all() 终止时 returncode 非零（前端表现为该命令失败/取消）。
     """
     argv = shlex.split(cmd) if isinstance(cmd, str) else list(cmd)
     if not argv:
@@ -48,23 +100,10 @@ def run(cmd: str | list[str], timeout: int = FFMPEG_TIMEOUT, cwd: str | None = N
             "command": cmd,
         }
     try:
-        proc = subprocess.run(
-            argv, capture_output=True, text=True, timeout=timeout, cwd=cwd
-        )
-        return {
-            "ok": proc.returncode == 0,
-            "returncode": proc.returncode,
-            "stdout": proc.stdout or "",
-            "stderr": proc.stderr or "",
-            "command": cmd,
-        }
-    except subprocess.TimeoutExpired:
-        return {
-            "ok": False,
-            "returncode": None,
-            "error": f"命令超时（>{timeout}s）",
-            "command": cmd,
-        }
+        return _run_tracked(argv, timeout, cwd)
+    except OSError as exc:
+        return {"ok": False, "returncode": None, "error": f"启动失败：{exc}",
+                "command": cmd}
 
 
 def probe(path: str) -> dict:

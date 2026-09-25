@@ -28,6 +28,7 @@ from collections import Counter
 from datetime import datetime
 
 import ffmpeg_exec
+import signal_detection
 from model import get_vlm_model
 
 SCENE_THRESHOLD = 0.3     # 场景切分灵敏度（roadmap T9 预定值）
@@ -36,7 +37,7 @@ FRAME_EDGE = 640          # 代表帧长边像素（控 token）
 JPEG_Q = 5                # ffmpeg -q:v（2~31，越小越清晰）
 DETECT_TIMEOUT = 300      # 场景切分整段解码，放宽
 EXTRACT_TIMEOUT = 60      # 单帧 -ss 抽取，很快
-CARD_SCHEMA_VERSION = 1
+CARD_SCHEMA_VERSION = 2   # v2 = 增补 signals（静音/黑场，T10）
 
 
 def _frame_budget() -> int:
@@ -139,7 +140,48 @@ def _probe_meta(full_path: str) -> dict:
         "duration": duration,
         "width": video.get("width"),
         "height": video.get("height"),
+        "has_audio": audio is not None,
     }
+
+
+# --------------------------------------------------------- ⓪ 信号检测 ------ #
+
+def _signals_block(run, full: str, duration, has_audio: bool) -> dict | None:
+    """T10 静音/黑场检测 → 卡片的 signals 块；失败降级为 None（不影响镜头数据）。
+
+    单次解码同时跑 blackdetect + silencedetect；末尾静音用总时长补闭合。
+    """
+    res = signal_detection.detect_av(
+        full, has_audio=has_audio, total_duration=duration, run_fn=run)
+    if not res.get("ok"):
+        return None
+    audio = None
+    if res.get("silences") is not None:
+        sil = res["silences"]
+        ratio = round(sum(e - s for s, e in sil) / duration, 3) if duration else None
+        audio = {"silences": sil, "silence_ratio": ratio}
+    return {"audio": audio, "video": {"blacks": res.get("blacks") or []}}
+
+
+def _augment_cached_card(card: dict, project_root: str, full: str, run) -> dict:
+    """v1 卡片就地升级到 v2：只补跑信号检测，不重跑 VLM（省 token 零幻觉）。"""
+    has_audio = _probe_audio_only(full)
+    block = _signals_block(run, full, card.get("duration"), has_audio)
+    if block is not None:
+        card["signals"] = block
+        card["degradations"] = sorted(set(card.get("degradations") or []) - {"signals_failed"})
+    card["schema_version"] = CARD_SCHEMA_VERSION
+    _save_json(_sidecar_path(project_root, full, card["source"]), card)
+    return card
+
+
+def _probe_audio_only(full: str) -> bool:
+    """有没有音轨（升级旧卡用；失败当没有，宁可少报不误报）。"""
+    res = ffmpeg_exec.probe(full)
+    if not res.get("available") or not res.get("data"):
+        return False
+    streams = res["data"].get("streams") or []
+    return any(s.get("codec_type") == "audio" for s in streams)
 
 
 # --------------------------------------------------------- ① 场景切分 ---- #
@@ -339,10 +381,14 @@ def tag_shots(shots: list[dict], frames_b64: list[str], model, name: str = "",
     _report(stage="tag", file=name, done=len(batches), total=len(batches))
 
 
-def build_summary(shots: list[dict], duration) -> str:
+def build_summary(shots: list[dict], duration, signals: dict | None = None) -> str:
     """规则式摘要（确定性、零成本、可测）：镜头数 + 高频场景/活动 + 多人数。"""
     parts = [f"共 {len(shots)} 个镜头" + (f"/{duration:g}s" if duration else "")]
     labeled = [s.get("label") or {} for s in shots]
+    if signals:
+        ratio = (signals.get("audio") or {}).get("silence_ratio")
+        if ratio is not None and ratio >= 0.15:
+            parts.append(f"静音占比 {ratio:.0%}")
     if not any(labeled):
         return parts[0] + "；未打语义标签"
     for key, label in (("scene", "场景"), ("activity", "活动")):
@@ -381,6 +427,10 @@ def analyze_media(path: str, project_root: str, *, model=None, run_fn=None,
 
     card = _load_json(_sidecar_path(project_root, full, rel))
     if card is not None:
+        # v1 卡就地升级到 v2（只补信号检测，不重跑 VLM）
+        if card.get("schema_version", 0) < CARD_SCHEMA_VERSION and card.get("duration"):
+            _report(stage="sample", file=name, upgrade=True)
+            card = _augment_cached_card(card, project_root, full, run)
         card["cached"] = True
         _report(stage="done", file=name, cached=True,
                 shots=len(card.get("shots") or []),
@@ -396,6 +446,14 @@ def analyze_media(path: str, project_root: str, *, model=None, run_fn=None,
     _report(stage="start", file=name, kind=meta.get("kind"))
     degradations: list[str] = []
     duration = meta.get("duration")
+
+    # ⓪ A/V 信号（T10）：静音/黑场区间——确定性、与镜头切分并行独立，
+    #    失败只记降级不阻塞（镜头/标签仍是可用索引）
+    signals = None
+    if meta.get("kind") == "video":
+        signals = _signals_block(run, full, duration, bool(meta.get("has_audio")))
+        if signals is None:
+            degradations.append("signals_failed")
 
     # ① 时间边界：场景切分（确定性）；失败/过疏按时长均匀兜底
     if meta.get("kind") == "image":
@@ -415,10 +473,11 @@ def analyze_media(path: str, project_root: str, *, model=None, run_fn=None,
     kept: list[dict] = []
     for i, sh in enumerate(shots):
         span = (sh["end"] - sh["start"]) if sh["end"] is not None else 0.0
-        jpg = os.path.join(frames_dir, f"{tag_prefix}_{i:03d}.jpg")
+        jpg_name = f"{tag_prefix}_{i:03d}.jpg"
+        jpg = os.path.join(frames_dir, jpg_name)
         if _extract_frame(run, full, sh["start"] + span * 0.35, jpg):
             frames_b64.append(_data_url(jpg))
-            kept.append(sh)
+            kept.append({**sh, "frame": jpg_name})   # frame = 前端可请求的缩略图名
     shots = kept
     _report(stage="sample", file=name, shots=len(shots))
     if not shots:
@@ -446,7 +505,8 @@ def analyze_media(path: str, project_root: str, *, model=None, run_fn=None,
         "duration": duration,
         "frame_budget": budget,
         "degradations": degradations,
-        "summary": build_summary(shots, duration),
+        "signals": signals,
+        "summary": build_summary(shots, duration, signals),
         "shots": shots,
     }
     _save_json(_sidecar_path(project_root, full, rel), card)
