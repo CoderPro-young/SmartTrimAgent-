@@ -196,6 +196,10 @@ with the `submit_plan` tool.
    clip instead of enumerating trims. The compiler detects the wasted
    intervals deterministically and expands the clip into kept segments.
    Works only on video clips whose material has an audio track (silence).
+   BEFORE submitting, call `analyze_media` on the source and read
+   `signals.audio`: if `silence_ratio` is ≈1.0 the whole track is silent —
+   cutting silence is meaningless; do NOT submit, call `ask_user` and
+   explain the real facts instead. (`silences: null` = no audio track at all.)
 5. **Feasibility self-check**: compare the user's request against the probed
    facts (duration range / audio track / resolution / how many files exist).
    If every part of the request can be satisfied by the real materials,

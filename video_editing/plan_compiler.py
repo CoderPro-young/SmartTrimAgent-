@@ -729,7 +729,11 @@ def _expand_cuts(plan: dict, project_root: str, run_fn=None) -> tuple[dict, list
         if not kept:
             raise CompileError([
                 f"clip {cid}（{src}）在 [{ts:.2f}, {te:.2f}] 内剪除静音/黑场后没有"
-                f"剩余内容——请放宽阈值（降低噪声门限/加长最短静音）或扩大裁剪范围。"
+                f"剩余内容——该素材的音轨很可能整体接近无声（可用 analyze_media 看"
+                f"卡片 signals.audio.silence_ratio 确认，接近 1.0 即整条无声）。"
+                f"这不是参数问题，调阈值救不了：请改用 ask_user 向用户如实说明"
+                f"「素材音轨本身没有有效声音」，建议保留原样、只剪画面或换素材，"
+                f"不要再用不同参数重试 cut_silence。"
             ])
 
         sub_ids: list[str] = []
