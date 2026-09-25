@@ -316,9 +316,9 @@ schema 校验、命令生成、提示词文档全部从注册表派生——
 ### P1 · 第 3~5 步：信号与技能扩展
 
 - [x] **T9 场景切分信号**：`select='gt(scene,0.3)'` → 切点列表（✅ 2026-09-24 随 V4 感知层落地，见 [v4.0-multimodal-perception.md](./v4.0-multimodal-perception.md)）
-- [ ] **T10 静音区间信号**：`silencedetect` → 区间列表
+- [x] **T10 静音区间信号**：`silencedetect` → 区间列表（✅ 2026-09-24 随 V5 落地：`signal_detection.py`，含黑场 `blackdetect`；静音/黑场进内容卡片 `signals`，旧 v1 卡就地升级，见 [v5.0-roughcut.md](./v5.0-roughcut.md)）
 - [x] **T11 sidecar 缓存**：落 `TMP/probe/<hash>.json`（✅ 2026-09-24 随 V4 落地；内容卡片挂在新增的 `analyze_media` 工具返回里，场景项已含、静音项待 T10 并入）
-- [ ] **T12 `trim_silence` 技能**：静音区间 → 编译器展开 trim 序列
+- [x] **T12 `trim_silence` 技能**：静音区间 → 编译器展开 trim 序列（✅ 2026-09-24 随 V5 落地：clip 级 `cut_silence`/`cut_black` 参数，`_expand_cuts` 补集展开 + keep_padding 收缩，展开后时间轴数学自动正确）
 - [ ] **T13 `auto_xfade` 技能**：场景切点 → 自动插 xfade
 - [ ] **T14 `subtitles` 技能**：faster-whisper（装入项目 `.venv`）→ SRT/ASS → subtitles 烧录
 
@@ -329,10 +329,10 @@ schema 校验、命令生成、提示词文档全部从注册表派生——
 
 ### P2 · 第 7~8 步：Web 端
 
-- [ ] **T16 参数卡片回改**：plan → 表单控件 + "重新编译"按钮 + `POST /api/compile`（不过 LLM）
+- [x] **T16 参数卡片回改**：plan → 表单控件 + "重新编译"按钮 + `POST /api/replan`（✅ 2026-09-24 随 V5 落地：流水线标签渲染人类可读参数卡，JSON 折叠进「高级」；回改走 replan 端点复用编译执行管线，不过 LLM）
 - [ ] **T17 多规格 variants**：`output` 改数组，横竖方一次渲染
-- [ ] **T18 审阅报告卡片**：黑帧 / 静音残留 / 打码覆盖率 / 时长断言 / 字幕轴完整性
-- [ ] **T19 首页任务模板按钮**：去水印 / 加字幕 / 打码 / 拼接四个入口
+- [x] **T18 审阅报告卡片**：黑帧 / 静音残留 / 打码覆盖率 / 时长断言 / 字幕轴完整性（✅ 2026-09-24 随 V5 落地第一版：done 事件带 `report`（剪除明细/筛选命中/效果清单/回验），成品标签渲染摘要卡；覆盖率类细化项后置）
+- [x] **T19 首页任务模板按钮**：去水印 / 加字幕 / 打码 / 拼接四个入口（✅ 2026-09-24 随 V5 落地：输入框上方 8 个模板 chips（剪静音/筛集锦/去黑屏/拼接转场/打码/去水印/BGM/竖屏），点击填入骨架文本）
 
 ### P3 · 沉淀（触发式，非排期）
 

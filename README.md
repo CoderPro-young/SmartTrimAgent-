@@ -10,12 +10,20 @@
 ## 功能特性
 
 - **自然语言驱动**：一句话描述剪辑需求，无需手写 ffmpeg 命令
+- **粗剪 · 废段剪除（V5）**：`cut_silence` / `cut_black` ——静音停顿、黑屏废段由
+  ffmpeg silencedetect/blackdetect 确定性检测，编译期自动展开成保留片段（可调噪声门限 /
+  最短静音 / 保留缓冲）
+- **粗剪 · 批量镜头筛选（V5）**：`select` 筛选宏 ——按内容卡标签（场景 / 人数 / 画质 /
+  静音比…）+ 时长预算，编译器从卡片确定性生成片段，模型不手抄时间区间
 - **多素材拼接**：自动把异构素材（mp4 / avi / 图片、不同分辨率 / 编码 / 帧率 / 声道）归一化成统一中间格式再拼接
-- **多模态内容理解（V4）**：`analyze_media` 建立镜头级语义索引（人数 / 场景 / 活动 / 情绪 / 画质）——
-  "帮我剪和朋友一起的时光""只留有人的画面"这类语义任务可直接表达；结果缓存复用，无 VLM key 时自动降级为纯场景切分
+- **多模态内容理解（V4）**：`analyze_media` 建立镜头级语义索引（人数 / 场景 / 活动 / 情绪 / 画质 +
+  V5 静音/黑场信号）——"帮我剪和朋友一起的时光""只留有人的画面"这类语义任务可直接表达；
+  结果缓存复用，无 VLM key 时自动降级为纯场景切分；**上传即索引**（V5，后台自动建卡）
 - **裁剪与转场**：支持剪掉片段头尾、片段间转场（fade / dissolve / 各种 wipe 等）
 - **画中画 + 花字**：在任意素材的指定时间点叠加小窗画面或文字
 - **计划校验 + 时间轴数学**：转场重叠导致的总时长缩短、overlay 绝对时间，全部由程序自动计算
+- **参数卡片回改 + 审阅报告（V5）**：出片后在网页卡片上直接改 trim / 删片段 / 调转场，
+  「重新渲染」不经过大模型；每次出片附「本次做了什么」摘要（剪除明细 / 筛选命中 / 效果清单）
 - **产物回验**：用 ffprobe 校验输出时长 / 分辨率 / 编码是否符合预期
 
 ## 工作流
@@ -77,19 +85,19 @@ python video_editing/video_demo.py "把 INPUT/a.mp4 和 INPUT/b.mp4 拼接，中
 .venv\Scripts\python.exe web/server.py --port 9000 --max-upload-mb 2000
 ```
 
-**素材全部从界面上传**（不预置任何默认素材）。左边输入自然语言需求，右边实时看到整条流水线：
+**素材全部从界面上传**（不预置任何默认素材）。左边输入自然语言需求（上方有任务模板一键填入），
+右边三个标签页：
 
-- **素材区** —— 拖拽或点「+ 上传素材」把本地视频/图片传进 `INPUT/`，上传即用 ffprobe 校验；
-  支持 mp4/mov/mkv/webm/avi/flv/wmv/mpg/m2ts/3gp… 与 png/jpg/webp/bmp/gif/tiff/heic 等
-  （共 28 种扩展名，纯音频不在列）；点素材名可把 `INPUT/xxx` 插入输入框
-- **内容索引 · 镜头卡（V4）** —— 语义任务自动调用 analyze_media，逐素材展示镜头级标签
-  （时间区间 / 人数 / 场景 / 活动 / 情绪 / 画质），分析进度实时可见，结果缓存复用
-- **编辑计划 JSON** —— agent 提交的 `submit_plan` 原文
-- **时间轴换算** —— 片段时长 d_i / 起点 S_i / 总时长 D / 叠加与转场的绝对时间
-- **ffmpeg 命令序列** —— 编译器生成的每条命令（按 detect / normalize / render 分阶段）
-- **执行日志** —— 逐条命令的成功失败，失败时直接给出 stderr 尾巴
-- **成品** —— 内置播放器直接预览 + 下载，附 ffprobe 回验结果（实际时长 vs 预期时长）
-- **历史产物** —— 列出 `OUTPUT/` 下已有的视频
+- **素材库（V5，默认页）** —— 素材列表带**缩略图**与索引状态徽章；**上传即索引**：
+  落盘后后台自动建立内容卡（含静音/黑场信号），不用等任务触发；
+  **镜头库**：跨素材聚合全部镜头（缩略图卡 + 标签），按 有人/无人/画质/场景 筛选，
+  点击镜头即在预览区**区间回放**（直接播原文件，播放钳制在镜头起止，不切片）
+- **成品** —— 内置播放器直接预览 + 下载，附 ffprobe 回验结果（实际时长 vs 预期时长）；
+  **审阅报告**（本次剪除多少静音 / 筛选命中哪些镜头 / 用了什么效果）；
+  **只读时间线**（成片结构胶片条：片段缩略格宽∝时长、转场标记，点击回看源片段）
+- **流水线（高级）** —— **参数卡片**：出片后的计划渲染成人类可读卡片（trim 可改、效果可删、
+  片段可删/排序、转场与输出可调；JSON 折叠进「高级」），改完点「按修改重新渲染」
+  走 `/api/replan` **不经过大模型**；另有时间轴换算 / ffmpeg 命令序列 / 执行日志 / 历史产物
 
 素材区的几个约定：
 
@@ -112,12 +120,18 @@ python video_editing/video_demo.py "把 INPUT/a.mp4 和 INPUT/b.mp4 拼接，中
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/health` | ffmpeg/ffprobe 状态、当前模型、上传策略 |
-| GET | `/api/inputs?probe=1` | 列出 `INPUT/` 素材（含探测信息、是否网页上传） |
+| GET | `/api/inputs?probe=1` | 列出 `INPUT/` 素材（探测信息、内容卡、索引状态） |
 | GET | `/api/outputs` | 列出 `OUTPUT/` 已有产物 |
 | POST | `/api/run` | 运行任务，NDJSON 事件流 |
-| POST | `/api/upload?name=<文件名>` | 上传素材，请求体为裸二进制 |
+| POST | `/api/replan` | 按编辑后的计划直接编译执行（不过 LLM），NDJSON 事件流 |
+| POST | `/api/cancel` | 取消当前任务（终止 ffmpeg + 阶段检查点） |
+| POST | `/api/upload?name=<文件名>` | 上传素材，请求体为裸二进制（上传后自动建索引） |
 | POST | `/api/delete` | 移除素材，`{"name": "..."}` |
 | GET | `/media/OUTPUT/<名字>` | 预览产物（支持 Range） |
+| GET | `/input/<名字>` | 预览原始素材（支持 Range） |
+| GET | `/thumb/<名字>?t=<秒>&h=<高>` | 素材任意时刻缩略图（-ss 快速抽帧，带缓存） |
+| GET | `/probe-frame/<帧文件名>` | 内容卡镜头代表帧（白名单路由） |
+| GET | `/static/<路径>` | 前端 ES modules（零构建） |
 
 ## 使用示例
 
@@ -150,8 +164,10 @@ deepagent-demo/
 │   ├── plan_compiler.py     # 编译器：校验 → 换算 → 生成命令 → 执行 → 回验
 │   ├── face_mosaic.py       # 人脸检测打码（v3.0，OpenCV YuNet）
 │   └── ffmpeg_exec.py       # ffmpeg/ffprobe 执行器（未安装时返回可读错误）
-├── web/                     # Web 入口（标准库 HTTP server + 单页前端）
-│   ├── server.py            # 路由：/ · /api/health · /api/inputs · /api/run · /api/upload · /api/delete · /media/*
+├── web/                     # Web 入口（标准库 HTTP server + 零构建模块化前端）
+│   ├── server.py            # 路由：/api/* · /static/* · /thumb/* · /probe-frame/* · /media/* · /input/*
+│   ├── index.html           # 布局骨架（素材库 / 成品 / 流水线 三标签）
+│   └── static/              # ES modules（app/api/chat/materials/shots/pipeline/timeline/result/templates）
 │   └── index.html           # 对话 + 素材上传 + 流水线检视 UI（NDJSON 事件流）
 ├── basic_demo/              # 基础编码 Agent demo（deepagents 最简用法对照）
 │   ├── main.py              # 入口：演示写/读文件任务
@@ -203,6 +219,7 @@ VLM_BATCH=6                          # 每次请求带几帧
 
 ## 技术文档
 
+- [docs/v5.0-roughcut.md](docs/v5.0-roughcut.md) —— V5 粗剪内核与媒体化前端（静音/黑场信号 / select 宏 / 镜头库 / 参数卡片回改）
 - [docs/v4.0-multimodal-perception.md](docs/v4.0-multimodal-perception.md) —— V4 多模态感知层（analyze_media / 内容卡片 / 实测记录）
 - [docs/v3.1-multi-turn-interaction.md](docs/v3.1-multi-turn-interaction.md) —— 多轮交互与会话设计（V3.1）
 - [docs/v2.0-overview.md](docs/v2.0-overview.md) —— 整体方案（workflow + 模块职责，简明）
@@ -211,7 +228,7 @@ VLM_BATCH=6                          # 每次请求带几帧
 
 ## 已知限制 / 路线图
 
-- 语义筛选依赖 VLM 标签质量（音频内容暂不参与理解，笑声/欢呼声信号待 T10/ASR 进卡片）
+- 语义筛选依赖 VLM 标签质量（静音/黑场信号已进卡片；笑声/欢呼声等语义级音频信号待 ASR，二期）
 - 场景切分阈值 0.3 / 长镜头粒度 12s 为经验值，真实素材漏切或碎切时再调
 - 画布策略当前为 pad 黑边，blur-fill / crop-fill 留 v2.1
 - 计划 schema 已预留三个扩展点（clip 效果 / overlay 区域 / timeline 布局块），新增能力无需重构
