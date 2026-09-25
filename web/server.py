@@ -6,12 +6,17 @@
 
 路由：
     GET  /                → 单页前端（web/index.html）
+    GET  /static/<path>   → 前端 ES modules（web/static/，零构建）
     GET  /api/health      → ffmpeg/ffprobe 可用性 + 当前模型
-    GET  /api/inputs      → 列出 INPUT/ 下素材（?probe=1 附带 ffprobe 信息）
+    GET  /api/inputs      → 列出 INPUT/ 下素材（?probe=1 附带 probe + 内容卡 + 索引状态）
     GET  /api/outputs     → 列出 OUTPUT/ 下已有产物
     POST /api/run         → 运行一次任务，NDJSON 流式返回事件
+    POST /api/replan      → 跳过 LLM，直接按（前端改过的）计划编译执行，NDJSON 流
+    POST /api/cancel      → 取消当前任务（终止 ffmpeg + 各阶段检查点）
     GET  /media/<path>    → 预览产物（限制在 OUTPUT/ 内，支持 Range 拖动进度）
     GET  /input/<name>    → 预览原始素材（限制在 INPUT/ 内，同样支持 Range）
+    GET  /thumb/<name>    → 素材任意时刻缩略图（?t=秒&h=高，ffmpeg -ss 前置快速抽帧）
+    GET  /probe-frame/<f> → 内容卡片镜头代表帧（TMP/probe/frames/ 下白名单文件名）
 
 设计上与 video_demo.py 保持一致的三步流程
 （agent 出计划 → 编译器出命令 → 执行 + 回验），
@@ -19,11 +24,14 @@
 
 额外加了一个 CLI 里没有的能力：计划校验失败时，把编译器的中文错误
 回传给 LLM 让它重出计划（plan_schema 的设计意图），默认最多重试 2 次。
+
+V5：上传即索引——素材落盘后后台跑 analyze_media，用户开口时内容卡片已就绪。
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import mimetypes
 import os
@@ -46,6 +54,7 @@ sys.path.insert(0, os.path.join(PROJECT_ROOT, "video_editing"))
 import content_analysis  # noqa: E402
 import ffmpeg_exec  # noqa: E402
 import plan_compiler  # noqa: E402
+import plan_schema  # noqa: E402
 from langchain_core.messages import AIMessage  # noqa: E402
 from skills import SKILLS  # noqa: E402
 from video_agent import (  # noqa: E402
@@ -59,8 +68,20 @@ MAX_RETRIES = 2          # 计划校验失败后回传 LLM 重出的次数上限
 RUN_LOCK = threading.Lock()  # TMP/ 是共享的，同一时刻只允许一次运行
 OUTPUT_DIR = os.path.join(PROJECT_ROOT, "OUTPUT")
 INPUT_DIR = os.path.join(PROJECT_ROOT, "INPUT")
-LEDGER_PATH = os.path.join(PROJECT_ROOT, "TMP", "uploads.json")
+TMP_DIR = os.path.join(PROJECT_ROOT, "TMP")
+LEDGER_PATH = os.path.join(TMP_DIR, "uploads.json")
+THUMB_DIR = os.path.join(TMP_DIR, "thumbs")
+FRAMES_DIR = os.path.join(TMP_DIR, "probe", "frames")
+STATIC_DIR = os.path.join(WEB_DIR, "static")
 MAX_UPLOAD = 500 * 1024 * 1024   # 单文件上限，可用 --max-upload-mb 覆盖
+
+# 「取消任务」：置位后各阶段检查点抛出/返回，ffmpeg 进程由 kill_all 硬终止
+CANCEL = threading.Event()
+
+# 上传即索引（V5）：后台内容分析。_ANALYZING 防重复排队，失败结果短期退避。
+_ANALYZE_LOCK = threading.Lock()      # 后台分析串行（同时只解码一路）
+_ANALYZING: set[str] = set()          # 排队/进行中的素材绝对路径
+_ANALYZE_FAILED: dict[str, float] = {}  # path -> 失败时刻（5 分钟内不重试）
 
 # 多轮会话（v3.1 P0）：单用户本地工具，进程内 dict 足够；
 # 「启动新任务」= 前端换新 session_id，旧会话惰性 GC，无需删除接口。
@@ -214,6 +235,93 @@ def _probe_uncached(full_path: str) -> dict:
         "has_audio": audio is not None,
         "has_video": True,
     }
+
+
+# ------------------------------------------------------- 上传即索引（V5） ---- #
+
+def _bg_analyze(rel: str) -> None:
+    """后台跑一次内容分析（不阻塞上传响应；结果落 sidecar 供 /api/inputs 读）。
+
+    - 等待正在运行的任务结束再开工：感知层进度钩子是全局单例，任务运行中
+      插入分析会把进度事件串进任务的 NDJSON 流。
+    - 静默模式：不出现在任何事件流里，前端靠轮询 /api/inputs 拿 analysis_state。
+    - 失败记录时刻做 5 分钟退避，避免坏素材被每次刷新反复重试。
+    """
+    full = os.path.join(PROJECT_ROOT, rel)
+    try:
+        waited = 0.0
+        while RUN_LOCK.locked() and waited < 600:
+            time.sleep(0.5)
+            waited += 0.5
+        if RUN_LOCK.locked():
+            return                      # 任务一直没停，放弃本轮（下次刷新会再排）
+        with _ANALYZE_LOCK:
+            dummy = lambda ev: None     # noqa: E731
+            old_hook = content_analysis.set_progress_hook(dummy)
+            try:
+                card = content_analysis.analyze_media(rel, PROJECT_ROOT)
+            finally:
+                # 只有钩子还是自己装的哑钩时才还原，避免误清正在运行任务的钩子
+                if content_analysis._hook is dummy:
+                    content_analysis.set_progress_hook(old_hook)
+        if card.get("error"):
+            _ANALYZE_FAILED[full] = time.time()
+    except Exception as exc:  # noqa: BLE001
+        sys.stderr.write(f"[bg-analyze] {rel}: {type(exc).__name__}: {exc}\n")
+        _ANALYZE_FAILED[full] = time.time()
+    finally:
+        _ANALYZING.discard(full)
+
+
+def _kick_analysis(name: str) -> str:
+    """为素材排队后台分析（已就绪/已在队列则跳过）；返回当前 analysis_state。
+
+    v1 旧卡（无静音/黑场信号）不算就绪——排队走 analyze_media 的缓存升级
+    路径，只补信号检测、不重跑 VLM。
+    """
+    full = os.path.join(INPUT_DIR, name)
+    kind = _guess_kind(name)
+    if kind not in ("video", "image"):
+        return "unsupported"
+    card = content_analysis.load_cached_card(PROJECT_ROOT, "INPUT/" + name)
+    if card and not card.get("error") and \
+            card.get("schema_version", 0) >= content_analysis.CARD_SCHEMA_VERSION:
+        return "ready"
+    if full in _ANALYZING:
+        return "analyzing"
+    failed_at = _ANALYZE_FAILED.get(full)
+    if failed_at and time.time() - failed_at < 300:
+        return "failed"
+    _ANALYZING.add(full)
+    threading.Thread(target=_bg_analyze, args=("INPUT/" + name,), daemon=True).start()
+    return "analyzing"
+
+
+# ------------------------------------------------------------ 缩略图（V5） ---- #
+
+def _make_thumb(name: str, t: float, height: int) -> str | None:
+    """生成/复用素材 t 秒处的缩略图，返回绝对路径；失败返回 None。
+
+    借鉴 LosslessCut：-ss 放 -i 前（输入级快速 seek，不解码前面全部内容），
+    单帧 JPEG，缓存键含文件 stat——素材变了自动失效。
+    """
+    src = os.path.join(INPUT_DIR, name)
+    try:
+        st = os.stat(src)
+    except OSError:
+        return None
+    key = f"{name}|{st.st_size}|{int(st.st_mtime)}|{t:.2f}|{height}"
+    h = hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
+    jpg = os.path.join(THUMB_DIR, f"{h}.jpg")
+    if os.path.isfile(jpg):
+        return jpg
+    os.makedirs(THUMB_DIR, exist_ok=True)
+    res = ffmpeg_exec.run(
+        ["ffmpeg", "-nostdin", "-y", "-hide_banner", "-loglevel", "error",
+         "-ss", f"{t:.2f}", "-i", src, "-frames:v", "1",
+         "-vf", f"scale=-2:{height}", "-q:v", "5", jpg],
+        timeout=60)
+    return jpg if (res.get("ok") and os.path.isfile(jpg)) else None
 
 
 
@@ -483,7 +591,7 @@ def _run_pipeline(task: str, emit, session_id: str | None = None) -> None:
         return
 
     # 成功提交新计划 → 更新会话（问答接续完成，pending_question 清除）
-    session["last_plan"] = compiled.plan
+    session["last_plan"] = compiled.plan      # 展开后的可执行计划（replan 卡片编辑用）
     session["last_output"] = compiled.plan["output"]["filename"]
     session["pending_question"] = None
     session["turn"] = (session.get("turn") or 0) + 1
@@ -491,6 +599,44 @@ def _run_pipeline(task: str, emit, session_id: str | None = None) -> None:
     history.append({"task": task, "output": session["last_output"]})
     del history[:-SESSION_MAX_TURNS]
 
+    _execute_compiled(compiled, tracking_emit, session)
+
+def _build_report(compiled) -> dict:
+    """T18 审阅报告：这次实际做了什么（供成品卡摘要展示）。"""
+    plan, math_ = compiled.plan, compiled.math
+    effects = sorted({
+        e.get("name")
+        for c in plan.get("clips") or []
+        for e in (c.get("effects") or [])
+        if isinstance(e, dict)
+    })
+    transitions = [t for t in (math_.get("transitions") or {}).values() if t]
+    rep = {
+        "clips": len(plan.get("clips") or []),
+        "duration": math_.get("D"),
+        "effects": effects,
+        "transitions": len(transitions),
+        "bgm": bool(plan.get("audio")),
+        "overlays": len(plan.get("overlays") or []),
+        "cuts": compiled.expansions.get("cuts") or [],
+        "select": compiled.expansions.get("select"),
+    }
+    if rep["cuts"]:
+        removed = round(sum(c["removed_seconds"] for c in rep["cuts"]), 3)
+        rep["removed_total_seconds"] = removed
+    if rep["select"]:
+        rep["selected_shots"] = len(rep["select"].get("picked") or [])
+    return rep
+
+
+def _execute_compiled(compiled, emit, session: dict | None) -> None:
+    """编译产物 → 执行 → 回验 → done。/api/run 与 /api/replan 的公共尾巴。
+
+    done 事件带 T18 审阅报告（剪除明细/筛选命中/效果清单），前端渲染成摘要卡。
+    """
+    # 展开后的可执行计划（select/cut_silence 已展开成真实 clips）——
+    # 前端参数卡片回改（T16）编辑的是这份，而不是 LLM 提交的原始宏
+    emit({"type": "exec_plan", "plan": compiled.plan})
     emit({"type": "math", "math": compiled.math})
     emit({
         "type": "commands",
@@ -501,8 +647,13 @@ def _run_pipeline(task: str, emit, session_id: str | None = None) -> None:
     })
 
     emit({"type": "status", "text": "开始执行命令（归一化 → 渲染）…"})
+    cancelled = False
     try:
-        plan_compiler.execute(compiled, PROJECT_ROOT)
+        plan_compiler.execute(compiled, PROJECT_ROOT,
+                              should_stop=lambda: CANCEL.is_set())
+    except plan_compiler.Cancelled as exc:
+        cancelled = True
+        emit({"type": "cancelled", "message": str(exc)})
     except plan_compiler.CompileError as exc:
         # dry-run 语法预检失败：命令未真跑、无产物；错误结构化给前端流水线区
         emit({"type": "compile_error", "errors": exc.errors})
@@ -521,9 +672,14 @@ def _run_pipeline(task: str, emit, session_id: str | None = None) -> None:
             # 失败时把 stderr 尾巴带上，便于在前端直接定位
             "stderr_tail": "" if ok else (ex.get("stderr") or "")[-1500:],
         })
+    if cancelled or (CANCEL.is_set() and not all(e.get("ok") for e in compiled.executes)):
+        if not cancelled:
+            emit({"type": "cancelled", "message": "已取消：ffmpeg 进程被终止。"})
+        return
 
     plan_compiler.verify(compiled, PROJECT_ROOT)
-    session["last_verify"] = compiled.verify
+    if session is not None:
+        session["last_verify"] = compiled.verify
     emit({"type": "verify", "verify": compiled.verify})
 
     out = compiled.plan["output"]["filename"]
@@ -532,11 +688,13 @@ def _run_pipeline(task: str, emit, session_id: str | None = None) -> None:
         "output": out,
         "url": "/media/" + out.replace("\\", "/"),
         "ok": bool((compiled.verify or {}).get("ok")),
+        "report": _build_report(compiled),
     })
 
 
 def _safe_run(task: str, emit, session_id: str | None = None) -> None:
     """包一层异常兜底：任何未预期异常都要作为事件上报，不能让前端空等。"""
+    CANCEL.clear()                       # 新任务从干净状态开始
     acquired = RUN_LOCK.acquire(timeout=1)
     if not acquired:
         emit({"type": "error", "message": "已有任务正在运行，请等它结束再提交。"})
@@ -551,6 +709,59 @@ def _safe_run(task: str, emit, session_id: str | None = None) -> None:
         content_analysis.set_progress_hook(None)   # 感知层钩子不跨请求泄漏
         RUN_LOCK.release()
         emit(None)  # 结束哨兵
+
+
+def _run_replan(plan: dict, emit, session_id: str | None) -> None:
+    """/api/replan：跳过 LLM，直接对（前端改过的）计划做 校验→Preflight→编译→执行。
+
+    T16 参数卡片回改的落点：新手在卡片上改 trim/开关效果，前端把改后的完整
+    计划发上来，这里复用与 /api/run 完全相同的编译与执行管线。
+    """
+    session, _created = _get_session(session_id, "(卡片回改)")
+    probe_fn = lambda src: _probe_file(os.path.join(PROJECT_ROOT, src))  # noqa: E731
+
+    try:
+        compiled = plan_compiler.compile_plan(plan, PROJECT_ROOT)
+    except plan_compiler.CompileError as exc:
+        emit({"type": "compile_error", "errors": exc.errors})
+        emit({"type": "error", "message": "计划没有通过校验：\n- " + "\n- ".join(exc.errors)})
+        return
+
+    mismatches = plan_schema.check_material_fit(plan, PROJECT_ROOT, probe_fn=probe_fn)
+    blocks = [m for m in mismatches if m.level == "block"]
+    if blocks:
+        emit({"type": "compile_error", "errors": [m.message for m in blocks]})
+        emit({"type": "error", "message": "修改后的计划与素材不符：\n- "
+              + "\n- ".join(m.message for m in blocks)})
+        return
+    for w in (m for m in mismatches if m.level == "warn"):
+        emit({"type": "hallucination", "level": "warn", "signal": w.type,
+              "evidence": w.message})
+
+    emit({"type": "plan", "plan": plan})
+    session["last_plan"] = compiled.plan
+    session["last_output"] = compiled.plan["output"]["filename"]
+    session["pending_question"] = None
+    session["turn"] = (session.get("turn") or 0) + 1
+    _execute_compiled(compiled, emit, session)
+
+
+def _safe_replan(plan: dict, emit, session_id: str | None = None) -> None:
+    """_run_replan 的异常兜底（与 _safe_run 同款）。"""
+    CANCEL.clear()
+    acquired = RUN_LOCK.acquire(timeout=1)
+    if not acquired:
+        emit({"type": "error", "message": "已有任务正在运行，请等它结束再提交。"})
+        emit(None)
+        return
+    try:
+        _run_replan(plan, emit, session_id)
+    except Exception as exc:  # noqa: BLE001
+        emit({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
+        emit({"type": "traceback", "text": traceback.format_exc()[-2000:]})
+    finally:
+        RUN_LOCK.release()
+        emit(None)
 
 
 # --------------------------------------------------------------------------- #
@@ -730,6 +941,11 @@ class Handler(BaseHTTPRequestHandler):
         _PROBE_CACHE[target] = (os.path.getmtime(target), os.path.getsize(target), info)
         _save_ledger(ledger + [target_name])
 
+        # V5 上传即索引：视频/图片落盘后立刻后台建内容卡（用户开口前就绪）
+        analysis_state = "unsupported"
+        if kind in ("video", "image"):
+            analysis_state = _kick_analysis(target_name)
+
         self._send_json({
             "ok": True,
             "name": target_name,
@@ -738,6 +954,7 @@ class Handler(BaseHTTPRequestHandler):
             "size": os.path.getsize(target),
             "renamed": target_name != name,
             "probe": info,
+            "analysis_state": analysis_state,
         })
 
     def _handle_session_reset(self, payload: dict) -> None:
@@ -845,6 +1062,80 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._send_file(full)
 
+    def _serve_static(self) -> None:
+        """前端 ES modules（web/static/）。零构建：改文件刷新即生效，禁缓存。"""
+        rel = unquote(self.path[len("/static/"):].split("?", 1)[0]).replace("\\", "/")
+        parts = [p for p in rel.split("/") if p not in ("", ".")]
+        if not parts or any(p == ".." for p in parts):
+            self._send_bytes(b"404 not found", "text/plain; charset=utf-8", 404)
+            return
+        full = os.path.join(STATIC_DIR, *parts)
+        if not os.path.isfile(full):
+            self._send_bytes(b"404 not found", "text/plain; charset=utf-8", 404)
+            return
+        ctype = mimetypes.guess_type(full)[0] or "application/octet-stream"
+        if full.endswith(".js") or full.endswith(".mjs"):
+            ctype = "text/javascript; charset=utf-8"
+        with open(full, "rb") as f:
+            body = f.read()
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _serve_thumb(self) -> None:
+        """素材缩略图：/thumb/<name>?t=<秒>&h=<高>。-ss 前置快速抽帧，结果落缓存。"""
+        rel = unquote(self.path[len("/thumb/"):].split("?", 1)[0])
+        qs = parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+        name = os.path.basename(rel.replace("\\", "/"))
+        if not name or name.startswith("."):
+            self._send_bytes(b"404 not found", "text/plain; charset=utf-8", 404)
+            return
+        full = self._resolve_under(INPUT_DIR, name)
+        if not full:
+            self._send_bytes(b"404 not found", "text/plain; charset=utf-8", 404)
+            return
+        try:
+            t = min(max(float((qs.get("t") or ["0.5"])[0]), 0.0), 36000.0)
+        except ValueError:
+            t = 0.5
+        try:
+            h = min(max(int((qs.get("h") or ["120"])[0]), 48), 480)
+        except ValueError:
+            h = 120
+        jpg = _make_thumb(name, t, h)
+        if not jpg:
+            self._send_bytes(b"thumbnail unavailable", "text/plain; charset=utf-8", 404)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "image/jpeg")
+        self.send_header("Content-Length", str(os.path.getsize(jpg)))
+        self.send_header("Cache-Control", "private, max-age=86400")
+        self.end_headers()
+        with open(jpg, "rb") as f:
+            self.wfile.write(f.read())
+
+    def _serve_probe_frame(self) -> None:
+        """内容卡片的镜头代表帧：只放行 TMP/probe/frames/ 下的白名单文件名。"""
+        name = os.path.basename(unquote(self.path[len("/probe-frame/"):].split("?", 1)[0]))
+        if not re.fullmatch(r"[0-9a-f]{12}_\d{3}\.jpg", name):
+            self._send_bytes(b"404 not found", "text/plain; charset=utf-8", 404)
+            return
+        full = os.path.join(FRAMES_DIR, name)
+        if not os.path.isfile(full):
+            self._send_bytes(b"404 not found", "text/plain; charset=utf-8", 404)
+            return
+        with open(full, "rb") as f:
+            body = f.read()
+        self.send_response(200)
+        self.send_header("Content-Type", "image/jpeg")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "private, max-age=86400")
+        self.end_headers()
+        self.wfile.write(body)
+
     def _resolve_under(self, base: str, rel: str) -> str | None:
         """把 rel 安全地解析到 base 之下；越界返回 None。"""
         root = os.path.realpath(base)
@@ -864,6 +1155,18 @@ class Handler(BaseHTTPRequestHandler):
                 return
             with open(full, "rb") as f:
                 self._send_bytes(f.read(), "text/html; charset=utf-8")
+            return
+
+        if path.startswith("/static/"):
+            self._serve_static()
+            return
+
+        if path.startswith("/thumb/"):
+            self._serve_thumb()
+            return
+
+        if path.startswith("/probe-frame/"):
+            self._serve_probe_frame()
             return
 
         if path == "/api/health":
@@ -913,6 +1216,10 @@ class Handler(BaseHTTPRequestHandler):
                         # V4 内容卡片（sidecar 命中才读得到，零计算成本）
                         item["content"] = content_analysis.load_cached_card(
                             PROJECT_ROOT, "INPUT/" + name)
+                    # V5 索引状态：没卡也没在队列 → 顺手排队（覆盖服务重启的场景）；
+                    # _kick_analysis 幂等：已就绪/已排队/近期失败都会直接返回状态
+                    item["analysis_state"] = (
+                        _kick_analysis(name) if kind != "audio" else "unsupported")
                     items.append(item)
             items.sort(key=lambda x: (not x["uploaded"], -x["mtime"]))
             self._send_json({"inputs": items})
@@ -969,12 +1276,37 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_session_reset(payload)
             return
 
+        if path == "/api/cancel":
+            if not RUN_LOCK.locked():
+                self._fail(409, "当前没有正在运行的任务。")
+                return
+            killed = ffmpeg_exec.kill_all()
+            CANCEL.set()
+            self._send_json({"ok": True, "killed": killed,
+                             "note": "已请求取消：ffmpeg 已终止，管线将在下一个检查点停下。"})
+            return
+
+        if path == "/api/replan":
+            plan = payload.get("plan")
+            session_id = (payload.get("session_id") or "").strip() or None
+            if not isinstance(plan, dict):
+                self._fail(400, "缺少 plan（编辑后的完整计划 JSON）。")
+                return
+            self._stream_ndjson(
+                lambda emit: _safe_replan(plan, emit, session_id))
+            return
+
         if path != "/api/run":
             self._send_bytes(b"404 not found", "text/plain; charset=utf-8", 404)
             return
 
         task = (payload.get("task") or "").strip()
         session_id = (payload.get("session_id") or "").strip() or None
+        self._stream_ndjson(
+            lambda emit: _safe_run(task, emit, session_id))
+
+    def _stream_ndjson(self, runner) -> None:
+        """公共 NDJSON 事件流：后台线程跑 runner(emit)，主连接逐行写出事件。"""
         self.close_connection = True
         self.send_response(200)
         self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
@@ -987,7 +1319,7 @@ class Handler(BaseHTTPRequestHandler):
         def emit(ev) -> None:
             events.put(ev)
 
-        threading.Thread(target=_safe_run, args=(task, emit, session_id), daemon=True).start()
+        threading.Thread(target=runner, args=(emit,), daemon=True).start()
 
         while True:
             ev = events.get()
