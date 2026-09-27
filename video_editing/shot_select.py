@@ -37,6 +37,13 @@ def _reject_reason(shot: dict, where: dict) -> str | None:
     """返回第一个不满足条件的原因（中文，进筛选报告）；全满足返回 None。"""
     lab = _label(shot)
     tags = [t for t in (lab.get("tags") or []) if t]
+    # text_any：跨字段 OR（场景/活动/氛围/标签任一命中即可）——
+    # 给「关键词」语义用；单字段 _any 之间仍是 AND
+    text_any = where.get("text_any")
+    if text_any and not any(
+            _text_match(q, lab.get(f, "") or "", tags)
+            for q in text_any for f in ("scene", "activity", "mood")):
+        return f"场景/活动/氛围/标签均不匹配「{('、'.join(map(str, text_any)))[:32]}」"
     for field, label in (("scene", "场景"), ("activity", "活动"), ("mood", "氛围")):
         values = where.get(f"{field}_any")
         if values and not any(

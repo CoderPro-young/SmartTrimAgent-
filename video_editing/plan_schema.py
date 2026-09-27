@@ -19,6 +19,7 @@ import os
 from dataclasses import dataclass
 
 from skills import SKILLS, check_args_keys, effects_menu, validate_audio, time_scale_of
+from workflow import WORKFLOW_KEYS, WORKFLOWS, workflow_menu
 
 # ---- 白名单 ----
 
@@ -42,7 +43,8 @@ POSITIONS = {
 # 2026-09-16 实测：模型为「2 倍速」臆造了 clip 级字段 "speed"，校验返回 0 错误、
 # 成品是原速、系统却报告成功。这是最坏的失败模式，必须堵死。
 
-PLAN_KEYS = {"schema_version", "output", "clips", "timeline", "overlays", "audio", "select"}
+PLAN_KEYS = {"schema_version", "output", "clips", "timeline", "overlays", "audio",
+             "select", "workflow"}
 OUTPUT_KEYS = {"filename", "resolution", "fps"}
 RESOLUTION_KEYS = {"width", "height"}
 CLIP_KEYS = {"id", "source", "kind", "trim_start", "trim_end", "duration",
@@ -61,7 +63,7 @@ CUT_BLACK_KEYS = {"min_duration", "keep_padding", "min_keep"}
 
 # V5 粗剪：select 批量筛选宏（LLM 只写条件，编译器从内容卡片生成 clips）
 SELECT_KEYS = {"sources", "where", "budget_seconds", "order"}
-SELECT_WHERE_KEYS = {"scene_any", "activity_any", "mood_any", "tag_any",
+SELECT_WHERE_KEYS = {"scene_any", "activity_any", "mood_any", "tag_any", "text_any",
                      "person_count_min", "person_count_max", "has_children",
                      "quality_in", "min_duration", "max_duration",
                      "max_silence_ratio"}
@@ -101,6 +103,27 @@ def _unknown_keys(obj: dict, allowed: set, tag: str) -> list[str]:
     ]
 
 
+def _validate_workflow(wf, tag: str = "workflow") -> list[str]:
+    """校验顶层 workflow 宏块（V7 一键成片）。"""
+    if not isinstance(wf, dict):
+        return [f"{tag} 必须是对象（{{\"name\": ...}}）。"]
+    errors = _unknown_keys(wf, WORKFLOW_KEYS, tag)
+    name = wf.get("name")
+    if name not in WORKFLOWS:
+        errors.append(f"{tag}.name 必须是 {workflow_menu()} 之一（收到 {name!r}）。")
+    budget = wf.get("budget_seconds")
+    if budget is not None and not (_num(budget) and budget > 0):
+        errors.append(f"{tag}.budget_seconds 必须为正数（目标成片总时长）。")
+    trans = wf.get("transition")
+    if trans is not None and not (_num(trans) and 0 <= trans <= 3):
+        errors.append(f"{tag}.transition 必须是 0~3 之间的秒数（0 = 硬切）。")
+    if wf.get("keyword") is not None and not isinstance(wf.get("keyword"), str):
+        errors.append(f"{tag}.keyword 必须是字符串（可选的内容关键词）。")
+    if wf.get("order") is not None and wf.get("order") not in ("as_listed", "best_first"):
+        errors.append(f"{tag}.order 必须是 as_listed / best_first 之一。")
+    return errors
+
+
 def _num(x) -> bool:
     return isinstance(x, (int, float)) and not isinstance(x, bool)
 
@@ -138,7 +161,7 @@ def _validate_select(sel, project_root: str) -> list[str]:
             errors.append("select.where 必须是对象（筛选条件）。")
         else:
             errors.extend(_unknown_keys(where, SELECT_WHERE_KEYS, "select.where"))
-            for f in ("scene_any", "activity_any", "mood_any", "tag_any"):
+            for f in ("scene_any", "activity_any", "mood_any", "tag_any", "text_any"):
                 v = where.get(f)
                 if v is not None and (not isinstance(v, list) or not v
                                       or not all(isinstance(x, str) for x in v)):
@@ -192,20 +215,25 @@ def validate_plan(plan: dict, project_root: str) -> list[str]:
 
     errors.extend(_unknown_keys(plan, PLAN_KEYS, "计划顶层"))
 
-    # ---- select（V5 筛选宏）：与 clips/timeline/overlays 互斥 ----
+    # ---- select / workflow（V5/V7 宏）：与 clips/timeline/overlays 互斥 ----
     has_select = "select" in plan
+    has_workflow = "workflow" in plan
+    if has_workflow:
+        errors.extend(_validate_workflow(plan["workflow"]))
+        for other, label in (("select", "select"), ("clips", "clips"),
+                             ("timeline", "timeline"), ("overlays", "overlays")):
+            if plan.get(other):
+                errors.append(f"workflow 与 {label} 互斥：宏由编译器生成，请二选一。")
     if has_select:
         if not isinstance(plan["select"], dict):
             errors.append("select 必须是对象（筛选宏）。")
             has_select = False
         else:
             errors.extend(_validate_select(plan["select"], project_root))
-            if plan.get("clips"):
-                errors.append("select 与 clips 互斥：筛选宏由编译器生成 clips，请二选一。")
-            if plan.get("timeline"):
-                errors.append("select 与 timeline 互斥：筛选宏由编译器生成 timeline。")
-            if plan.get("overlays"):
-                errors.append("select 与 overlays 互斥（宏生成的片段 id 由编译器决定）。")
+            for other, label in (("clips", "clips"), ("timeline", "timeline"),
+                                 ("overlays", "overlays")):
+                if plan.get(other):
+                    errors.append(f"select 与 {label} 互斥：筛选宏由编译器生成，请二选一。")
 
     # ---- output ----
     out = plan.get("output")
@@ -229,7 +257,7 @@ def validate_plan(plan: dict, project_root: str) -> list[str]:
 
     # ---- clips ----
     clips = plan.get("clips")
-    if has_select:
+    if has_select or has_workflow:
         clips = clips or []       # 宏模式：clips 由编译器生成，这里只跳过
     elif not isinstance(clips, list) or not clips:
         errors.append("clips 不能为空（至少一个素材进入时间轴）。")
@@ -324,7 +352,7 @@ def validate_plan(plan: dict, project_root: str) -> list[str]:
 
     # ---- timeline ----
     timeline = plan.get("timeline")
-    if has_select:
+    if has_select or has_workflow:
         timeline = timeline or []  # 宏模式：timeline 由编译器生成
     elif not isinstance(timeline, list) or not timeline:
         errors.append("timeline 不能为空（至少一个条目）。")

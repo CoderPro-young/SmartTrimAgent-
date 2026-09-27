@@ -23,6 +23,7 @@ import plan_compiler
 import plan_schema
 from model import get_model
 from skills import AUDIO_PROMPT_DOC, render_prompt_doc
+from workflow import render_workflow_doc
 
 # 仓库根：INPUT/ OUTPUT/ 在根下，LocalShellBackend 也锚定到根
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -344,6 +345,8 @@ this instead of `clips`/`timeline`/`overlays` (audio BGM block is still allowed)
 
 {EFFECTS_DOC}
 
+{WORKFLOW_DOC}
+
 {AUDIO_DOC}
 
 Submit the plan, then stop. Do not write any ffmpeg command.
@@ -354,6 +357,7 @@ Submit the plan, then stop. Do not write any ffmpeg command.
 V2_SYSTEM_PROMPT = (
     V2_SYSTEM_PROMPT_TEMPLATE
     .replace("{EFFECTS_DOC}", render_prompt_doc())
+    .replace("{WORKFLOW_DOC}", render_workflow_doc())
     .replace("{AUDIO_DOC}", AUDIO_PROMPT_DOC)
 )
 

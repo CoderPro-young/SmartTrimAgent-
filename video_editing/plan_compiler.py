@@ -219,12 +219,40 @@ def _derive(plan: dict) -> dict:
 # 命令生成（③）
 # --------------------------------------------------------------------------- #
 
-def _normalize_commands(plan: dict, math: dict) -> tuple[list[Command], dict]:
-    """每个 clip 一条归一化命令（去重）。"""
+def _norm_cache_path(project_root: str, clip: dict, src: str, vf: str,
+                     af: str, W: int, H: int, fps, d) -> str:
+    """归一化产物的内容寻址缓存路径（V7 性能优化）。
+
+    键 = 输入（prepass 后路径 + 原素材 stat）+ 裁剪 + 滤镜 + 目标规格：
+    参数卡片回改（replan）只重编码被改的片段，重试/未变片段全部秒级复用。
+    """
+    import hashlib
+    orig = clip.get("source") or ""
+    try:
+        st = os.stat(os.path.join(project_root, orig))
+        stat_part = f"{st.st_size}|{int(st.st_mtime)}"
+    except OSError:
+        stat_part = "0|0"
+    key = "|".join([
+        src, stat_part,
+        str(clip.get("trim_start") or 0), str(clip.get("trim_end")),
+        str(clip.get("duration")), vf, af, f"{W}x{H}@{fps}", str(d),
+    ])
+    h = hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
+    return f"TMP/norm/{h}.mp4"
+
+
+def _normalize_commands(plan: dict, math: dict,
+                        project_root: str) -> tuple[list[Command], dict, dict]:
+    """每个 clip 一条归一化命令（去重；产物内容寻址缓存命中则跳过）。
+
+    返回 (命令列表, sidecars, {cid: 归一化产物路径})——路径供渲染段引用。
+    """
     W, H, fps = math["width"], math["height"], math["fps"]
     commands: list[Command] = []
     sidecars: dict[str, str] = {}
     seen: set[str] = set()
+    norm_paths: dict[str, str] = {}          # cid -> 归一化产物路径（concat 用）
     for c in plan["clips"]:
         cid = c["id"]
         if cid in seen:
@@ -236,7 +264,6 @@ def _normalize_commands(plan: dict, math: dict) -> tuple[list[Command], dict]:
         prepass_cmds, src = _prepass_commands(cid, src, effects)
         commands.extend(prepass_cmds)
         filter_effects = [e for e in effects if is_vf(e.get("name"))]
-        out = f"TMP/{cid}_norm.mp4"
         kind = c["kind"]
         vf = _effects_to_vf(filter_effects)
         vf += ("," if vf else "") + (
@@ -279,13 +306,21 @@ def _normalize_commands(plan: dict, math: dict) -> tuple[list[Command], dict]:
         argv += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
                  "-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2",
                  "-t", str(d),
-                 "-map", "0:v:0", "-map", amap, out]
+                 "-map", "0:v:0", "-map", amap]
+        out = _norm_cache_path(project_root, c, src, vf, af, W, H, fps, d)
+        norm_paths[cid] = out
+        # 内容寻址缓存命中：同参数片段（replan 未改/重试）直接复用，不重编码
+        if os.path.isfile(os.path.join(project_root, out)) and \
+                os.path.getsize(os.path.join(project_root, out)) > 0:
+            continue
+        argv += [out]
         commands.append(Command("normalize", f"归一化 {cid} ({src})", argv))
 
-    # concat list（快速路径需要）
-    list_lines = [f"file '{c}_norm.mp4'" for c in math["order"]]
+    # concat list（快速路径需要）；concat 文件在 TMP/ 下，行内路径相对 TMP/
+    list_lines = [f"file '{norm_paths[c].replace('TMP/', '', 1)}'"
+                  for c in math["order"]]
     sidecars["TMP/concat_list.txt"] = "\n".join(list_lines) + "\n"
-    return commands, sidecars
+    return commands, sidecars, norm_paths
 
 
 def _has_transition(plan: dict) -> bool:
@@ -473,7 +508,7 @@ def _render_with_transition(plan: dict, math: dict) -> tuple[list[Command], dict
 
     inputs: list[str] = []
     for cid in order:
-        inputs += ["-i", f"TMP/{cid}_norm.mp4"]
+        inputs += ["-i", math["norm_paths"][cid]]
     for ov in plan.get("overlays") or []:
         if ov["type"] == "pip":
             if ov["kind"] == "image":
@@ -844,9 +879,68 @@ def _check_transition_fit(plan: dict) -> None:
                 ])
 
 
+def _gather_ctx(project_root: str) -> dict:
+    """收集全部 INPUT/ 素材的 {卡片, 探针}（workflow 宏的展开上下文）。"""
+    import content_analysis
+    cards, probes = {}, {}
+    input_dir = os.path.join(project_root, "INPUT")
+    if not os.path.isdir(input_dir):
+        return {"cards": cards, "probes": probes, "project_root": project_root}
+    for name in sorted(os.listdir(input_dir)):
+        if name.startswith(".") or not os.path.isfile(os.path.join(input_dir, name)):
+            continue
+        rel = "INPUT/" + name
+        ext = os.path.splitext(name)[1].lower()
+        if ext in (".mp3", ".wav", ".m4a", ".flac", ".ogg"):
+            continue                     # 纯音频不进视频素材池
+        card = content_analysis.load_cached_card(project_root, rel)
+        if card:
+            cards[rel] = card
+        data = (ffmpeg_exec.probe(os.path.join(project_root, rel)).get("data") or {})
+        streams = data.get("streams") or []
+        raw_dur = (data.get("format") or {}).get("duration")
+        try:
+            dur = round(float(raw_dur), 3)
+        except (TypeError, ValueError):
+            dur = None
+        video = next((s for s in streams if s.get("codec_type") == "video"), None)
+        audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
+        probes[rel] = {"duration": dur,
+                       "has_audio": audio is not None,
+                       "has_video": video is not None}
+    return {"cards": cards, "probes": probes, "project_root": project_root}
+
+
+def _expand_workflow(plan: dict, project_root: str) -> tuple[dict, dict]:
+    """V7 一键成片：workflow 宏 → 确定性展开成普通计划（clips/timeline）。
+
+    展开产物仍可含 select/cut_silence（如 speech_clean 产出 cut 字段），
+    由后续 _expand_select/_expand_cuts 继续处理——宏之间可组合。
+    """
+    import workflow as wf_mod
+
+    wf = plan["workflow"]
+    name = wf.get("name")
+    entry = wf_mod.WORKFLOWS.get(name)
+    if entry is None:
+        raise CompileError([f"workflow.name 必须是 {wf_mod.workflow_menu()} 之一。"])
+    ctx = _gather_ctx(project_root)
+    try:
+        sub_plan, report = entry.expand(wf, ctx)
+    except ValueError as exc:            # workflow 用 ValueError 表达可回传错误
+        raise CompileError([str(exc)])
+    new_plan = {k: v for k, v in plan.items()
+                if k not in ("workflow", "clips", "timeline", "overlays")}
+    new_plan.update(sub_plan)
+    return new_plan, {"name": name, **report}
+
+
 def _expand_plan(plan: dict, project_root: str, run_fn=None) -> tuple[dict, dict]:
-    """V5 计划展开总入口：select 宏 → clips；cut 参数 → 保留子段。"""
+    """V5/V7 计划展开总入口：workflow 宏 → select 宏；cut 参数 → 保留子段。"""
     expansions: dict = {}
+    if plan.get("workflow"):
+        plan, report = _expand_workflow(plan, project_root)
+        expansions["workflow"] = report
     if plan.get("select"):
         plan, report = _expand_select(plan, project_root)
         expansions["select"] = report
@@ -864,7 +958,8 @@ def compile_plan(plan: dict, project_root: str) -> CompileResult:
 
     plan, expansions = _expand_plan(plan, project_root)
     math = _derive(plan)
-    norm_cmds, norm_sidecars = _normalize_commands(plan, math)
+    norm_cmds, norm_sidecars, norm_paths = _normalize_commands(plan, math, project_root)
+    math["norm_paths"] = norm_paths      # 渲染段按内容寻址路径引用归一化产物
 
     if _has_transition(plan):
         render_cmds, render_sidecars = _render_with_transition(plan, math)
@@ -1062,22 +1157,48 @@ def precheck(result: CompileResult, project_root: str) -> CompileResult:
 
 
 def execute(result: CompileResult, project_root: str, should_stop=None) -> CompileResult:
-    """④ 执行：写 sidecar 文件 → dry-run 预检 → 逐条运行命令（cwd 锚定项目根）。
+    """④ 执行：写 sidecar 文件 → dry-run 预检 → 运行命令（cwd 锚定项目根）。
 
+    detect/normalize 阶段的命令相互独立，**2 路并行**（V7 性能优化：
+    多片段任务不再串行逐条编码）；render 阶段依赖前序产物，保持串行。
     should_stop() 返回 True 时在命令边界抛 Cancelled（Web 取消按钮用；
     ffmpeg 进程本身由 ffmpeg_exec.kill_all() 硬终止，这里是软检查点）。
     """
-    os.makedirs(os.path.join(project_root, "TMP"), exist_ok=True)
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    os.makedirs(os.path.join(project_root, "TMP", "norm"), exist_ok=True)
     for path, content in result.sidecars.items():
         with open(os.path.join(project_root, path), "w", encoding="utf-8") as f:
             f.write(content)
     # drawtext 的 textfile 是 sidecar，所以预检必须在写完 sidecar 之后
     precheck(result, project_root)  # 失败抛 CompileError，命令一条都不会真跑
-    for c in result.commands:
+
+    def run_one(c: Command) -> dict:
         if should_stop is not None and should_stop():
             raise Cancelled(f"已取消：未执行「{c.description}」")
-        res = ffmpeg_exec.run(c.argv, cwd=project_root)
-        result.executes.append({"description": c.description, **res})
+        return {"description": c.description, **ffmpeg_exec.run(c.argv, cwd=project_root)}
+
+    parallel = [c for c in result.commands if c.stage in ("detect", "normalize")]
+    renders = [c for c in result.commands if c.stage not in ("detect", "normalize")]
+
+    done: dict[int, dict] = {}
+    if parallel:
+        with ThreadPoolExecutor(max_workers=min(2, len(parallel))) as ex:
+            futures = {ex.submit(run_one, c): i for i, c in enumerate(parallel)}
+            cancelled: Cancelled | None = None
+            for fut in as_completed(futures):
+                i = futures[fut]
+                try:
+                    done[i] = fut.result()
+                except Cancelled as exc:
+                    cancelled = cancelled or exc
+            if cancelled is not None:
+                # 已完成的照常入账，再统一抛取消
+                result.executes = [done[i] for i in sorted(done)]
+                raise cancelled
+    for i, c in enumerate(renders):
+        done[len(parallel) + i] = run_one(c)
+    result.executes = [done[i] for i in sorted(done)]
     return result
 
 

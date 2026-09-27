@@ -363,22 +363,60 @@ def tag_shots(shots: list[dict], frames_b64: list[str], model, name: str = "",
     """就地给 shots[i] 写 label / tag_failed。每批失败重试一次，再失败只标记。
 
     frames_b64 与 shots 一一对应。永远不抛异常——打标失败是降级不是错误。
+    批次间并发（V7 性能优化，参考 FireRed 实测：串行 VLM 是最大瓶颈，
+    见其 docs/性能瓶颈分析与优化建议.md P0）：默认 4 路，环境变量
+    VLM_CONCURRENCY 可调；进度按批号上报（乱序完成时单调递增）。
     """
+    from concurrent.futures import ThreadPoolExecutor
+
     bs = batch_size or _batch_size()
     batches = [list(range(i, min(i + bs, len(shots))))
                for i in range(0, len(shots), bs)]
-    for bi, idxs in enumerate(batches):
-        _report(stage="tag", file=name, done=bi, total=len(batches))
-        labels = _tag_once(model, [frames_b64[i] for i in idxs])
+    _report(stage="tag", file=name, done=0, total=len(batches))
+
+    def tag_batch(bi: int, idxs: list[int]):
+        frames = [frames_b64[i] for i in idxs]
+        labels = _tag_once(model, frames)
         if labels is None:
-            labels = _tag_once(model, [frames_b64[i] for i in idxs])   # 重试一次
-        if labels is None or len(labels) != len(idxs):
-            for i in idxs:
-                shots[i]["tag_failed"] = True
-            continue
-        for k, i in enumerate(idxs):
-            shots[i]["label"] = sanitize_label(labels[k])
+            labels = _tag_once(model, frames)       # 重试一次
+        return bi, idxs, labels
+
+    try:
+        workers = max(1, int(os.environ.get("VLM_CONCURRENCY", "4")))
+    except ValueError:
+        workers = 4
+    workers = min(workers, max(1, len(batches)))
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        # as_completed：进度条按完成数递增（不受批间快慢影响）
+        pending = [ex.submit(tag_batch, bi, idxs)
+                   for bi, idxs in enumerate(batches)]
+        done = 0
+        by_batch: dict[int, tuple] = {}
+        for fut in _as_completed(pending):
+            bi, idxs, labels = fut.result()
+            by_batch[bi] = (idxs, labels)
+            done += 1
+            _report(stage="tag", file=name, done=done, total=len(batches))
+        for bi in sorted(by_batch):
+            idxs, labels = by_batch[bi]
+            if labels is None or len(labels) != len(idxs):
+                for i in idxs:
+                    shots[i]["tag_failed"] = True
+                continue
+            for k, i in enumerate(idxs):
+                shots[i]["label"] = sanitize_label(labels[k])
     _report(stage="tag", file=name, done=len(batches), total=len(batches))
+
+
+def _as_completed(futures):
+    """ThreadPool futures 的完成迭代器（避免直接依赖 concurrent.futures.as_completed
+    的导入位置差异；None 兜底保证测试环境缺库时仍可串行退化）。"""
+    try:
+        from concurrent.futures import as_completed
+        return as_completed(futures)
+    except ImportError:            # pragma: no cover
+        return (f for f in futures)
 
 
 def build_summary(shots: list[dict], duration, signals: dict | None = None) -> str:

@@ -624,6 +624,7 @@ def _build_report(compiled) -> dict:
         "overlays": len(plan.get("overlays") or []),
         "cuts": compiled.expansions.get("cuts") or [],
         "select": compiled.expansions.get("select"),
+        "workflow": compiled.expansions.get("workflow"),
     }
     if rep["cuts"]:
         removed = round(sum(c["removed_seconds"] for c in rep["cuts"]), 3)
