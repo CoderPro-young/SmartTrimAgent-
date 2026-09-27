@@ -68,9 +68,10 @@ PROBES = {
 
 
 def t01_registry_and_prompt_doc():
-    assert set(wf_mod.WORKFLOWS) == {"one_click_reel", "speech_clean"}
+    assert set(wf_mod.WORKFLOWS) == {"one_click_reel", "speech_clean", "smart_create"}
     doc = wf_mod.render_workflow_doc()
     assert "one_click_reel" in doc and "budget_seconds" in doc
+    assert "smart_create" in doc and "captions" in doc
 
 
 def t02_validate_workflow_block():
@@ -207,6 +208,74 @@ def t09_norm_cache_reuse_on_replan():
         base["clips"][0]["trim_end"] = 6
         r3 = plan_compiler.compile_plan(base, tmp)
         assert len([c for c in r3.commands if c.stage == "normalize"]) == 1
+
+
+def t10_smart_create_needs_captions():
+    with tempfile.TemporaryDirectory() as tmp:
+        _make_project(tmp)
+        ctx = _ctx(tmp, {"INPUT/a.mp4": CARDS["INPUT/a.mp4"]},
+                   {"INPUT/a.mp4": PROBES["INPUT/a.mp4"]})
+        try:
+            wf_mod.WORKFLOWS["smart_create"].expand({}, ctx)
+            assert False, "应抛 ValueError"
+        except ValueError as exc:
+            assert "captions" in str(exc)
+
+
+def t11_smart_create_expansion_with_captions():
+    with tempfile.TemporaryDirectory() as tmp:
+        _make_project(tmp)
+        ctx = _ctx(tmp, {"INPUT/a.mp4": CARDS["INPUT/a.mp4"]},
+                   {"INPUT/a.mp4": PROBES["INPUT/a.mp4"]})
+        plan, report = wf_mod.WORKFLOWS["smart_create"].expand(
+            {"captions": ["山间日落", "风穿过草地"], "budget_seconds": 12}, ctx)
+        assert plan["clips"] and "_captions" in plan
+        assert plan["_captions"] == ["山间日落", "风穿过草地"]
+        assert report["captions"] == 2 and report["workflow"] == "smart_create"
+
+
+def t12_compile_spreads_captions_over_timeline():
+    """编译链路：_captions 在 _derive 之后被消费成均分时间轴的字幕 overlay。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        _make_project(tmp)
+        cards = {
+            "INPUT/a.mp4": _card("INPUT/a.mp4",
+                                 [_shot(0, 5, "日落"), _shot(5, 10, "海边")], dur=10),
+        }
+        _ctx(tmp, cards, {"INPUT/a.mp4": PROBES["INPUT/a.mp4"]})
+        plan = {"schema_version": "2.0",
+                "output": {"filename": "OUTPUT/smart.mp4",
+                           "resolution": {"width": 640, "height": 360}},
+                "workflow": {"name": "smart_create", "budget_seconds": 10,
+                             "transition": 0,
+                             "captions": ["第一句", "第二句", "第三句"]}}
+        result = plan_compiler.compile_plan(plan, tmp)
+        # 两镜头 5+5s，无转场重叠 → D=10；三句均分 slot≈3.33s
+        assert result.math["D"] == 10.0
+        ovs = result.plan.get("overlays") or []
+        assert len(ovs) == 3, ovs
+        assert all(o["type"] == "text" and o["position"] == "bottom" for o in ovs)
+        assert [o["text"] for o in ovs] == ["第一句", "第二句", "第三句"]
+        # 第一句挂 s00（0~5s），第二句起点 3.33s 仍在 s00，第三句起点 6.67s 挂 s01
+        assert ovs[0]["at_clip"] == "s00"
+        assert ovs[2]["at_clip"] == "s01"
+        # _captions 暂存键已被消费
+        assert "_captions" not in result.plan
+        # 字幕随渲染命令烧录（转场路径的 filter_complex 或 overlay 路径）
+        assert any(c.stage == "render" for c in result.commands)
+
+
+def t13_captions_validation():
+    with tempfile.TemporaryDirectory() as tmp:
+        _make_project(tmp)
+        plan = {"schema_version": "2.0",
+                "output": {"filename": "OUTPUT/o.mp4",
+                           "resolution": {"width": 640, "height": 480}},
+                "workflow": {"name": "smart_create", "captions": [""]}}
+        errs = plan_schema.validate_plan(plan, tmp)
+        assert any("captions" in e for e in errs), errs
+        plan["workflow"]["captions"] = ["有内容"]
+        assert plan_schema.validate_plan(plan, tmp) == []
 
 
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("t") and callable(v)]

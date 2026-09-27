@@ -124,7 +124,17 @@ pre{
 .tsep{width:1px;height:12px;background:var(--line);margin:0 4px;flex:0 0 auto}
 .toolbar .grow{flex:1}
 .toolbar .keys{font-size:11px;color:var(--dim)}
-/* 任务模板 chips（T19） */
+/* 任务模板 chips（T19）与双模式切换（V8） */
+.modes{display:flex;gap:6px;margin-bottom:8px}
+.mode{
+  flex:1;text-align:center;font-size:12.5px;font-weight:600;padding:6px 10px;
+  border-radius:8px;cursor:pointer;user-select:none;
+  border:1px solid var(--line);background:var(--panel2);color:var(--muted);
+  transition:.15s;letter-spacing:.5px;
+}
+.mode:hover{color:var(--text)}
+.mode.on{color:var(--accent);border-color:rgba(124,156,255,.6);background:rgba(124,156,255,.10)}
+.mode.on[data-mode="smart"]{color:var(--accent2);border-color:rgba(176,140,255,.6);background:rgba(176,140,255,.10)}
 .tpls{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
 .tpl{
   font-size:12px;padding:3px 11px;border-radius:999px;cursor:pointer;

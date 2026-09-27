@@ -15,6 +15,9 @@
   最短静音 / 保留缓冲）
 - **粗剪 · 批量镜头筛选（V5）**：`select` 筛选宏 ——按内容卡标签（场景 / 人数 / 画质 /
   静音比…）+ 时长预算，编译器从卡片确定性生成片段，模型不手抄时间区间
+- **智能创作 · 一键成片（V7/V7.1）**：`smart_create` 工作流宏——模型读镜头卡后**自己写文案**，
+  编译器把文案均分铺到成片时间轴并烧录成底部字幕（画面 + 文案字幕 + fade 转场 + 可选 BGM）；
+  另有 `one_click_reel`（按关键词出集锦）/ `speech_clean`（口播去静音）内置工作流
 - **多素材拼接**：自动把异构素材（mp4 / avi / 图片、不同分辨率 / 编码 / 帧率 / 声道）归一化成统一中间格式再拼接
 - **多模态内容理解（V4）**：`analyze_media` 建立镜头级语义索引（人数 / 场景 / 活动 / 情绪 / 画质 +
   V5 静音/黑场信号）——"帮我剪和朋友一起的时光""只留有人的画面"这类语义任务可直接表达；
@@ -85,8 +88,11 @@ python video_editing/video_demo.py "把 INPUT/a.mp4 和 INPUT/b.mp4 拼接，中
 .venv\Scripts\python.exe web/server.py --port 9000 --max-upload-mb 2000
 ```
 
-**素材全部从界面上传**（不预置任何默认素材）。左边输入自然语言需求（上方有任务模板一键填入），
-右边三个标签页：
+**素材全部从界面上传**（不预置任何默认素材）。输入区顶部可切换两种模式（V7.1，选择会记住）：
+**✂️ 粗剪模式**（默认，筛镜头 / 剪静音 / 去黑屏等做减法的任务模板）与
+**✨ 智能创作**（一键成片 / Vlog / 作品展示等模板，引导模型走 smart_create 出带文案字幕的成片）。
+模式只影响模板与引导文案，任务自然语言里带什么意图就走什么链路。左边输入自然语言需求
+（上方有任务模板一键填入），右边三个标签页：
 
 - **素材库（V5，默认页）** —— 素材列表带**缩略图**与索引状态徽章；**上传即索引**：
   落盘后后台自动建立内容卡（含静音/黑场信号），不用等任务触发；
@@ -219,6 +225,9 @@ VLM_BATCH=6                          # 每次请求带几帧
 
 ## 技术文档
 
+- [docs/v7.1-smart-create.md](docs/v7.1-smart-create.md) —— V7.1 双模式前端 + 智能创作（smart_create / 文案铺字幕烧录 / 无音轨现场探测修复）
+- [docs/v7.0-oneclick-and-perf.md](docs/v7.0-oneclick-and-perf.md) —— V7 一键成片 workflow 宏 + 性能优化（VLM 并发 / 归一化内容寻址缓存）
+- [docs/v6.0-roughcut-loop.md](docs/v6.0-roughcut-loop.md) —— V6 粗剪减法漏斗（粗筛报告/一键应用 / EDL·CSV 导出 / 筛选报告）
 - [docs/v5.0-roughcut.md](docs/v5.0-roughcut.md) —— V5 粗剪内核与媒体化前端（静音/黑场信号 / select 宏 / 镜头库 / 参数卡片回改）
 - [docs/v4.0-multimodal-perception.md](docs/v4.0-multimodal-perception.md) —— V4 多模态感知层（analyze_media / 内容卡片 / 实测记录）
 - [docs/v3.1-multi-turn-interaction.md](docs/v3.1-multi-turn-interaction.md) —— 多轮交互与会话设计（V3.1）

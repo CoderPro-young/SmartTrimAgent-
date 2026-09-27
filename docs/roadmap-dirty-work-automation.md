@@ -332,6 +332,7 @@ schema 校验、命令生成、提示词文档全部从注册表派生——
 - [x] **T16 参数卡片回改**：plan → 表单控件 + "重新编译"按钮 + `POST /api/replan`（✅ 2026-09-24 随 V5 落地：流水线标签渲染人类可读参数卡，JSON 折叠进「高级」；回改走 replan 端点复用编译执行管线，不过 LLM）
 - [ ] **T17 多规格 variants**：`output` 改数组，横竖方一次渲染
 - [x] **一键成片 workflow 宏（V7，2026-09-27）**：WORKFLOW SKILL 编译器化（one_click_reel/speech_clean）+ VLM 批次并发 + 归一化内容寻址缓存/并行执行，参考 FireRed（Apache-2.0，引用见 THIRD-PARTY-NOTICES），见 [v7.0-oneclick-and-perf.md](./v7.0-oneclick-and-perf.md)
+- [x] **双模式前端 + 智能创作（V7.1，2026-09-28）**：粗剪/智能创作模式切换（模板与引导随模式换）+ `smart_create` 工作流（LLM 写文案 → 编译器 `_apply_captions` 均分铺轴烧录字幕，TTS 按决策暂缓）+ 无音轨素材现场 ffprobe 修复，见 [v7.1-smart-create.md](./v7.1-smart-create.md)
 - [x] **粗剪减法漏斗（V6，2026-09-27）**：粗筛报告/一键应用（culling.py + /api/cull-*）+ EDL/CSV 时间线导出（timeline_export.py）+ select rejected 筛选报告，见 [v6.0-roughcut-loop.md](./v6.0-roughcut-loop.md)
 - [x] **T18 审阅报告卡片**：黑帧 / 静音残留 / 打码覆盖率 / 时长断言 / 字幕轴完整性（✅ 2026-09-24 随 V5 落地第一版：done 事件带 `report`（剪除明细/筛选命中/效果清单/回验），成品标签渲染摘要卡；覆盖率类细化项后置）
 - [x] **T19 首页任务模板按钮**：去水印 / 加字幕 / 打码 / 拼接四个入口（✅ 2026-09-24 随 V5 落地：输入框上方 8 个模板 chips（剪静音/筛集锦/去黑屏/拼接转场/打码/去水印/BGM/竖屏），点击填入骨架文本）

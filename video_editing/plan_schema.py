@@ -121,6 +121,11 @@ def _validate_workflow(wf, tag: str = "workflow") -> list[str]:
         errors.append(f"{tag}.keyword 必须是字符串（可选的内容关键词）。")
     if wf.get("order") is not None and wf.get("order") not in ("as_listed", "best_first"):
         errors.append(f"{tag}.order 必须是 as_listed / best_first 之一。")
+    caps = wf.get("captions")
+    if caps is not None:
+        if not isinstance(caps, list) or not caps or len(caps) > 12 \
+                or not all(isinstance(x, str) and x.strip() for x in caps):
+            errors.append(f"{tag}.captions 必须是 1~12 条非空字符串数组（文案行）。")
     return errors
 
 

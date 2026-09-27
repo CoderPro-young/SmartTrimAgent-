@@ -220,7 +220,7 @@ def _derive(plan: dict) -> dict:
 # --------------------------------------------------------------------------- #
 
 def _norm_cache_path(project_root: str, clip: dict, src: str, vf: str,
-                     af: str, W: int, H: int, fps, d) -> str:
+                     af: str, W: int, H: int, fps, d, amap: str) -> str:
     """归一化产物的内容寻址缓存路径（V7 性能优化）。
 
     键 = 输入（prepass 后路径 + 原素材 stat）+ 裁剪 + 滤镜 + 目标规格：
@@ -237,6 +237,7 @@ def _norm_cache_path(project_root: str, clip: dict, src: str, vf: str,
         src, stat_part,
         str(clip.get("trim_start") or 0), str(clip.get("trim_end")),
         str(clip.get("duration")), vf, af, f"{W}x{H}@{fps}", str(d),
+        str(amap),                        # 有无声轨决定补不补 anullsrc，产物不同
     ])
     h = hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
     return f"TMP/norm/{h}.mp4"
@@ -286,13 +287,16 @@ def _normalize_commands(plan: dict, math: dict,
                      "-f", "lavfi", "-t", str(d), "-i", "anullsrc=r=48000:cl=stereo"]
             amap = "1:a"
         else:
-            # 视频素材：按 trim 点裁剪；探测确认无声时补静音轨
+            # 视频素材：按 trim 点裁剪；探测确认无声时补静音轨。
+            # select/workflow 宏生成的 clips 不带 probe——现场 ffprobe 判音轨
+            # （否则无音轨素材会产出无声 norm，渲染段 [i:a] 引用即失败）。
             d = math["durations"][cid]
             ts = c.get("trim_start") or 0
-            te = c.get("trim_end")
             if ts:
                 argv += ["-ss", str(ts)]
             probe = c.get("probe") or {}
+            if "has_audio" not in probe:
+                probe = {"has_audio": _probe_has_audio(project_root, c["source"], c)}
             no_audio = probe.get("has_audio") is False
             argv += ["-i", src]
             if no_audio:
@@ -307,7 +311,7 @@ def _normalize_commands(plan: dict, math: dict,
                  "-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2",
                  "-t", str(d),
                  "-map", "0:v:0", "-map", amap]
-        out = _norm_cache_path(project_root, c, src, vf, af, W, H, fps, d)
+        out = _norm_cache_path(project_root, c, src, vf, af, W, H, fps, d, amap)
         norm_paths[cid] = out
         # 内容寻址缓存命中：同参数片段（replan 未改/重试）直接复用，不重编码
         if os.path.isfile(os.path.join(project_root, out)) and \
@@ -950,14 +954,54 @@ def _expand_plan(plan: dict, project_root: str, run_fn=None) -> tuple[dict, dict
     return plan, expansions
 
 
+def _apply_captions(plan: dict, math: dict) -> None:
+    """smart_create 的文案铺字幕：逐行均分时间轴，烧录在画面下方。
+
+    在 _derive 之后执行（需要总时长 D 与各片段起点）。文案行跨片段边界也
+    没关系——drawtext 的 enable 是绝对时间轴，渲染在拼接/转场后的主画面上。
+    at_clip 落在包含起始时间的片段上；起始点超出末段时钳到最后一段末尾。
+    """
+    captions = plan.pop("_captions", None)
+    if not captions:
+        return
+    D = math["D"] or 1.0
+    n = len(captions)
+    slot = D / n
+    gap = min(0.25, slot * 0.08)
+    order = math["order"]
+    overlays = plan.setdefault("overlays", [])
+    for i, text in enumerate(captions):
+        ts = i * slot + gap / 2
+        dur = max(0.5, slot - gap)
+        # 找覆盖 ts 的片段（最后一段兜底）
+        host, offset = order[-1], 0.0
+        for cid in order:
+            s = math["starts"][cid]
+            d = math["durations"][cid] or 0
+            if s <= ts < s + d:
+                host, offset = cid, ts - s
+                break
+        overlays.append({
+            "type": "text",
+            "text": text,
+            "at_clip": host,
+            "start_offset": round(max(0.0, offset), 3),
+            "duration": round(dur, 3),
+            "position": "bottom",
+            "font_size": 44,
+            "color": "#FFFFFF",
+        })
+
+
 def compile_plan(plan: dict, project_root: str) -> CompileResult:
-    """校验 → 展开（V5）→ 推导 → 生成命令。失败抛 CompileError(errors)。"""
+    """校验 → 展开（V5/V7）→ 推导 → 生成命令。失败抛 CompileError(errors)。"""
     errors = validate_plan(plan, project_root)
     if errors:
         raise CompileError(errors)
 
     plan, expansions = _expand_plan(plan, project_root)
     math = _derive(plan)
+    _apply_captions(plan, math)          # smart_create 文案 → 字幕 overlay
     norm_cmds, norm_sidecars, norm_paths = _normalize_commands(plan, math, project_root)
     math["norm_paths"] = norm_paths      # 渲染段按内容寻址路径引用归一化产物
 

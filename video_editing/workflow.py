@@ -22,7 +22,8 @@ from dataclasses import dataclass
 import culling
 
 # 计划顶层 workflow 块的合法字段（plan_schema 白名单与此同源）
-WORKFLOW_KEYS = {"name", "budget_seconds", "transition", "keyword", "order"}
+WORKFLOW_KEYS = {"name", "budget_seconds", "transition", "keyword", "order",
+                 "captions"}
 
 DEFAULT_BUDGET = 30.0        # 一键集锦默认成片时长
 DEFAULT_TRANSITION = 0.3     # 默认转场时长（fade）
@@ -167,6 +168,70 @@ def _expand_speech_clean(wf: dict, ctx: dict) -> tuple[dict, dict]:
     return plan, report
 
 
+# ---------------------------------------------------- ③ smart_create ---- #
+
+def _expand_smart_create(wf: dict, ctx: dict) -> tuple[dict, dict]:
+    """智能创作（FireRed 一键成片的无配音版）：LLM 文案 + 自动画面编排。
+
+    文案（captions）由 LLM 读镜头卡后创作——创意归模型；本函数只做确定性
+    编排：粗筛 → 画质选材（可选 keyword）→ 预算贪心 → fade 转场。
+    captions 的铺字幕（逐行均分时间轴、烧录在画面下方）由编译器在
+    时间轴推导之后完成（_apply_captions），经 _captions 暂存键传递。
+    """
+    import shot_select
+
+    captions = [c for c in (wf.get("captions") or []) if str(c).strip()]
+    if not captions:
+        raise ValueError(
+            "smart_create 需要 captions（文案行数组）——请先 analyze_media "
+            "读镜头卡，写几条贴合画面的短文案再提交。")
+    budget = float(wf.get("budget_seconds") or DEFAULT_BUDGET)
+    keyword = (wf.get("keyword") or "").strip()
+
+    cards, missing, culled = _usable_cards(ctx, None)
+    if missing:
+        raise ValueError(
+            "以下素材还没有内容索引：" + "、".join(missing) +
+            "。请先对这些素材调用 analyze_media（通常上传后已自动建好）。")
+    if not cards:
+        raise ValueError("所有素材都被粗筛判定为废料，没有可用画面。")
+
+    where: dict = {"quality_in": ["good", "ok"], "max_silence_ratio": 0.8}
+    if keyword:
+        where["text_any"] = [keyword]
+    res = shot_select.select_shots(cards, {
+        "sources": sorted(cards), "where": where,
+        "budget_seconds": budget, "order": "best_first"})
+    if not res["clips"]:
+        raise ValueError(
+            f"smart_create 没有挑到可用镜头（{res['matched']} 个候选全部被拒）。"
+            f"请调大 budget_seconds 或放宽条件。")
+
+    trans = wf.get("transition", DEFAULT_TRANSITION)
+    timeline = []
+    for i in range(len(res["timeline"])):
+        item = dict(res["timeline"][i])
+        if i > 0 and trans:
+            item["transition"] = {"type": "fade", "duration": float(trans)}
+        timeline.append(item)
+
+    plan = {
+        "clips": res["clips"],
+        "timeline": timeline,
+        "_captions": captions,          # 编译器推导时间轴后消费（见 _apply_captions）
+    }
+    report = {
+        "workflow": "smart_create",
+        "captions": len(captions),
+        "culled": culled,
+        "picked": len(res["picked"]),
+        "rejected_total": len(res.get("rejected") or []),
+        "budget_seconds": budget,
+        "keyword": keyword or None,
+    }
+    return plan, report
+
+
 WORKFLOWS: dict[str, Workflow] = {
     w.name: w for w in [
         Workflow(
@@ -191,6 +256,22 @@ WORKFLOWS: dict[str, Workflow] = {
                 "  `speech_clean` — for \"clean up my talking footage\": every\n"
                 "  material with real audio gets cut_silence; silent/no-audio\n"
                 "  materials are skipped automatically (reported, not failed)."
+            ),
+        ),
+        Workflow(
+            name="smart_create",
+            summary="smart one-click video with LLM-written captions burned in.",
+            expand=_expand_smart_create,
+            prompt_doc=(
+                "  `smart_create` — creative one-click: YOU write the captions\n"
+                "  (short punchy lines, Chinese, 3-8 lines). Call analyze_media\n"
+                "  first to see what the footage actually shows, then submit\n"
+                "  {\"workflow\": {\"name\": \"smart_create\", \"captions\": [...],\n"
+                "   \"budget_seconds\": 25, \"keyword\": \"...\"}}. The compiler\n"
+                "  picks shots, adds fade transitions, spreads your captions\n"
+                "  evenly across the timeline (burned at bottom), honors the\n"
+                "  `audio` BGM block. Captions are YOUR creative job — write\n"
+                "  lines that fit the actual footage."
             ),
         ),
     ]
