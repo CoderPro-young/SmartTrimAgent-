@@ -67,6 +67,18 @@
       </div>
 
       <div class="card">
+        <h3>粗筛 · 废料检查<span class="grow"></span>
+          <span style="color:var(--dim);font-size:11px">全静音 / 全黑场 / 画质全差 / 过短</span></h3>
+        <div class="body">
+          <div class="cullhead">
+            <button class="ghost" id="cullBtn">🔍 检查废料</button>
+            <span style="font-size:11px;color:var(--dim)">只判定不动手，移除由你确认</span>
+          </div>
+          <div id="cullBody" style="margin-top:10px"><span class="empty">检查后列出建议丢弃的素材与原因</span></div>
+        </div>
+      </div>
+
+      <div class="card">
         <h3>镜头库 · 内容索引<span class="grow"></span>
           <span style="color:var(--dim);font-size:11px" id="shotMeta"></span></h3>
         <div class="body">
@@ -88,6 +100,7 @@
             <a id="dl" download>下载 / 打开原视频</a>
             <span id="outMeta" style="color:var(--muted);font-size:12.5px"></span>
           </div>
+          <div class="resultbar" id="exportBar" title="时间线导出"></div>
         </div>
       </div>
 

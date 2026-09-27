@@ -7,6 +7,7 @@ import * as shots from './shots.js';
 import * as pipeline from './pipeline.js';
 import * as result from './result.js';
 import { initTemplates } from './templates.js';
+import { initCull } from './cull.js';
 
 /* ---------- 会话（v3.1 语义保持不变） ---------- */
 const PH_FIRST = '先用一句话描述要剪成什么样，例如：把这两段拼起来，中间加 0.5 秒 fade 转场，输出 720p';
@@ -186,6 +187,7 @@ async function newTask(){
 async function boot(){
   initTabs();
   initTemplates();
+  initCull();
   materials.initUploads();
   materials.loadInputs();
   pipeline.loadOutputs();

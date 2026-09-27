@@ -30,29 +30,34 @@ def _text_match(query: str, value: str, tags: list[str]) -> bool:
 
 def shot_matches(shot: dict, where: dict) -> bool:
     """单个镜头是否满足全部 where 条件（AND 语义；同字段内多值 OR）。"""
+    return _reject_reason(shot, where) is None
+
+
+def _reject_reason(shot: dict, where: dict) -> str | None:
+    """返回第一个不满足条件的原因（中文，进筛选报告）；全满足返回 None。"""
     lab = _label(shot)
     tags = [t for t in (lab.get("tags") or []) if t]
-    if where.get("tag_any") and not any(
-            _text_match(q, "", tags) for q in where["tag_any"]):
-        return False
-    for field in ("scene", "activity", "mood"):
+    for field, label in (("scene", "场景"), ("activity", "活动"), ("mood", "氛围")):
         values = where.get(f"{field}_any")
         if values and not any(
                 _text_match(q, lab.get(field, ""), tags) for q in values):
-            return False
+            return f"{label}不匹配（要求 {('、'.join(map(str, values)))[:40]}）"
+    if where.get("tag_any") and not any(
+            _text_match(q, "", tags) for q in where["tag_any"]):
+        return f"标签不含 {('、'.join(map(str, where['tag_any'])))[:40]}"
     pc = lab.get("person_count", 0)
     if where.get("person_count_min") is not None and pc < where["person_count_min"]:
-        return False
+        return f"人数 {pc} 少于 {where['person_count_min']}"
     if where.get("person_count_max") is not None and pc > where["person_count_max"]:
-        return False
+        return f"人数 {pc} 超过 {where['person_count_max']}"
     if where.get("has_children") is True and not lab.get("has_children"):
-        return False
+        return "画面无儿童"
     if where.get("has_children") is False and lab.get("has_children"):
-        return False
+        return "画面有儿童（要求排除）"
     quality_in = where.get("quality_in")
     if quality_in and lab.get("quality", "ok") not in quality_in:
-        return False
-    return True
+        return f"画质 {lab.get('quality', 'ok')} 不在 {('、'.join(quality_in))}"
+    return None
 
 
 def shot_span(shot: dict) -> tuple[float, float]:
@@ -86,28 +91,37 @@ def _candidate(shot: dict, source: str, card: dict) -> dict:
     }
 
 
-def collect_candidates(cards: dict[str, dict], where: dict) -> list[dict]:
-    """跨素材收集满足条件的镜头候选（保持 sources 顺序 → 时间顺序）。"""
+def collect_candidates(cards: dict[str, dict], where: dict) -> tuple[list[dict], list[dict]]:
+    """跨素材收集满足条件的镜头候选 + 被拒镜头（带中文原因，进筛选报告）。
+
+    返回 (candidates, rejected)，均保持 sources 顺序 → 时间顺序。
+    """
     out: list[dict] = []
+    rejected: list[dict] = []
     for source in sorted(cards):
         card = cards[source]
         silences = ((card.get("signals") or {}).get("audio") or {}).get("silences")
         for shot in card.get("shots") or []:
             if shot.get("tag_failed"):
+                rejected.append({**_candidate(shot, source, card), "reason": "打标失败，无法判断"})
                 continue
-            if not shot_matches(shot, where):
-                continue
-            s, e = shot_span(shot)
-            dur = e - s
-            if where.get("min_duration") is not None and dur < where["min_duration"]:
-                continue
-            if where.get("max_duration") is not None and dur > where["max_duration"]:
-                continue
-            if where.get("max_silence_ratio") is not None and \
-                    shot_silence_ratio(shot, silences) > where["max_silence_ratio"]:
+            reason = _reject_reason(shot, where)
+            if reason is None:
+                s, e = shot_span(shot)
+                dur = e - s
+                if where.get("min_duration") is not None and dur < where["min_duration"]:
+                    reason = f"时长 {dur:.1f}s 短于 {where['min_duration']}s"
+                elif where.get("max_duration") is not None and dur > where["max_duration"]:
+                    reason = f"时长 {dur:.1f}s 超过 {where['max_duration']}s"
+                elif where.get("max_silence_ratio") is not None and \
+                        shot_silence_ratio(shot, silences) > where["max_silence_ratio"]:
+                    reason = f"镜头内静音占比 {shot_silence_ratio(shot, silences):.0%} " \
+                             f"超过 {where['max_silence_ratio']:.0%}"
+            if reason is not None:
+                rejected.append({**_candidate(shot, source, card), "reason": reason})
                 continue
             out.append(_candidate(shot, source, card))
-    return out
+    return out, rejected
 
 
 def select_shots(cards: dict[str, dict], select: dict,
@@ -120,7 +134,7 @@ def select_shots(cards: dict[str, dict], select: dict,
     """
     where = dict(select.get("where") or {})
     where.setdefault("quality_in", list(default_quality_in))
-    cands = collect_candidates(cards, where)
+    cands, rejected = collect_candidates(cards, where)
 
     order = select.get("order", "as_listed")
     if order == "best_first":
@@ -131,6 +145,7 @@ def select_shots(cards: dict[str, dict], select: dict,
     used = 0.0
     for c in cands:
         if budget is not None and used + c["duration"] > budget + 1e-6:
+            rejected.append({**c, "reason": f"装不进 {budget}s 预算（已用 {used:g}s）"})
             continue
         picked.append(c)
         used = round(used + c["duration"], 3)
@@ -151,4 +166,5 @@ def select_shots(cards: dict[str, dict], select: dict,
         timeline.append({"clip": cid})
     return {"clips": clips, "timeline": timeline, "picked": picked,
             "matched": len(cands),
-            "min_matched_duration": min((c["duration"] for c in cands), default=None)}
+            "min_matched_duration": min((c["duration"] for c in cands), default=None),
+            "rejected": rejected}

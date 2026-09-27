@@ -13,6 +13,8 @@
     POST /api/run         → 运行一次任务，NDJSON 流式返回事件
     POST /api/replan      → 跳过 LLM，直接按（前端改过的）计划编译执行，NDJSON 流
     POST /api/cancel      → 取消当前任务（终止 ffmpeg + 各阶段检查点）
+    GET  /api/cull-report → 粗筛报告（废料判定：全静音/全黑/画质差/过短，只建议不动手）
+    POST /api/cull-apply  → 一键应用粗筛（把选中的废料移出 INPUT/，降级 TMP/removed/）
     GET  /media/<path>    → 预览产物（限制在 OUTPUT/ 内，支持 Range 拖动进度）
     GET  /input/<name>    → 预览原始素材（限制在 INPUT/ 内，同样支持 Range）
     GET  /thumb/<name>    → 素材任意时刻缩略图（?t=秒&h=高，ffmpeg -ss 前置快速抽帧）
@@ -52,9 +54,11 @@ sys.path.insert(0, PROJECT_ROOT)
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "video_editing"))
 
 import content_analysis  # noqa: E402
+import culling  # noqa: E402
 import ffmpeg_exec  # noqa: E402
 import plan_compiler  # noqa: E402
 import plan_schema  # noqa: E402
+import timeline_export  # noqa: E402
 from langchain_core.messages import AIMessage  # noqa: E402
 from skills import SKILLS  # noqa: E402
 from video_agent import (  # noqa: E402
@@ -79,9 +83,9 @@ MAX_UPLOAD = 500 * 1024 * 1024   # 单文件上限，可用 --max-upload-mb 覆�
 CANCEL = threading.Event()
 
 # 上传即索引（V5）：后台内容分析。_ANALYZING 防重复排队，失败结果短期退避。
-_ANALYZE_LOCK = threading.Lock()      # 后台分析串行（同时只解码一路）
-_ANALYZING: set[str] = set()          # 排队/进行中的素材绝对路径
-_ANALYZE_FAILED: dict[str, float] = {}  # path -> 失败时刻（5 分钟内不重试）
+_ANALYZE_SEM = threading.Semaphore(2)   # 允许 2 路并发分析（多素材建卡提速）
+_ANALYZING: set[str] = set()             # 排队/进行中的素材绝对路径
+_ANALYZE_FAILED: dict[str, float] = {}   # path -> 失败时刻（5 分钟内不重试）
 
 # 多轮会话（v3.1 P0）：单用户本地工具，进程内 dict 足够；
 # 「启动新任务」= 前端换新 session_id，旧会话惰性 GC，无需删除接口。
@@ -255,7 +259,7 @@ def _bg_analyze(rel: str) -> None:
             waited += 0.5
         if RUN_LOCK.locked():
             return                      # 任务一直没停，放弃本轮（下次刷新会再排）
-        with _ANALYZE_LOCK:
+        with _ANALYZE_SEM:
             dummy = lambda ev: None     # noqa: E731
             old_hook = content_analysis.set_progress_hook(dummy)
             try:
@@ -683,12 +687,21 @@ def _execute_compiled(compiled, emit, session: dict | None) -> None:
     emit({"type": "verify", "verify": compiled.verify})
 
     out = compiled.plan["output"]["filename"]
+    # V6 粗剪交付：成片之外顺手落 EDL/CSV（交给剪映/Premiere/Resolve 精剪）
+    exports: list[dict] = []
+    try:
+        for rel in timeline_export.export_files(compiled.plan, compiled.math, out):
+            exports.append({"file": rel,
+                            "url": "/media/" + rel.replace("\\", "/")})
+    except Exception as exc:  # noqa: BLE001 —— 导出失败不该影响成片交付
+        sys.stderr.write(f"[timeline-export] {type(exc).__name__}: {exc}\n")
     emit({
         "type": "done",
         "output": out,
         "url": "/media/" + out.replace("\\", "/"),
         "ok": bool((compiled.verify or {}).get("ok")),
         "report": _build_report(compiled),
+        "exports": exports,
     })
 
 
@@ -1022,6 +1035,59 @@ class Handler(BaseHTTPRequestHandler):
             _save_ledger([n for n in ledger if n != name])
         self._send_json({"ok": True, "name": name, "mode": mode, "detail": detail})
 
+    def _handle_cull_report(self) -> None:
+        """粗筛报告（V6 漏斗第①层）：废料判定只给建议，移除由 cull-apply 执行。"""
+        ledger = set(_load_ledger())
+        items = []
+        if os.path.isdir(INPUT_DIR):
+            for name in sorted(os.listdir(INPUT_DIR)):
+                if name.startswith("."):
+                    continue
+                kind = _guess_kind(name)
+                full = os.path.join(INPUT_DIR, name)
+                if kind is None or not os.path.isfile(full):
+                    continue
+                items.append({
+                    "name": name,
+                    "kind": kind,
+                    "probe": _probe_file(full),
+                    "content": content_analysis.load_cached_card(
+                        PROJECT_ROOT, "INPUT/" + name),
+                    "uploaded": name in ledger,
+                })
+        self._send_json(culling.build_cull_report(items))
+
+    def _handle_cull_apply(self, payload: dict) -> None:
+        """一键应用粗筛：把选中的废料移出 INPUT/（真删失败降级 TMP/removed/）。"""
+        names = payload.get("names")
+        if not isinstance(names, list) or not names:
+            self._fail(400, "缺少 names（要移除的素材名数组）。")
+            return
+        if RUN_LOCK.locked():
+            self._fail(409, "有任务正在运行，等它结束再应用粗筛。")
+            return
+        cleared: list[dict] = []
+        errors: list[str] = []
+        ledger = _load_ledger()
+        for raw in names:
+            name = _safe_name(str(raw))
+            if not name:
+                continue
+            full = self._resolve_under(INPUT_DIR, name)
+            if not full:
+                errors.append(f"{name}: 不存在")
+                continue
+            try:
+                mode, detail = _retire(full, name)
+                cleared.append({"name": name, "mode": mode, "detail": detail})
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{name}: {exc}")
+            _PROBE_CACHE.pop(full, None)
+            if name in ledger:
+                _save_ledger([n for n in ledger if n != name])
+                ledger = _load_ledger()
+        self._send_json({"ok": True, "cleared": cleared, "errors": errors})
+
     def _serve_media(self) -> None:
         """只暴露 OUTPUT/ 下的单个文件。
 
@@ -1230,7 +1296,8 @@ class Handler(BaseHTTPRequestHandler):
             if os.path.isdir(OUTPUT_DIR):
                 for name in sorted(os.listdir(OUTPUT_DIR)):
                     full = os.path.join(OUTPUT_DIR, name)
-                    if os.path.isfile(full) and os.path.splitext(name)[1].lower() in VIDEO_EXT:
+                    ext = os.path.splitext(name)[1].lower()
+                    if os.path.isfile(full) and (ext in VIDEO_EXT or ext in (".edl", ".csv")):
                         items.append({
                             "name": name,
                             "url": "/media/OUTPUT/" + name,
@@ -1239,6 +1306,10 @@ class Handler(BaseHTTPRequestHandler):
                         })
             items.sort(key=lambda x: x["mtime"], reverse=True)
             self._send_json({"outputs": items})
+            return
+
+        if path == "/api/cull-report":
+            self._handle_cull_report()
             return
 
         if path.startswith("/media/"):
@@ -1270,6 +1341,10 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/delete":
             self._handle_delete(payload)
+            return
+
+        if path == "/api/cull-apply":
+            self._handle_cull_apply(payload)
             return
 
         if path == "/api/session/reset":

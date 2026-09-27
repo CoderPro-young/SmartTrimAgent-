@@ -12,8 +12,30 @@ export function showResult(ev){
   a.setAttribute('download', (ev.output || '').split('/').pop());
   $('#outMeta').textContent = ev.output;
   renderReport(ev.report);
+  renderExports(ev.exports);
   $('#tabResult').click();
   card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+/* V6 交付：EDL/CSV 时间线导出链接（交给剪映/Premiere/Resolve 精剪） */
+function renderExports(exports){
+  const bar = $('#exportBar');
+  if (!bar) return;
+  bar.replaceChildren();
+  if (!exports || !exports.length){
+    bar.append(el('span', 'empty', '（本片无时间线导出）'));
+    return;
+  }
+  for (const ex of exports){
+    const a = el('a', null, (ex.file.split('/').pop()) + ' ↓');
+    a.href = ex.url;
+    a.setAttribute('download', ex.file.split('/').pop());
+    const ext = ex.file.split('.').pop().toLowerCase();
+    a.title = ext === 'edl'
+      ? 'CMX3600 EDL：剪映专业版 / Premiere / Resolve / FCP 可导入继续精剪'
+      : '剪辑表 CSV：源入出点 / 时间线位置，可用表格核对';
+    bar.append(a);
+  }
 }
 
 function rline(parts){
@@ -44,6 +66,21 @@ export function renderReport(rep){
       el('b', null, `筛选命中 ${rep.selected_shots ?? (rep.select.picked || []).length} 个镜头`),
       el('span', 'sub', `（按条件自动挑选，总长 ${fmtClock(rep.select.total_seconds)}s）`),
     ]));
+    /* V6 筛选报告：被拒镜头的原因分布（未进片的镜头去哪了） */
+    const rejected = rep.select.rejected || [];
+    if (rejected.length){
+      const byReason = {};
+      for (const x of rejected){
+        const key = (x.reason || '未知').replace(/\d+(\.\d+)?%?/g, 'N');  // 数值归并同类
+        byReason[key] = (byReason[key] || 0) + 1;
+      }
+      const top = Object.entries(byReason).sort((a, b) => b[1] - a[1]).slice(0, 4);
+      r.append(rline([
+        el('span', 'sub',
+          `未入选 ${rep.select.rejected_total ?? rejected.length} 个镜头：`
+          + top.map(([k, n]) => `${k}×${n}`).join('，')),
+      ]));
+    }
   }
   if ((rep.effects || []).length){
     r.append(rline([el('span', null, '效果：' + rep.effects.join('、'))]));

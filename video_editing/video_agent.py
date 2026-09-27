@@ -187,9 +187,12 @@ with the `submit_plan` tool.
      sources into a reel/highlight (e.g. "collect all dinner-party shots
      into ~30s"), do NOT hand-write dozens of trims. Instead submit a
      top-level `select` block (criteria + budget); the compiler reads the
-     content cards and generates the clips deterministically. Requirements:
-     every source in `select.sources` must have been analyzed first (call
-     `analyze_media` before submitting), and `select` replaces
+     content cards deterministically and generates the clips. The host
+     builds content cards automatically when materials are uploaded, so
+     you normally just `ls INPUT/` and write the `select` block WITHOUT
+     calling analyze_media first (pulling every full card wastes context).
+     Only if the compiler reports a missing content index should you call
+     `analyze_media` on that source and resubmit. `select` replaces
      `clips`/`timeline`/`overlays` (mutually exclusive).
 4. **Removing dead segments (V5)**: for "cut out the silences / pauses /
    dead air / black screens", add `cut_silence` (or `cut_black`) to the

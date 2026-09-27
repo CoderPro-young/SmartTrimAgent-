@@ -628,11 +628,16 @@ def _expand_select(plan: dict, project_root: str) -> tuple[dict, dict]:
                 if k not in ("select", "clips", "timeline", "overlays")}
     new_plan["clips"] = res["clips"]
     new_plan["timeline"] = res["timeline"]
+    rejected = res.get("rejected") or []
     report = {
         "picked": [{"source": c["source"], "start": c["start"], "end": c["end"],
                     "duration": c["duration"], "label": c["label"]}
                    for c in res["picked"]],
         "total_seconds": round(sum(c["duration"] for c in res["picked"]), 3),
+        # 被拒镜头（前 50 条进报告，防事件过大）；rejected_total 是全量数
+        "rejected": [{"source": r["source"], "start": r["start"], "end": r["end"],
+                      "reason": r.get("reason", "")} for r in rejected[:50]],
+        "rejected_total": len(rejected),
     }
     return new_plan, report
 
