@@ -11,11 +11,20 @@ https://github.com/FireRedTeam/FireRed-OpenStoryline —— 其 default_editing_
 
 可用 workflow：
 - one_click_reel  自动集锦：粗筛丢废料 → 画质选材 → 静音比过滤 →
-                  预算贪心 → 默认转场 → 出片（+EDL/CSV，V6 交付）
+                  预算轮转装填 → 默认转场 → 出片（+EDL/CSV，V6 交付）
 - speech_clean    口播净化：有声音的素材逐条剪静音，按序拼接出片
+- smart_create    智能创作：确定性选材 → 把选中镜头回喂 LLM 写文案 →
+                  编译器逐片段绑定烧录（V7.2：文案跟画面走，不再悬空）
+
+V7.2 变更（实测教训）：① 候选最短 1.5s（闪帧/频闪碎片不再入片）；
+② 装填改跨素材轮转（单素材长镜头不再占满预算挤出其他来源）；
+③ captions 变为可选——缺省时由编译器在选材**之后**调 LLM 现写
+（FireRed 流水线里 generate_script 同样排在 filter/group 之后）。
 """
 
 from __future__ import annotations
+
+import json
 
 from dataclasses import dataclass
 
@@ -27,6 +36,7 @@ WORKFLOW_KEYS = {"name", "budget_seconds", "transition", "keyword", "order",
 
 DEFAULT_BUDGET = 30.0        # 一键集锦默认成片时长
 DEFAULT_TRANSITION = 0.3     # 默认转场时长（fade）
+MIN_SHOT_DURATION = 1.5      # 候选最短时长：更短的碎片（闪帧/频闪）不进片
 
 
 @dataclass(frozen=True)
@@ -91,7 +101,8 @@ def _expand_one_click_reel(wf: dict, ctx: dict) -> tuple[dict, dict]:
             "所有素材都被粗筛判定为废料（全静音/全黑场/画质全差/过短），"
             "没有可用的画面。请换素材，或用 ask_user 向用户说明实情。")
 
-    where: dict = {"quality_in": ["good", "ok"], "max_silence_ratio": 0.8}
+    where: dict = {"quality_in": ["good", "ok"], "max_silence_ratio": 0.8,
+                   "min_duration": MIN_SHOT_DURATION}
     if keyword:
         # text_any = 跨字段 OR（场景/活动/氛围/标签任一命中）——
         # 关键词语义不该要求「同时」匹配多个字段
@@ -170,21 +181,76 @@ def _expand_speech_clean(wf: dict, ctx: dict) -> tuple[dict, dict]:
 
 # ---------------------------------------------------- ③ smart_create ---- #
 
-def _expand_smart_create(wf: dict, ctx: dict) -> tuple[dict, dict]:
-    """智能创作（FireRed 一键成片的无配音版）：LLM 文案 + 自动画面编排。
+def _write_captions(picked: list[dict], keyword: str = "") -> tuple[list[str] | None, str]:
+    """选材之后写文案：把选中的镜头序列回喂 LLM，一句一镜（V7.2）。
 
-    文案（captions）由 LLM 读镜头卡后创作——创意归模型；本函数只做确定性
-    编排：粗筛 → 画质选材（可选 keyword）→ 预算贪心 → fade 转场。
-    captions 的铺字幕（逐行均分时间轴、烧录在画面下方）由编译器在
-    时间轴推导之后完成（_apply_captions），经 _captions 暂存键传递。
+    与 V7.1 的差别：文案的输入不再是「全量素材卡」——那时模型在给它
+    猜会选中的画面写故事线，实测成片只装进 2 个场景、5 句文案 4 句落空
+    （「一家人笑得多甜」铺在无人的草地飞鸟上）。现在输入是「确定选中的
+    镜头序列」，第 i 句只描述第 i 个镜头，编译器按片段一一绑定。
+    模型未配置 key / 回复解析不出 / 数量对不上 → 返回 (None, "failed")，
+    调用方回退标签拼接——文案是锦上添花，不能卡住出片。
+    """
+    lines = []
+    for i, c in enumerate(picked, 1):
+        lab = c.get("label") or {}
+        tags = "、".join(str(t) for t in (lab.get("tags") or [])[:4])
+        lines.append(
+            f"{i}. [{c.get('duration', 0):.1f}s] 场景={lab.get('scene') or '未知'}"
+            f" 活动={lab.get('activity') or '未知'} 氛围={lab.get('mood') or '未知'}"
+            f" 人数={lab.get('person_count', 0)} 标签={tags or '无'}")
+    prompt = (
+        "你是短视频文案写手。下面是成片按顺序选用的镜头清单（真实画面内容）。\n"
+        "为每个镜头写一句字幕：第 i 句只描述第 i 个镜头的画面；每句不超过"
+        " 14 个字；口语化、有画面感，连起来是一条完整的小故事。"
+        + (f"主题关键词：{keyword}。" if keyword else "")
+        + "\n只输出 JSON 字符串数组，不要任何解释。\n\n" + "\n".join(lines))
+    try:
+        from model import get_model
+        msg = get_model().invoke(prompt)
+        content = msg.content if isinstance(msg.content, str) else "".join(
+            str(b.get("text") or "") for b in (msg.content or [])
+            if isinstance(b, dict))
+        s, e = content.find("["), content.rfind("]")
+        if s < 0 or e <= s:
+            return None, "failed"
+        caps = json.loads(content[s:e + 1])
+        if not isinstance(caps, list):
+            return None, "failed"
+        caps = [str(x).strip() for x in caps if str(x).strip()]
+        if len(caps) != len(picked):
+            return None, "failed"
+        return caps, "llm"
+    except Exception:
+        return None, "failed"
+
+
+def _label_captions(picked: list[dict]) -> list[str]:
+    """LLM 不可用时的兜底文案：场景·活动，仍是一句一镜。"""
+    caps = []
+    for c in picked:
+        lab = c.get("label") or {}
+        scene = str(lab.get("scene") or "").strip() or "精彩瞬间"
+        act = str(lab.get("activity") or "").strip()
+        caps.append(f"{scene}·{act}" if act and act != scene else scene)
+    return caps
+
+
+def _expand_smart_create(wf: dict, ctx: dict) -> tuple[dict, dict]:
+    """智能创作（FireRed 一键成片的无配音版）：自动画面编排 + 文案烧录。
+
+    确定性编排：粗筛 → 画质选材（可选 keyword，最短 1.5s、跨素材轮转
+    装填）→ fade 转场。文案（V7.2）改为**选材之后**处理：
+    - 计划带了 captions → 直接用；数量与片段一致时逐片段绑定，不齐时
+      编译器退回均分铺轴（旧路径）；
+    - 没带 → _write_captions 把选中镜头序列回喂 LLM 现写（一句一镜），
+      失败再退标签拼接——三档来源记录在 report.captions_source。
+    captions 的烧录由编译器在时间轴推导之后完成（_apply_captions），
+    经 _captions 暂存键传递。
     """
     import shot_select
 
-    captions = [c for c in (wf.get("captions") or []) if str(c).strip()]
-    if not captions:
-        raise ValueError(
-            "smart_create 需要 captions（文案行数组）——请先 analyze_media "
-            "读镜头卡，写几条贴合画面的短文案再提交。")
+    captions_in = [c for c in (wf.get("captions") or []) if str(c).strip()]
     budget = float(wf.get("budget_seconds") or DEFAULT_BUDGET)
     keyword = (wf.get("keyword") or "").strip()
 
@@ -196,7 +262,8 @@ def _expand_smart_create(wf: dict, ctx: dict) -> tuple[dict, dict]:
     if not cards:
         raise ValueError("所有素材都被粗筛判定为废料，没有可用画面。")
 
-    where: dict = {"quality_in": ["good", "ok"], "max_silence_ratio": 0.8}
+    where: dict = {"quality_in": ["good", "ok"], "max_silence_ratio": 0.8,
+                   "min_duration": MIN_SHOT_DURATION}
     if keyword:
         where["text_any"] = [keyword]
     res = shot_select.select_shots(cards, {
@@ -206,6 +273,12 @@ def _expand_smart_create(wf: dict, ctx: dict) -> tuple[dict, dict]:
         raise ValueError(
             f"smart_create 没有挑到可用镜头（{res['matched']} 个候选全部被拒）。"
             f"请调大 budget_seconds 或放宽条件。")
+
+    captions, cap_src = captions_in, "plan"
+    if not captions:
+        captions, cap_src = _write_captions(res["picked"], keyword)
+    if not captions:                    # LLM 没写出来：标签拼接兜底
+        captions, cap_src = _label_captions(res["picked"]), "labels"
 
     trans = wf.get("transition", DEFAULT_TRANSITION)
     timeline = []
@@ -223,6 +296,7 @@ def _expand_smart_create(wf: dict, ctx: dict) -> tuple[dict, dict]:
     report = {
         "workflow": "smart_create",
         "captions": len(captions),
+        "captions_source": cap_src,
         "culled": culled,
         "picked": len(res["picked"]),
         "rejected_total": len(res.get("rejected") or []),
@@ -260,18 +334,21 @@ WORKFLOWS: dict[str, Workflow] = {
         ),
         Workflow(
             name="smart_create",
-            summary="smart one-click video with LLM-written captions burned in.",
+            summary="smart one-click video; captions written after shot "
+                    "selection and bound per clip.",
             expand=_expand_smart_create,
             prompt_doc=(
-                "  `smart_create` — creative one-click: YOU write the captions\n"
-                "  (short punchy lines, Chinese, 3-8 lines). Call analyze_media\n"
-                "  first to see what the footage actually shows, then submit\n"
-                "  {\"workflow\": {\"name\": \"smart_create\", \"captions\": [...],\n"
-                "   \"budget_seconds\": 25, \"keyword\": \"...\"}}. The compiler\n"
-                "  picks shots, adds fade transitions, spreads your captions\n"
-                "  evenly across the timeline (burned at bottom), honors the\n"
-                "  `audio` BGM block. Captions are YOUR creative job — write\n"
-                "  lines that fit the actual footage."
+                "  `smart_create` — creative one-click video with captions\n"
+                "  burned in. `captions` is OPTIONAL now: omit it and the\n"
+                "  compiler picks shots first, then has the model write one\n"
+                "  caption per picked shot (aligned to the actual footage).\n"
+                "  Supply `captions` yourself only when the user gave exact\n"
+                "  lines (count == clip count binds 1:1; otherwise spread\n"
+                "  evenly). Submit {\"workflow\": {\"name\": \"smart_create\",\n"
+                "  \"budget_seconds\": 25, \"keyword\": \"...\"}} — read the\n"
+                "  cards only to choose keyword/budget, no need to pre-write\n"
+                "  copy. Shots shorter than 1.5s never get picked; sources\n"
+                "  take turns so every material contributes. Honors `audio`."
             ),
         ),
     ]

@@ -33,6 +33,8 @@ from model import get_vlm_model
 
 SCENE_THRESHOLD = 0.3     # 场景切分灵敏度（roadmap T9 预定值）
 MAX_SHOT_LEN = 12.0       # 超过则等分为多个子镜头（长镜头粒度兜底）
+MIN_SHOT_LEN = 0.5        # 碎段门槛：更短的镜头并入相邻段（频闪/甩镜误切）
+OVERSEG_AVG = 1.5         # 平均粒度低于此值判为「误切」，升阈值重试
 FRAME_EDGE = 640          # 代表帧长边像素（控 token）
 JPEG_Q = 5                # ffmpeg -q:v（2~31，越小越清晰）
 DETECT_TIMEOUT = 300      # 场景切分整段解码，放宽
@@ -194,24 +196,53 @@ def parse_showinfo(stderr: str) -> list[float]:
     return [float(m.group(1)) for m in _SHOWINFO_RE.finditer(stderr or "")]
 
 
-def _detect_boundaries(run, full: str, duration, budget: int) -> tuple[list[float], str]:
-    """场景切分（select=gt(scene,0.3) + showinfo）；失败按时长均匀兜底。
+def _avg_shot_span(times: list[float], duration) -> float:
+    """边界列表的平均镜头粒度；末段用 duration 收口（缺失则不计尾段）。"""
+    pts = sorted({round(t, 3) for t in times if t > 0.01})
+    if not pts:
+        return float("inf")
+    spans = [b - a for a, b in zip(pts, pts[1:]) if b > a]
+    if duration and pts[-1] < duration:
+        spans.append(duration - pts[-1])
+    return sum(spans) / len(spans) if spans else float("inf")
 
-    返回 (边界时间列表, "scene"|"uniform")。首帧 eq(n,0) 保证 0s 也是边界。
+
+def _detect_boundaries(run, full: str, duration, budget: int) -> tuple[list[float], str]:
+    """场景切分（select=gt(scene,0.3) + showinfo）；过碎升阈值重试，仍碎取最粗。
+
+    返回 (边界时间列表, "scene"|"scene_rescued"|"uniform")。
+    频闪/快速甩镜会把 scene 分数间歇性顶过阈值，把一段连续镜头误切成
+    0.1s 级碎片（实测：10.1s 餐厅素材切成 13 段、12 段不足 0.4s）——
+    平均粒度低于 OVERSEG_AVG 判为误切，逐级升阈值重试（0.45 → 0.6；
+    真实硬切的 scene 分数远高于频闪尖峰，升阈值只滤误切不丢真切）；
+    全部仍碎时取边界最少的一档，残余碎片交给 build_shots 的并段护栏。
+    探测本身失败/整段无切点时维持原有兜底（均匀等分 / 12s 粒度等分）。
     """
-    res = run(
-        ["ffmpeg", "-nostdin", "-loglevel", "info", "-i", full,
-         "-vf", f"select='eq(n,0)+gt(scene,{SCENE_THRESHOLD})',showinfo",
-         "-f", "null", "-"],
-        timeout=DETECT_TIMEOUT,
-    )
-    if res.get("ok"):
-        times = parse_showinfo(res.get("stderr") or "")
-        if times:
-            return times, "scene"
-    if not duration:
-        return [0.0], "uniform"
-    return uniform_boundaries(duration, budget), "uniform"
+    best: list[float] | None = None
+    for i, th in enumerate((SCENE_THRESHOLD, 0.45, 0.6)):
+        res = run(
+            ["ffmpeg", "-nostdin", "-loglevel", "info", "-i", full,
+             "-vf", f"select='eq(n,0)+gt(scene,{th})',showinfo",
+             "-f", "null", "-"],
+            timeout=DETECT_TIMEOUT,
+        )
+        if not res.get("ok"):
+            break
+        times = [t for t in parse_showinfo(res.get("stderr") or "") if t > 0.01]
+        if not times:
+            best = []                   # 整段无切点：长镜头，交 12s 等分兜底
+            break
+        if best is None or len(times) < len(best):
+            best = times
+        if _avg_shot_span(times, duration) >= OVERSEG_AVG:
+            return times, "scene" if i == 0 else "scene_rescued"
+    if best is None:                    # 探测失败 → 按时长均匀兜底（原行为）
+        if not duration:
+            return [0.0], "uniform"
+        return uniform_boundaries(duration, budget), "uniform"
+    if not best:                        # 无任何切点：单镜头，12s 粒度等分
+        return [0.0], "scene"
+    return best, "scene_rescued"
 
 
 def uniform_boundaries(duration: float, budget: int) -> list[float]:
@@ -220,8 +251,24 @@ def uniform_boundaries(duration: float, budget: int) -> list[float]:
     return [round(i * duration / n, 3) for i in range(n)]
 
 
+def _merge_short_shots(shots: list[dict], min_len: float = MIN_SHOT_LEN) -> list[dict]:
+    """碎段并入相邻镜头（<0.5s 无语义，还会把闪帧送进选材池）。
+
+    碎段吸进前一段；开头就是碎段时被后段吸收。单向吸收一遍即稳定——
+    合并只会让段变长，不会产生新的碎段。
+    """
+    out: list[dict] = []
+    for sh in shots:
+        if out and (sh["end"] - sh["start"] < min_len
+                    or out[-1]["end"] - out[-1]["start"] < min_len):
+            out[-1]["end"] = sh["end"]
+        else:
+            out.append(dict(sh))
+    return out
+
+
 def build_shots(boundaries: list[float], duration, max_shot_len: float = MAX_SHOT_LEN) -> list[dict]:
-    """把镜头起始点变成 [start, end] 区间；超长镜头等分加密粒度。
+    """把镜头起始点变成 [start, end] 区间；碎段并入相邻、超长等分加密粒度。
 
     duration 缺失时用最后边界 +1s 兜底——区间可能不准，但标签仍可用
     （调用方应已在降级标记里注明探测失败）。
@@ -235,6 +282,7 @@ def build_shots(boundaries: list[float], duration, max_shot_len: float = MAX_SHO
         e = b[i + 1] if i + 1 < len(b) else end
         if e > s:
             shots.append({"start": s, "end": round(e, 3)})
+    shots = _merge_short_shots(shots)               # 频闪/甩镜误切清理
     refined: list[dict] = []
     for sh in shots:
         span = sh["end"] - sh["start"]

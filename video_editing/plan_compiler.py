@@ -955,21 +955,38 @@ def _expand_plan(plan: dict, project_root: str, run_fn=None) -> tuple[dict, dict
 
 
 def _apply_captions(plan: dict, math: dict) -> None:
-    """smart_create 的文案铺字幕：逐行均分时间轴，烧录在画面下方。
+    """smart_create 的文案铺字幕（V7.2 起默认逐片段绑定）。
 
-    在 _derive 之后执行（需要总时长 D 与各片段起点）。文案行跨片段边界也
-    没关系——drawtext 的 enable 是绝对时间轴，渲染在拼接/转场后的主画面上。
-    at_clip 落在包含起始时间的片段上；起始点超出末段时钳到最后一段末尾。
+    文案行数 == 片段数 → 第 i 句贴第 i 个片段（文案跟着画面走；两端各留
+    0.05s 避开 fade 起止）。数量不齐（agent 自带文案且数目对不上）时退回
+    旧行为：逐行均分总时长。两种模式的 at_clip/start_offset 都是绝对
+    时间轴语义，渲染在拼接/转场后的主画面上。
     """
     captions = plan.pop("_captions", None)
     if not captions:
+        return
+    order = math["order"]
+    overlays = plan.setdefault("overlays", [])
+    if len(captions) == len(order):
+        for cid, text in zip(order, captions):
+            d = math["durations"][cid] or 0
+            if d <= 0:
+                continue
+            overlays.append({
+                "type": "text",
+                "text": text,
+                "at_clip": cid,
+                "start_offset": 0.05,
+                "duration": round(max(0.5, d - 0.1), 3),
+                "position": "bottom",
+                "font_size": 44,
+                "color": "#FFFFFF",
+            })
         return
     D = math["D"] or 1.0
     n = len(captions)
     slot = D / n
     gap = min(0.25, slot * 0.08)
-    order = math["order"]
-    overlays = plan.setdefault("overlays", [])
     for i, text in enumerate(captions):
         ts = i * slot + gap / 2
         dur = max(0.5, slot - gap)

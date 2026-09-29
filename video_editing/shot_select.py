@@ -135,9 +135,12 @@ def select_shots(cards: dict[str, dict], select: dict,
                  default_quality_in=("good", "ok")) -> dict:
     """执行筛选，返回 {clips, timeline, picked, skipped_no_budget}。
 
-    budget_seconds 缺省 = 全部命中镜头；装填策略为贪心（放不下的跳过、
-    继续尝试更短的），order 支持 as_listed（默认：素材序→时间序）与
-    best_first（画质优先→更长优先）。
+    budget_seconds 缺省 = 全部命中镜头。装填策略：
+    - best_first + 有预算 → 跨素材轮转（V7.2）：每条素材轮流贡献镜头，
+      避免单条素材的长镜头占满预算把其他来源全部挤出；装不下的直接标拒
+      （预算只减不增），同来源更短的后续镜头仍有机会进片。
+    - 其余（as_listed / 无预算）→ 顺序贪心：放不下的跳过、继续尝试更短的。
+    order 支持 as_listed（默认：素材序→时间序）与 best_first（画质优先→更长优先）。
     """
     where = dict(select.get("where") or {})
     where.setdefault("quality_in", list(default_quality_in))
@@ -150,14 +153,40 @@ def select_shots(cards: dict[str, dict], select: dict,
     budget = select.get("budget_seconds")
     picked: list[dict] = []
     used = 0.0
-    for c in cands:
-        if budget is not None and used + c["duration"] > budget + 1e-6:
-            rejected.append({**c, "reason": f"装不进 {budget}s 预算（已用 {used:g}s）"})
-            continue
-        picked.append(c)
-        used = round(used + c["duration"], 3)
-        if budget is not None and used >= budget - 1e-6:
-            break
+    if order == "best_first" and budget is not None:
+        # 跨素材轮转装填（V7.2）：每条素材轮流贡献镜头。全局贪心会被单条
+        # 素材的长镜头占满预算（实测：两条 11.7s 占满 25s，其余素材全部
+        # 跳过，最后靠 0.08s 碎片凑数）——轮转让多素材任务每个来源都出镜。
+        # 预算只减不增：本轮装不下的镜头以后也装不下，直接标拒；
+        # 同来源更短的后续镜头仍有机会在后续轮次进片。
+        queues: dict[str, list[dict]] = {}
+        for c in cands:                      # cands 已按 画质→时长 排序
+            queues.setdefault(c["source"], []).append(c)
+        names = sorted(queues)
+        while any(queues.values()):
+            for name in names:
+                q = queues.get(name)
+                if not q:
+                    continue
+                c = q[0]
+                if used + c["duration"] > budget + 1e-6:
+                    rejected.append({**c, "reason": f"装不进 {budget:g}s 预算（已用 {used:g}s）"})
+                    q.pop(0)
+                    continue
+                picked.append(q.pop(0))
+                used = round(used + c["duration"], 3)
+                if used >= budget - 1e-6:
+                    queues.clear()
+                    break
+    else:
+        for c in cands:
+            if budget is not None and used + c["duration"] > budget + 1e-6:
+                rejected.append({**c, "reason": f"装不进 {budget}s 预算（已用 {used:g}s）"})
+                continue
+            picked.append(c)
+            used = round(used + c["duration"], 3)
+            if budget is not None and used >= budget - 1e-6:
+                break
 
     clips: list[dict] = []
     timeline: list[dict] = []

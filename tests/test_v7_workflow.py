@@ -9,6 +9,7 @@ import json
 import os
 import sys
 import tempfile
+import types
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
@@ -210,16 +211,79 @@ def t09_norm_cache_reuse_on_replan():
         assert len([c for c in r3.commands if c.stage == "normalize"]) == 1
 
 
-def t10_smart_create_needs_captions():
+def t10_smart_create_without_captions_uses_llm_or_labels():
+    """V7.2: captions optional - selection runs first, then captions;
+    offline LLM failure falls back to label captions (never blocks render)."""
     with tempfile.TemporaryDirectory() as tmp:
         _make_project(tmp)
         ctx = _ctx(tmp, {"INPUT/a.mp4": CARDS["INPUT/a.mp4"]},
                    {"INPUT/a.mp4": PROBES["INPUT/a.mp4"]})
+        orig = wf_mod._write_captions
+        # (1) LLM ok: one caption per picked shot, source = llm
+        wf_mod._write_captions = lambda picked, kw="": (
+            [f"shot{i}" for i in range(1, len(picked) + 1)], "llm")
         try:
-            wf_mod.WORKFLOWS["smart_create"].expand({}, ctx)
-            assert False, "应抛 ValueError"
-        except ValueError as exc:
-            assert "captions" in str(exc)
+            plan, report = wf_mod.WORKFLOWS["smart_create"].expand(
+                {"budget_seconds": 12}, ctx)
+            assert len(plan["clips"]) == 2              # 6+6s fills 12s
+            assert plan["_captions"] == ["shot1", "shot2"]
+            assert report["captions_source"] == "llm"
+        finally:
+            wf_mod._write_captions = orig
+        # (2) LLM failed -> label captions fallback
+        wf_mod._write_captions = lambda picked, kw="": (None, "failed")
+        try:
+            plan2, report2 = wf_mod.WORKFLOWS["smart_create"].expand(
+                {"budget_seconds": 12}, ctx)
+            assert report2["captions_source"] == "labels"
+            assert len(plan2["_captions"]) == len(plan2["clips"])
+            assert all(isinstance(x, str) and x for x in plan2["_captions"])
+        finally:
+            wf_mod._write_captions = orig
+
+
+def t10b_write_captions_parses_llm_json_offline():
+    """_write_captions direct test: fake model module in sys.modules."""
+    picked = [{"duration": 6.0, "label": {"scene": "sunset", "activity": "empty",
+                                          "mood": "calm", "person_count": 0,
+                                          "tags": ["dusk"]}},
+              {"duration": 6.0, "label": {"scene": "seaside", "activity": "empty",
+                                          "mood": "breeze", "person_count": 0,
+                                          "tags": []}}]
+
+    class _FakeModel:
+        def __init__(self, content):
+            self._content = content
+
+        def invoke(self, prompt):
+            class _R:
+                content = self._content
+            return _R()
+
+    fake = types.ModuleType("model")
+    fake.get_model = lambda: _FakeModel('["shot one", "shot two"]')
+    saved = sys.modules.get("model")
+    sys.modules["model"] = fake
+    try:
+        caps, src = wf_mod._write_captions(picked)
+        assert caps == ["shot one", "shot two"] and src == "llm"
+        fake.get_model = lambda: _FakeModel('["only one"]')     # count mismatch
+        caps2, src2 = wf_mod._write_captions(picked)
+        assert caps2 is None and src2 == "failed"
+
+        def _boom():
+            raise RuntimeError("network down")
+        fake.get_model = _boom                                  # model raises
+        caps3, src3 = wf_mod._write_captions(picked)
+        assert caps3 is None and src3 == "failed"
+        fake.get_model = lambda: _FakeModel("not json at all")  # no brackets
+        caps4, src4 = wf_mod._write_captions(picked)
+        assert caps4 is None and src4 == "failed"
+    finally:
+        if saved is not None:
+            sys.modules["model"] = saved
+        else:
+            sys.modules.pop("model", None)
 
 
 def t11_smart_create_expansion_with_captions():
