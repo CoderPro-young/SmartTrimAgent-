@@ -151,12 +151,12 @@ function matRow(it){
   del.onclick = async e => {
     e.stopPropagation();
     if (!confirm('把素材 ' + it.name + ' 移出 INPUT/ ？')) return;
+    if (selectedMat === it.name) showBoundedPreview({});   // 先停预览：浏览器还在拉流时，Windows 删不掉被打开的文件
     const { ok, status, json } = await postJSON('/api/delete', { name: it.name });
-    if (!ok){ chat.addError('移除失败：' + (json.error || ('HTTP ' + status))); return; }
+    if (!ok){ chat.addError(json.error || `移除失败（HTTP ${status}）`); return; }
     chat.addSys(json.mode === 'moved'
-      ? `已把「${it.name}」移出素材区（当前环境不允许真删，文件在 ${json.detail}）`
+      ? `已把「${it.name}」移出素材区（文件被占用暂不能真删，移到了 ${json.detail}）`
       : `已删除素材「${it.name}」`, false);
-    if (selectedMat === it.name) showBoundedPreview({});
     loadInputs();
   };
   node.append(del);

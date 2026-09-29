@@ -336,17 +336,22 @@ def _make_thumb(name: str, t: float, height: int) -> str | None:
 def _retire(full: str, name: str) -> tuple[str, str]:
     """把素材移出 INPUT/。
 
-    优先真删；若被环境拦下（某些沙箱/安全策略会把删除重定向到回收站，回收站
-    不可用时直接报错），退化成一个改名操作——移到 TMP/removed/。改名不受那套
-    机制限制，而且可恢复，效果上同样让素材从 agent 视野里消失。
+    优先真删；若被环境拦下（沙箱 safe-delete 钩子、或 Windows 上文件正被
+    预览流/后台索引占着——打开中的文件既删不掉也改不了名），各重试几拍后
+    退化成一个改名操作——移到 TMP/removed/，可恢复，效果上同样让素材从
+    agent 视野里消失。
 
-    返回 (mode, detail)，mode ∈ {"deleted", "moved"}；彻底失败抛原异常。
+    返回 (mode, detail)，mode ∈ {"deleted", "moved"}；彻底失败抛 RuntimeError，
+    消息里带上两次异常的原文。
     """
-    try:
-        os.remove(full)
-        return "deleted", ""
-    except Exception as first_exc:   # 宽捕获：safe-delete 钩子的异常未必是 OSError
-        pass
+    first = ""
+    for _ in range(3):
+        try:
+            os.remove(full)
+            return "deleted", ""
+        except Exception as exc:     # 宽捕获：safe-delete 钩子的异常未必是 OSError；
+            first = f"{type(exc).__name__}: {exc}"   # except as 变量出块即被删，必须先转成字符串
+        time.sleep(0.3)
 
     trash = os.path.join(PROJECT_ROOT, "TMP", "removed")
     os.makedirs(trash, exist_ok=True)
@@ -354,15 +359,19 @@ def _retire(full: str, name: str) -> tuple[str, str]:
     if os.path.exists(target):
         stem, ext = os.path.splitext(name)
         target = os.path.join(trash, f"{stem}-{int(time.time())}{ext}")
-    try:
-        os.replace(full, target)
-    except Exception as exc2:
-        # 降级也失败：把两次异常都记进服务日志，便于定位是哪种拦截
-        sys.stderr.write(f"[retire] 真删失败: {type(first_exc).__name__}: {first_exc}\n")
-        sys.stderr.write(f"[retire] 降级移动也失败: {type(exc2).__name__}: {exc2}\n")
-        sys.stderr.flush()
-        raise first_exc
-    return "moved", os.path.relpath(target, PROJECT_ROOT).replace("\\", "/")
+    last = ""
+    for _ in range(3):
+        try:
+            os.replace(full, target)
+            return "moved", os.path.relpath(target, PROJECT_ROOT).replace("\\", "/")
+        except Exception as exc2:
+            last = f"{type(exc2).__name__}: {exc2}"
+            time.sleep(0.3)
+    # 降级也失败：把两次异常都记进服务日志，便于定位是哪种拦截
+    sys.stderr.write(f"[retire] 真删失败: {first}\n")
+    sys.stderr.write(f"[retire] 降级移动也失败(重试后): {last}\n")
+    sys.stderr.flush()
+    raise RuntimeError(f"{first}；降级移动也失败：{last}")
 
 
 def _retire_quietly(path: str) -> None:
