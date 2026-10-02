@@ -14,6 +14,12 @@ output/
 INPUT/*
 !INPUT/.gitkeep
 
+# 内置曲库（Mixkit 免费授权禁止原始音频再分发，故不入库；
+# 下载方式与曲目溯源见 MUSIC/README.md 与 MUSIC/meta.json）
+MUSIC/*
+!MUSIC/README.md
+!MUSIC/meta.json
+
 # 敏感配置（真实 API key，勿提交）
 .env
 

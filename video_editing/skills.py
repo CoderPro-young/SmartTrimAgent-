@@ -381,6 +381,17 @@ def check_args_keys(skill: Skill, args: dict, tag: str) -> list[str]:
 # 音频轨（BGM）：不是逐 clip 效果，单独一套规格
 # --------------------------------------------------------------------------- #
 
+def original_mode(audio: dict) -> str:
+    """V7.7.1：BGM 下素材原声的去留判定（plan_schema / plan_compiler 同源）。
+
+    铁律：不显式写 original="keep" 就一定删原声——用户预期「加背景音 =
+    原声删掉」，任何缺省/漏写都必须落在静音侧，不允许有隐含保留的旁路
+    （曾有 ducking 隐含 keep 的规则，模型顺手写 ducking 就把原声留下了，
+    已删除——现在 ducking 必须伴随显式 original="keep"，由 schema 强制）。
+    """
+    return audio.get("original") or "mute"
+
+
 def validate_audio(audio: dict, tag: str, project_root: str) -> list[str]:
     """校验计划的顶层 audio（BGM）对象。"""
     import os
@@ -388,9 +399,11 @@ def validate_audio(audio: dict, tag: str, project_root: str) -> list[str]:
     errors: list[str] = []
     src = audio.get("source")
     if not isinstance(src, str) or not src:
-        errors.append(f"{tag}.source 必须是 INPUT/ 下的音频文件名，如 INPUT/bgm.mp3。")
-    elif not src.startswith("INPUT/"):
-        errors.append(f"{tag}.source 必须以 INPUT/ 开头。")
+        errors.append(f"{tag}.source 必须是 INPUT/ 或 MUSIC/ 下的音频文件名，"
+                      f"如 MUSIC/bgm.mp3。")
+    elif not src.startswith(("INPUT/", "MUSIC/")):
+        errors.append(f"{tag}.source 必须以 INPUT/ 或 MUSIC/ 开头"
+                      f"（MUSIC/ 是内置曲库）。")
     elif not os.path.isfile(os.path.join(project_root, src)):
         errors.append(f"{tag}.source 文件不存在：{src}。")
 
@@ -406,11 +419,27 @@ def validate_audio(audio: dict, tag: str, project_root: str) -> list[str]:
         if v is not None and not isinstance(v, bool):
             errors.append(f"{tag}.{k} 必须是 true/false。")
 
+    original = audio.get("original")
+    if original is not None and original not in ("keep", "mute"):
+        errors.append(f"{tag}.original 必须是 keep（BGM 与原声混音）或 "
+                      f"mute（BGM 即全部声音，去掉素材原声）。")
+    if audio.get("ducking"):
+        # 闪避需要原声当触发信号——ducking 只在显式保留原声时合法；
+        # 缺省（不写 original）一律删原声，不允许 ducking 隐含保留的旁路
+        if original == "mute":
+            errors.append(f"{tag}.original=mute 与 ducking 冲突：闪避需要素材"
+                          f"原声当触发信号，全局静音原声后无从闪避。")
+        elif original != "keep":
+            errors.append(f"{tag}.ducking 需要显式 original=keep（闪避以保留"
+                          f"原声为前提）。只想要纯 BGM 就删掉 ducking；"
+                          f"要保留人声请写 original=keep + ducking=true。")
+
     unknown = [k for k in audio if k not in
-               ("source", "volume", "fade_in", "fade_out", "loop", "ducking")]
+               ("source", "volume", "fade_in", "fade_out", "loop", "ducking",
+                "original")]
     if unknown:
         errors.append(f"{tag} 含未知字段 {unknown}；只支持 "
-                      f"source/volume/fade_in/fade_out/loop/ducking。")
+                      f"source/volume/fade_in/fade_out/loop/ducking/original。")
     return errors
 
 
@@ -419,17 +448,45 @@ AUDIO_PROMPT_DOC = """## Background music (optional top-level `audio` object)
 To lay music over the WHOLE timeline, add a top-level `audio` object — do NOT
 create a clip entry for the music:
 
-    "audio": {"source": "INPUT/bgm.mp3", "volume": 0.3,
-              "fade_in": 1, "fade_out": 2, "loop": true, "ducking": false}
+    "audio": {"source": "MUSIC/smooth-like-jazz-24.mp3", "volume": 1.0,
+              "fade_in": 1, "fade_out": 2, "loop": true}
 
-- `source` (required): an audio file in INPUT/ (mp3/wav/m4a/flac/ogg/aac...).
+- `source` (required): an audio file in INPUT/ (user upload) or MUSIC/
+  (built-in royalty-free library — Mixkit license, safe for rendered videos).
   A video file also works if you only want its audio.
-- `volume` (0, 1], default 0.3 — keep music clearly below speech.
+- `volume` (0, 1], default 0.3. BY DEFAULT the music REPLACES the clips'
+  original audio, so use ~1.0; only when you keep the original sound
+  (below) use 0.2–0.4 to sit under speech.
 - `fade_in` / `fade_out` seconds, default 0.
 - `loop` default true: short music repeats to fill the video.
-- `ducking` default false: true automatically lowers the music while people
-  are speaking (sidechain compression).
-The music is mixed with the clips' original audio; the compiler handles it."""
+- `original` (V7.7.1) default **"mute"**: the clips' original audio is
+  REMOVED — the music IS the soundtrack. Do NOT write `ducking` in this
+  mode (rejected). To KEEP the clips' audio (e.g. speech under music)
+  write `original: "keep"` — and only then you may add `ducking: true`
+  (sidechain lowers the music while people speak).
+
+## Per-clip sound control (clip-level `audio` object)
+
+Each clip may carry its own small `audio` object to control WHAT SOUND that
+segment contributes ("which segment uses which sound"):
+
+    {"id": "c2", "source": "INPUT/b.mp4", "kind": "video",
+     "audio": {"mute": true},                       // silence this clip
+     ...}
+    {"id": "c3", "source": "INPUT/c.mp4", "kind": "video",
+     "audio": {"source": "INPUT/narration.m4a",     // replace this clip's
+               "volume": 1.0, "loop": true,          // sound with a file
+               "fade_in": 0.5, "fade_out": 0.5}}
+
+- `mute: true` — the clip contributes silence (BGM only there).
+- `source` — the clip's audio is REPLACED by this file (INPUT/ or MUSIC/),
+  trimmed or looped (`loop` default true) to the clip duration.
+- `volume` / `fade_in` / `fade_out` apply to the original audio (no source)
+  or to the replacement (with source).
+- `mute` and `source` are mutually exclusive; a clip `audio` block cannot be
+  combined with `cut_silence`/`cut_black` (they need the original audio).
+Typical pattern: keep speech on the talking clip, `{"mute": true}` on the
+noisy b-roll, BGM underneath with `original: "keep"` + `ducking: true`."""
 
 
 # --------------------------------------------------------------------------- #
