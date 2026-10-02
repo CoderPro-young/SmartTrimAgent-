@@ -559,6 +559,8 @@ _MISMATCH_OPTIONS = {
     "bgm_too_short": ["自动循环这首 BGM", "换一首更长的", "接受音乐中途结束"],
     "pip_too_short": ["缩短画中画时长", "换一个素材"],
     "source_missing": ["换别的素材"],
+    "mute_vs_clip_audio": ["去掉 original=mute（BGM 与原声/换声混音）",
+                           "删掉逐段换声，成片只要 BGM"],
 }
 
 
@@ -571,7 +573,8 @@ def plan_with_retry(task: str, project_root: str, invoke, emit,
                     messages: list | None = None,
                     base_output: str | None = None,
                     output_suffix: str | None = None,
-                    probe_fn=None):
+                    probe_fn=None,
+                    quality: str = "final"):
     """出计划 → Preflight 匹配校验 → 编译；失败按「谁能修」三分流。
 
     invoke(messages) -> result_state   调用方决定「怎么跑 agent」（打印 / 流式上报）
@@ -654,7 +657,8 @@ def plan_with_retry(task: str, project_root: str, invoke, emit,
                 else:
                     emit({"type": "plan", "plan": plan})
                     try:
-                        return plan_compiler.compile_plan(plan, project_root), result
+                        return plan_compiler.compile_plan(
+                            plan, project_root, quality=quality), result
                     except plan_compiler.CompileError as exc:
                         errors = exc.errors
                         emit({"type": "compile_error", "errors": errors})

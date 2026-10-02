@@ -14,12 +14,13 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
 
 import ffmpeg_exec
 import signal_detection
 from plan_schema import clip_duration, time_scale_of, validate_plan
-from skills import is_prepass, is_vf, get_skill
+from skills import is_prepass, is_vf, get_skill, original_mode
 
 FONT_PATH = "C:/Windows/Fonts/msyh.ttc"
 # ffmpeg 的 filtergraph 用 ':' 分隔选项，Windows 路径里的盘符冒号必须转义，
@@ -152,6 +153,78 @@ def _drawtext_pos(position: str) -> tuple[str, str]:
     return x, y
 
 
+_DRAWTEXT_SUPPORT: dict[str, bool] = {}
+
+
+def _drawtext_option_supported(option: str) -> bool:
+    """探测本机 ffmpeg 的 drawtext 是否支持某选项（进程内缓存，只探一次）。
+
+    text_align（多行文本逐行居中，致谢滚动体要用）是较新版本才有的选项；
+    不支持时优雅降级——省略该选项（短行退化为跟随最宽行左对齐），
+    而不是让整次渲染失败。
+    """
+    if option not in _DRAWTEXT_SUPPORT:
+        import subprocess
+        try:
+            info = subprocess.run(
+                ["ffmpeg", "-hide_banner", "-h", "filter=drawtext"],
+                capture_output=True, text=True, timeout=15).stdout
+            _DRAWTEXT_SUPPORT[option] = option in info
+        except Exception:
+            _DRAWTEXT_SUPPORT[option] = False
+    return _DRAWTEXT_SUPPORT[option]
+
+
+def _drawtext_chain(ov: dict, txt_path: str, ts: float, te: float, enable: str,
+                    ratio: float = 1.0) -> str:
+    """text overlay → 完整 drawtext 滤镜串（两条渲染路径共用）。
+
+    普通花字：x/y 按九宫格位置固定。滚动字幕（scroll=up，V7.3 致谢体）：
+    x 居中，y 让整块文本在 [ts, te] 内从画面底匀速滚到画面顶——
+    y(t) = h - (h+text_h)*(t-ts)/dur。text_h 是 ffmpeg 按文本实测的整块
+    高度（含 line_spacing），时间轴数学不需要知道文本行数；t=ts 时整块
+    顶边贴画面下缘，t=te 时整块底边离开画面上缘，速度随时长自适应。
+    表达式只含 h/text_w 等变量与算术符号，无 ':' ','，不需引号转义。
+    text_align=C 让块内每一行各自居中（片尾致谢体例），老 ffmpeg 缺该
+    选项时自动省略。
+    """
+    x, y = _drawtext_pos(ov.get("position", "center"))
+    if ov.get("scroll") == "up":
+        x = "(w-text_w)/2"
+        y = f"h-(h+text_h)*(t-{_round2(ts)})/{_round2(max(0.1, te - ts))}"
+    else:
+        # y_margin：覆盖默认贴边距（像素，随 ratio 缩放）——bottom 抬离底缘
+        # 避开相机自带水印，top 压低；只对贴边位置有意义，居中类忽略
+        margin = int(round(int(ov.get("y_margin") or 0) * ratio))
+        if margin > 0:
+            pos = ov.get("position", "center")
+            if pos.startswith("bottom"):
+                y = f"h-text_h-{margin}"
+            elif pos.startswith("top"):
+                y = str(margin)
+    fs = max(12, int(round(ov.get("font_size", 48) * ratio)))
+    color = ov.get("color", "#FFFFFF")
+    opts = []
+    if os.path.isfile(FONT_PATH):
+        opts.append(f"fontfile='{FONT_PATH_FILTER}'")
+    opts.append(f"textfile='{txt_path}'")
+    opts.append(f"fontsize={fs}")
+    opts.append(f"fontcolor={color}")
+    line_spacing = int(round(int(ov.get("line_spacing") or 0) * ratio))
+    if line_spacing > 0:
+        opts.append(f"line_spacing={line_spacing}")
+    stroke = int(round(int(ov.get("stroke") or 0) * ratio))
+    if stroke > 0:
+        opts.append(f"borderw={stroke}")
+        opts.append("bordercolor=black@0.6")
+    if ov.get("scroll") == "up" and _drawtext_option_supported("text_align"):
+        opts.append("text_align=C")
+    opts.append(f"x={x}")
+    opts.append(f"y={y}")
+    opts.append(f"enable='{enable}'")
+    return "drawtext=" + ":".join(opts)
+
+
 def _round2(x: float) -> float:
     return round(x, 2)
 
@@ -219,12 +292,66 @@ def _derive(plan: dict) -> dict:
 # 命令生成（③）
 # --------------------------------------------------------------------------- #
 
+# --------------------------------------------------------------------------- #
+# 渲染质量档位（预览档）：同一条滤镜链在低分辨率/快档编码下出片，调整环路
+# 秒级看效果；「导出成品」仍走完整质量。档位只作用于编译产物（math）与命令
+# 参数，plan 永远保持原始分辨率与正式文件名——不污染会话里的计划。
+# --------------------------------------------------------------------------- #
+
+PREVIEW_SHORT_SIDE = 540
+
+
+def _apply_quality(math: dict, quality: str) -> None:
+    """按质量档位改写 math 的画布规格（final 原样；preview 短边压到 540p）。"""
+    if quality != "preview":
+        return
+    W, H = int(math["width"]), int(math["height"])
+    short = min(W, H)
+    if short > PREVIEW_SHORT_SIDE:
+        r = PREVIEW_SHORT_SIDE / short
+        math["src_width"], math["src_height"] = W, H
+        math["width"] = max(2, int(W * r) // 2 * 2)    # yuv420p 要求偶数
+        math["height"] = max(2, int(H * r) // 2 * 2)
+    math["preview"] = True
+
+
+def output_filename(plan: dict, math: dict) -> str:
+    """成片文件名：预览档落 *_preview.*，与正式成品互不覆盖。"""
+    name = plan["output"]["filename"]
+    if not math.get("preview"):
+        return name
+    stem, ext = os.path.splitext(name)
+    return f"{stem}_preview{ext}"
+
+
+def _font_ratio(math: dict) -> float:
+    """drawtext 字号缩放比：预览档按画布缩放比缩小，字幕观感与成品一致。"""
+    if not math.get("preview") or not math.get("src_height"):
+        return 1.0
+    return math["height"] / math["src_height"]
+
+
+def _norm_vcodec(math: dict) -> list[str]:
+    return (["-c:v", "libx264", "-preset", "ultrafast", "-crf", "23"]
+            if math.get("preview")
+            else ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18"])
+
+
+def _render_vcodec(math: dict) -> list[str]:
+    return (["-c:v", "libx264", "-preset", "ultrafast", "-crf", "24"]
+            if math.get("preview")
+            else ["-c:v", "libx264", "-crf", "20"])
+
+
 def _norm_cache_path(project_root: str, clip: dict, src: str, vf: str,
-                     af: str, W: int, H: int, fps, d, amap: str) -> str:
+                     af: str, W: int, H: int, fps, d, amap: str,
+                     preview: bool = False, audio_key: str = "") -> str:
     """归一化产物的内容寻址缓存路径（V7 性能优化）。
 
     键 = 输入（prepass 后路径 + 原素材 stat）+ 裁剪 + 滤镜 + 目标规格：
     参数卡片回改（replan）只重编码被改的片段，重试/未变片段全部秒级复用。
+    audio_key —— clip 级 audio 规格（V7.7 逐段控声）：静音/换声/音量都改变
+    产物，必须进键，否则回改声音会命中旧缓存而不重编码。
     """
     import hashlib
     orig = clip.get("source") or ""
@@ -238,7 +365,8 @@ def _norm_cache_path(project_root: str, clip: dict, src: str, vf: str,
         str(clip.get("trim_start") or 0), str(clip.get("trim_end")),
         str(clip.get("duration")), vf, af, f"{W}x{H}@{fps}", str(d),
         str(amap),                        # 有无声轨决定补不补 anullsrc，产物不同
-    ])
+        audio_key,
+    ] + (["preview"] if preview else []))
     h = hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
     return f"TMP/norm/{h}.mp4"
 
@@ -261,6 +389,7 @@ def _normalize_commands(plan: dict, math: dict,
         seen.add(cid)
         src = c["source"]
         effects = c.get("effects") or []
+        ca = c.get("audio") or {}            # V7.7 逐段控声
         # PREPASS 类技能（face_mosaic 等）：先插入前置命令，归一化输入改为其中间产物
         prepass_cmds, src = _prepass_commands(cid, src, effects)
         commands.extend(prepass_cmds)
@@ -278,7 +407,6 @@ def _normalize_commands(plan: dict, math: dict,
             s = get_skill(e.get("name")) if isinstance(e, dict) else None
             if s and s.abuild:
                 af_parts.append(s.abuild(e.get("args") or {}))
-        af = ",".join(af_parts)
         argv = ["ffmpeg", "-y"]
         if kind == "image":
             # 图片素材：loop 定长展示 + 静音音轨对齐时长
@@ -286,6 +414,12 @@ def _normalize_commands(plan: dict, math: dict,
             argv += ["-loop", "1", "-t", str(d), "-i", src,
                      "-f", "lavfi", "-t", str(d), "-i", "anullsrc=r=48000:cl=stereo"]
             amap = "1:a"
+            if ca.get("source"):
+                # 逐段换声对图片同样成立（照片配乐）；替换音频为额外输入
+                if ca.get("loop", True):
+                    argv += ["-stream_loop", "-1"]
+                argv += ["-i", ca["source"]]
+                amap = "2:a"
         else:
             # 视频素材：按 trim 点裁剪；探测确认无声时补静音轨。
             # select/workflow 宏生成的 clips 不带 probe——现场 ffprobe 判音轨
@@ -299,19 +433,43 @@ def _normalize_commands(plan: dict, math: dict,
                 probe = {"has_audio": _probe_has_audio(project_root, c["source"], c)}
             no_audio = probe.get("has_audio") is False
             argv += ["-i", src]
-            if no_audio:
+            if no_audio or ca.get("mute"):
+                # 原素材无声 / 用户要求本段静音：补静音轨对齐时长
                 argv += ["-f", "lavfi", "-t", str(d), "-i", "anullsrc=r=48000:cl=stereo"]
+                amap = "1:a"
+            elif ca.get("source"):
+                # 逐段换声：该片段的音频改为指定文件（循环铺满/裁到片段时长）
+                if ca.get("loop", True):
+                    argv += ["-stream_loop", "-1"]
+                argv += ["-i", ca["source"]]
                 amap = "1:a"
             else:
                 amap = "0:a:0?"
+        # V7.7 逐段控声：volume/fade 作用在本片段实际携带的声音上
+        # （原声或替换声）；替换声短于片段时 apad 补齐，-t 收口
+        if ca and not ca.get("mute"):
+            vol = ca.get("volume")
+            if vol is not None and vol != 1:
+                af_parts.append(f"volume={vol}")
+            fi, fo = ca.get("fade_in") or 0, ca.get("fade_out") or 0
+            if fi:
+                af_parts.append(f"afade=t=in:st=0:d={fi}")
+            if fo:
+                af_parts.append(f"afade=t=out:st={_round2(max(0.0, d - fo))}:d={fo}")
+            if ca.get("source"):
+                af_parts.append("apad")
+        af = ",".join(af_parts)
         argv += ["-vf", vf]
         if af:
             argv += ["-af", af]
-        argv += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
-                 "-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2",
+        argv += _norm_vcodec(math)
+        argv += ["-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2",
                  "-t", str(d),
                  "-map", "0:v:0", "-map", amap]
-        out = _norm_cache_path(project_root, c, src, vf, af, W, H, fps, d, amap)
+        audio_key = json.dumps(ca, sort_keys=True, ensure_ascii=False) if ca else ""
+        out = _norm_cache_path(project_root, c, src, vf, af, W, H, fps, d, amap,
+                               preview=bool(math.get("preview")),
+                               audio_key=audio_key)
         norm_paths[cid] = out
         # 内容寻址缓存命中：同参数片段（replan 未改/重试）直接复用，不重编码
         if os.path.isfile(os.path.join(project_root, out)) and \
@@ -351,6 +509,11 @@ def _bgm_input_args(audio: dict) -> list[str]:
     return args
 
 
+def _original_mode(audio: dict) -> str:
+    """V7.7.1：素材原声的去留判定（实现见 skills.original_mode）。"""
+    return original_mode(audio)
+
+
 def _mix_bgm(filters: list[str], voice: str, audio: dict,
              bgm_idx: int, D: float) -> str:
     """把 BGM 混到人声轨上，返回混音后的标签。
@@ -374,6 +537,11 @@ def _mix_bgm(filters: list[str], voice: str, audio: dict,
         chain.append(f"afade=t=out:st={st}:d={fade_out}")
     filters.append(f"[{bgm_idx}:a]" + ",".join(chain) + "[bg]")
 
+    if _original_mode(audio) == "mute":
+        # V7.7.1：加 BGM 缺省删掉素材原声——BGM 即全部声音，不混原声轨
+        # （volume 语义随之变为「成片音量」）。保留原声需显式 original=keep
+        # 或写 ducking（闪避本身就意味着要人声）。
+        return "[bg]"
     if audio.get("ducking"):
         # 侧链压缩：用原始人声当触发信号，讲话时自动压低 BGM
         filters.append(f"{voice}asplit=2[avo][asc]")
@@ -428,7 +596,7 @@ def _render_no_transition(plan: dict, math: dict) -> tuple[list[Command], dict]:
     （视频叠 overlay / 音频混 BGM 可同一条命令完成）。
     """
     W = math["width"]
-    out = plan["output"]["filename"]
+    out = output_filename(plan, math)
     overlays = plan.get("overlays") or []
     audio = plan.get("audio")
     sidecars: dict[str, str] = {}
@@ -469,20 +637,18 @@ def _render_no_transition(plan: dict, math: dict) -> tuple[list[Command], dict]:
         else:  # text
             txt_path = f"TMP/txt_{step}.txt"
             sidecars[txt_path] = ov["text"]
-            x, y = _drawtext_pos(ov.get("position", "center"))
-            fs = ov.get("font_size", 48)
-            color = ov.get("color", "#FFFFFF")
-            font = f"fontfile='{FONT_PATH_FILTER}':" if os.path.isfile(FONT_PATH) else ""
             filters.append(
-                f"{cur}drawtext={font}textfile='{txt_path}':fontsize={fs}:"
-                f"fontcolor={color}:x={x}:y={y}:enable='{enable}'{label}"
+                f"{cur}{_drawtext_chain(ov, txt_path, ts, te, enable, _font_ratio(math))}{label}"
             )
         cur = label
 
     # 视频：有 overlay 走滤镜重编码，否则原样 copy
     if overlays:
-        filters.append(f"{cur}copy[vout]")
-        vmap, vcodec = "[vout]", ["-c:v", "libx264", "-crf", "20"]
+        # 滤镜的格式协商可能把链路升成 yuv444p（ffmpeg 6.x 实测 xfade 会，
+        # 与输入是否 420 无关）——4:4:4 H.264 系统播放器普遍解不了，出片
+        # 统一压回 yuv420p（链路已是 420 时为空操作）。
+        filters.append(f"{cur}format=yuv420p[vout]")
+        vmap, vcodec = "[vout]", _render_vcodec(math)
     else:
         vmap, vcodec = "0:v", ["-c:v", "copy"]
 
@@ -506,7 +672,7 @@ def _render_no_transition(plan: dict, math: dict) -> tuple[list[Command], dict]:
 def _render_with_transition(plan: dict, math: dict) -> tuple[list[Command], dict]:
     """转场路径：链式 xfade + overlay/drawtext + 音频 concat，一次 filter_complex。"""
     W = math["width"]
-    out = plan["output"]["filename"]
+    out = output_filename(plan, math)
     order = math["order"]
     sidecars: dict[str, str] = {}
 
@@ -578,40 +744,41 @@ def _render_with_transition(plan: dict, math: dict) -> tuple[list[Command], dict
         else:  # text
             txt_path = f"TMP/txt_{step}.txt"
             sidecars[txt_path] = ov["text"]
-            x, y = _drawtext_pos(ov.get("position", "center"))
-            fs = ov.get("font_size", 48)
-            color = ov.get("color", "#FFFFFF")
-            font = f"fontfile='{FONT_PATH_FILTER}':" if os.path.isfile(FONT_PATH) else ""
             filters.append(
-                f"{cur}drawtext={font}textfile='{txt_path}':fontsize={fs}:"
-                f"fontcolor={color}:x={x}:y={y}:enable='{enable}'{label}"
+                f"{cur}{_drawtext_chain(ov, txt_path, ts, te, enable, _font_ratio(math))}{label}"
             )
         cur = label
         step += 1
     vout = "[vout]"
-    filters.append(f"{cur}copy{vout}")
+    # xfade 的格式协商可能把链路升成 yuv444p（ffmpeg 6.x 实测），系统播放器
+    # 普遍解不了 4:4:4 H.264——出片统一压回 yuv420p（已是 420 时为空操作）。
+    filters.append(f"{cur}format=yuv420p{vout}")
 
     # 3) 音频：与视频同构分段（段内 acrossfade、段间 concat）
     #    这样音频与视频被 xfade 缩短的量一致 —— 修掉 v2.1 的音频硬切与音画漂移
-    a_filters, _segs, a_labels = _audio_segments(plan, math)
-    filters.extend(a_filters)
-    if len(a_labels) == 1:
-        a_cur = a_labels[0]
-    else:
-        filters.append(f"{''.join(a_labels)}concat=n={len(a_labels)}:v=0:a=1[acat]")
-        a_cur = "[acat]"
-    filters.append(f"{a_cur}atrim=0:{math['D']},asetpts=PTS-STARTPTS[avoice]")
-
+    #    原声 mute（V7.7.1 缺省即 mute）时原声轨整条不建——悬空的 [avoice]
+    #    滤镜输出会被 ffmpeg 拒绝（换声与全局静音混用已被 schema 禁止）
     audio = plan.get("audio")
+    if audio and _original_mode(audio) == "mute":
+        amap = None
+    else:
+        a_filters, _segs, a_labels = _audio_segments(plan, math)
+        filters.extend(a_filters)
+        if len(a_labels) == 1:
+            a_cur = a_labels[0]
+        else:
+            filters.append(f"{''.join(a_labels)}concat=n={len(a_labels)}:v=0:a=1[acat]")
+            a_cur = "[acat]"
+        filters.append(f"{a_cur}atrim=0:{math['D']},asetpts=PTS-STARTPTS[avoice]")
+        amap = "[avoice]"
+
     if audio:
         inputs += _bgm_input_args(audio)
         amap = _mix_bgm(filters, "[avoice]", audio, pip_i, math["D"])
-    else:
-        amap = "[avoice]"
 
     argv = ["ffmpeg", "-y"] + inputs + ["-filter_complex", ";".join(filters),
                      "-map", vout, "-map", amap,
-                     "-c:v", "libx264", "-crf", "20", "-c:a", "aac", out]
+                     *_render_vcodec(math), "-c:a", "aac", out]
     commands = [Command("render", "转场渲染（xfade 链式 + 叠加 + 音频交错淡化）", argv)]
     return commands, sidecars
 
@@ -884,35 +1051,48 @@ def _check_transition_fit(plan: dict) -> None:
 
 
 def _gather_ctx(project_root: str) -> dict:
-    """收集全部 INPUT/ 素材的 {卡片, 探针}（workflow 宏的展开上下文）。"""
+    """收集全部素材的 {卡片, 探针, 音乐}（workflow 宏的展开上下文）。
+
+    纯音频（有音轨无视频轨）不进视频素材池（无卡可建），改记入 ctx.music
+    作为 workflow 自动配乐（V7.5 _attach_bgm）的候选——按流分类而不是按
+    扩展名，非主流音频封装（.aac/.opus/...）也能被认出来。候选来源 =
+    内置曲库 MUSIC/（精选曲目）+ INPUT/ 纯音频。
+    """
     import content_analysis
-    cards, probes = {}, {}
-    input_dir = os.path.join(project_root, "INPUT")
-    if not os.path.isdir(input_dir):
-        return {"cards": cards, "probes": probes, "project_root": project_root}
-    for name in sorted(os.listdir(input_dir)):
-        if name.startswith(".") or not os.path.isfile(os.path.join(input_dir, name)):
+    cards, probes, music = {}, {}, {}
+    scan_dirs = [(os.path.join(project_root, "MUSIC"), "MUSIC/"),
+                 (os.path.join(project_root, "INPUT"), "INPUT/")]
+    for scan_dir, prefix in scan_dirs:
+        if not os.path.isdir(scan_dir):
             continue
-        rel = "INPUT/" + name
-        ext = os.path.splitext(name)[1].lower()
-        if ext in (".mp3", ".wav", ".m4a", ".flac", ".ogg"):
-            continue                     # 纯音频不进视频素材池
-        card = content_analysis.load_cached_card(project_root, rel)
-        if card:
-            cards[rel] = card
-        data = (ffmpeg_exec.probe(os.path.join(project_root, rel)).get("data") or {})
-        streams = data.get("streams") or []
-        raw_dur = (data.get("format") or {}).get("duration")
-        try:
-            dur = round(float(raw_dur), 3)
-        except (TypeError, ValueError):
-            dur = None
-        video = next((s for s in streams if s.get("codec_type") == "video"), None)
-        audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
-        probes[rel] = {"duration": dur,
-                       "has_audio": audio is not None,
-                       "has_video": video is not None}
-    return {"cards": cards, "probes": probes, "project_root": project_root}
+        for name in sorted(os.listdir(scan_dir)):
+            if name.startswith(".") or not os.path.isfile(os.path.join(scan_dir, name)):
+                continue
+            rel = prefix + name
+            if rel in music:
+                continue
+            data = (ffmpeg_exec.probe(os.path.join(project_root, rel)).get("data") or {})
+            streams = data.get("streams") or []
+            raw_dur = (data.get("format") or {}).get("duration")
+            try:
+                dur = round(float(raw_dur), 3)
+            except (TypeError, ValueError):
+                dur = None
+            video = next((s for s in streams if s.get("codec_type") == "video"), None)
+            audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
+            if video is None and audio is not None:
+                music[rel] = {"duration": dur}
+                continue
+            if prefix == "MUSIC/":
+                continue            # 曲库只作配乐候选，不进视频素材池
+            card = content_analysis.load_cached_card(project_root, rel)
+            if card:
+                cards[rel] = card
+            probes[rel] = {"duration": dur,
+                           "has_audio": audio is not None,
+                           "has_video": video is not None}
+    return {"cards": cards, "probes": probes, "music": music,
+            "project_root": project_root}
 
 
 def _expand_workflow(plan: dict, project_root: str) -> tuple[dict, dict]:
@@ -929,6 +1109,8 @@ def _expand_workflow(plan: dict, project_root: str) -> tuple[dict, dict]:
     if entry is None:
         raise CompileError([f"workflow.name 必须是 {wf_mod.workflow_menu()} 之一。"])
     ctx = _gather_ctx(project_root)
+    # 计划自带的顶层 audio 块透传给宏：用户显式写完整参数时优先于自动配乐
+    ctx["plan_audio"] = plan.get("audio")
     try:
         sub_plan, report = entry.expand(wf, ctx)
     except ValueError as exc:            # workflow 用 ValueError 表达可回传错误
@@ -955,19 +1137,44 @@ def _expand_plan(plan: dict, project_root: str, run_fn=None) -> tuple[dict, dict
 
 
 def _apply_captions(plan: dict, math: dict) -> None:
-    """smart_create 的文案铺字幕（V7.2 起默认逐片段绑定）。
+    """smart_create 的文案铺字幕（V7.2 起默认逐片段绑定，V7.3 样式化）。
 
-    文案行数 == 片段数 → 第 i 句贴第 i 个片段（文案跟着画面走；两端各留
-    0.05s 避开 fade 起止）。数量不齐（agent 自带文案且数目对不上）时退回
-    旧行为：逐行均分总时长。两种模式的 at_clip/start_offset 都是绝对
-    时间轴语义，渲染在拼接/转场后的主画面上。
+    credits（致谢滚动体）：优先级最高——全部文案行合并成一整块多行文本，
+    跨全片时长从画面底部匀速滚到顶部；排版参数来自 workflow.CAPTION_STYLES
+    预设，滚动原语见 _drawtext_chain。
+    其余样式按 V7.2 逻辑：文案行数 == 片段数 → 第 i 句贴第 i 个片段
+    （文案跟着画面走；两端各留 0.05s 避开 fade 起止）。数量不齐（agent
+    自带文案且数目对不上）时退回旧行为：逐行均分总时长。各种模式的
+    at_clip/start_offset 都是绝对时间轴语义，渲染在拼接/转场后的主画面上。
     """
+    from workflow import CAPTION_STYLES, DEFAULT_CAPTION_STYLE
+
     captions = plan.pop("_captions", None)
+    style_name = plan.pop("_caption_style", None) or DEFAULT_CAPTION_STYLE
     if not captions:
         return
     order = math["order"]
     overlays = plan.setdefault("overlays", [])
+    style = CAPTION_STYLES.get(style_name) or CAPTION_STYLES[DEFAULT_CAPTION_STYLE]
+    if style["mode"] == "scroll":
+        overlays.append({
+            "type": "text",
+            "text": "\n".join(str(c).strip() for c in captions),
+            "at_clip": order[0],
+            "start_offset": 0.0,
+            "duration": _round2(math["D"] or 1.0),
+            "position": style.get("position", "center"),
+            "font_size": style.get("font_size", 40),
+            "color": "#FFFFFF",
+            "scroll": "up",
+            "line_spacing": style.get("line_spacing", 0),
+            "stroke": style.get("stroke", 0),
+        })
+        return
     if len(captions) == len(order):
+        # 贴底留白按画布高度比例换算（预设 bottom_margin_ratio）：固定像素
+        # 边距在高分辨率下会压到相机自带水印（影石/DJI 常驻画面底部）
+        y_margin = _round2(int(math["height"]) * (style.get("bottom_margin_ratio") or 0))
         for cid, text in zip(order, captions):
             d = math["durations"][cid] or 0
             if d <= 0:
@@ -979,8 +1186,9 @@ def _apply_captions(plan: dict, math: dict) -> None:
                 "start_offset": 0.05,
                 "duration": round(max(0.5, d - 0.1), 3),
                 "position": "bottom",
-                "font_size": 44,
+                "font_size": style.get("font_size", 44),
                 "color": "#FFFFFF",
+                "y_margin": y_margin,
             })
         return
     D = math["D"] or 1.0
@@ -1005,19 +1213,25 @@ def _apply_captions(plan: dict, math: dict) -> None:
             "start_offset": round(max(0.0, offset), 3),
             "duration": round(dur, 3),
             "position": "bottom",
-            "font_size": 44,
+            "font_size": style.get("font_size", 44),
             "color": "#FFFFFF",
+            "y_margin": _round2(int(math["height"]) * (style.get("bottom_margin_ratio") or 0)),
         })
 
 
-def compile_plan(plan: dict, project_root: str) -> CompileResult:
-    """校验 → 展开（V5/V7）→ 推导 → 生成命令。失败抛 CompileError(errors)。"""
+def compile_plan(plan: dict, project_root: str, quality: str = "final") -> CompileResult:
+    """校验 → 展开（V5/V7）→ 推导 → 生成命令。失败抛 CompileError(errors)。
+
+    quality="preview"：同一条滤镜链在低分辨率/快档编码下出片（预览档），
+    产物落 *_preview.* 文件；plan 本身不被修改，正式导出再以 final 重编译。
+    """
     errors = validate_plan(plan, project_root)
     if errors:
         raise CompileError(errors)
 
     plan, expansions = _expand_plan(plan, project_root)
     math = _derive(plan)
+    _apply_quality(math, quality)
     _apply_captions(plan, math)          # smart_create 文案 → 字幕 overlay
     norm_cmds, norm_sidecars, norm_paths = _normalize_commands(plan, math, project_root)
     math["norm_paths"] = norm_paths      # 渲染段按内容寻址路径引用归一化产物
@@ -1047,6 +1261,9 @@ def compile_plan(plan: dict, project_root: str) -> CompileResult:
 
 PRECHECK_DUR = 0.5      # dry-run 只处理 0.5 秒合成素材
 PRECHECK_TIMEOUT = 60   # 单条预检超时（真实渲染可几分钟，预检必须秒级收场）
+# acrossfade 的 d 压小到这个值：链式 acrossfade 每级把音频缩短 d，预检素材只有
+# 0.5s，几级之后输入比 d 还短，af_acrossfade 死锁不吃 EOF（ffmpeg 6.1 实测）
+PRECHECK_ACROSSFADE_D = 0.05
 _AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".flac", ".ogg", ".aac"}
 
 
@@ -1156,6 +1373,19 @@ def _dry_argv_render(argv: list[str], vref: str, aref: str) -> list[str]:
     # 渲染命令最后一个参数必为输出路径；换成 null 不落盘
     if out and not out[-1].startswith("-"):
         out[-1:] = ["-f", "null", "-"]
+    # 转场滤镜按真实时间轴取参，预检素材只有 0.5s，两处会死锁不吃 EOF
+    # （ffmpeg 6.1 实测，stderr 只有编码器启动日志，直至超时被杀）：
+    #   xfade offset —— 真实时间轴起点可达几十秒，第一个输入早早 EOF，
+    #                   xfade 等不到 offset 时刻的帧，永久挂起；
+    #   acrossfade d —— 链式 acrossfade 每级把音频缩短 d，几级之后输入比 d 短。
+    # 语法预检只验滤镜图合法性，把这两类参数压进素材时长内即可，语义无需保真
+    # （实测 duration/enable/atrim 超出素材时长无害，不会挂）。
+    for i, tok in enumerate(out):
+        if tok == "-filter_complex":
+            fc = re.sub(r"(xfade=[^;]*?offset=)[0-9.]+", r"\g<1>0", out[i + 1])
+            out[i + 1] = re.sub(
+                r"(acrossfade=d=)[0-9.]+",
+                rf"\g<1>{PRECHECK_ACROSSFADE_D}", fc)
     return out
 
 
@@ -1198,13 +1428,17 @@ def precheck(result: CompileResult, project_root: str) -> CompileResult:
         res = ffmpeg_exec.run(dry, cwd=project_root, timeout=PRECHECK_TIMEOUT)
         rec = {"ok": bool(res["ok"]), "stage": c.stage, "description": c.description}
         if not res["ok"]:
-            lines = (res.get("stderr") or res.get("error") or "").strip().splitlines()
+            lines = (res.get("stderr") or "").strip().splitlines()
             # 优先抓实质错误行（如 "No such filter: 'xxx'"）——它通常在 stderr 前部，
             # 尾部几行往往只是 "Error opening output files" 这类泛化收尾
             key = [l for l in lines if any(
                 k in l.lower() for k in ("no such filter", "invalid", "error",
                                          "unable", "failed", "cannot", "找"))]
             tail = "\n".join((key[:3] or lines[-3:]))[-400:] if lines else "(无 stderr)"
+            # 运行层原因（超时/启动失败）必须盖过 stderr 日志：挂起被杀时 stderr
+            # 往往只有编码器启动日志、不含任何 error 关键字，直接展示会误导排查
+            if res.get("error"):
+                tail = f"{res['error']}；stderr 尾部：{tail}"
             rec["stderr_tail"] = tail
             errors.append(
                 f"[{c.stage}] {c.description}：dry-run 语法预检失败（命令未执行）。\n"
@@ -1265,7 +1499,7 @@ def execute(result: CompileResult, project_root: str, should_stop=None) -> Compi
 
 def verify(result: CompileResult, project_root: str) -> CompileResult:
     """⑤ 回验：ffprobe 检查输出时长 ≈ D。"""
-    out = os.path.join(project_root, result.plan["output"]["filename"])
+    out = os.path.join(project_root, output_filename(result.plan, result.math))
     if not ffmpeg_exec.ffprobe_available():
         result.verify = {"ok": False, "note": "ffprobe 未安装，跳过回验。"}
         return result

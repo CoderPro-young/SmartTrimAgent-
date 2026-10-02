@@ -18,8 +18,13 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-from skills import SKILLS, check_args_keys, effects_menu, validate_audio, time_scale_of
-from workflow import WORKFLOW_KEYS, WORKFLOWS, workflow_menu
+from skills import (SKILLS, check_args_keys, effects_menu, validate_audio,
+                    time_scale_of, original_mode)
+from workflow import (WORKFLOW_KEYS, WORKFLOWS, workflow_menu,
+                      CAPTION_STYLES, caption_style_menu,
+                      CAPTION_LINES_LIMIT, CAPTION_LINES_LIMIT_CREDITS,
+                      SECONDS_PER_LINE_MIN, SECONDS_PER_LINE_MAX,
+                      AUDIO_PREFIXES)
 
 # ---- 白名单 ----
 
@@ -48,13 +53,14 @@ PLAN_KEYS = {"schema_version", "output", "clips", "timeline", "overlays", "audio
 OUTPUT_KEYS = {"filename", "resolution", "fps"}
 RESOLUTION_KEYS = {"width", "height"}
 CLIP_KEYS = {"id", "source", "kind", "trim_start", "trim_end", "duration",
-             "probe", "effects", "cut_silence", "cut_black"}
+             "probe", "effects", "cut_silence", "cut_black", "audio"}
 EFFECT_KEYS = {"name", "args"}
 TIMELINE_KEYS = {"clip", "transition"}
 TRANSITION_KEYS = {"type", "duration"}
 OVERLAY_BASE_KEYS = {"type", "at_clip", "start_offset", "duration", "position"}
 OVERLAY_PIP_KEYS = OVERLAY_BASE_KEYS | {"source", "kind", "scale"}
-OVERLAY_TEXT_KEYS = OVERLAY_BASE_KEYS | {"text", "font_size", "color"}
+# y_margin：贴边留白像素（V7.6，编译器按画布高度换算注入；手写计划也可显式给）
+OVERLAY_TEXT_KEYS = OVERLAY_BASE_KEYS | {"text", "font_size", "color", "y_margin"}
 
 # V5 粗剪：clip 级编译期展开参数（不是 effects skill——它们改变片段结构，
 # 一个 clip 展开为 N 个保留子段，由编译器在 _derive 之前处理）
@@ -121,11 +127,42 @@ def _validate_workflow(wf, tag: str = "workflow") -> list[str]:
         errors.append(f"{tag}.keyword 必须是字符串（可选的内容关键词）。")
     if wf.get("order") is not None and wf.get("order") not in ("as_listed", "best_first"):
         errors.append(f"{tag}.order 必须是 as_listed / best_first 之一。")
+    style = wf.get("subtitle_style")
+    if style is not None:
+        if style not in CAPTION_STYLES:
+            errors.append(f"{tag}.subtitle_style 必须是 {caption_style_menu()} 之一"
+                          f"（收到 {style!r}）。")
+        elif name in WORKFLOWS and name != "smart_create":
+            errors.append(f"{tag}.subtitle_style 目前只有 smart_create 消费"
+                          f"（{name} 不支持，请删掉或改用 smart_create）。")
+    spl = wf.get("seconds_per_line")
+    if spl is not None:
+        if not (_num(spl) and SECONDS_PER_LINE_MIN <= spl <= SECONDS_PER_LINE_MAX):
+            errors.append(f"{tag}.seconds_per_line 必须是 "
+                          f"{SECONDS_PER_LINE_MIN}~{SECONDS_PER_LINE_MAX} 之间的秒数"
+                          f"（credits 模式每行文案的阅读时长，收到 {spl!r}）。")
+        elif name in WORKFLOWS and name != "smart_create":
+            errors.append(f"{tag}.seconds_per_line 目前只有 smart_create 消费"
+                          f"（{name} 不支持，请删掉或改用 smart_create）。")
     caps = wf.get("captions")
     if caps is not None:
-        if not isinstance(caps, list) or not caps or len(caps) > 12 \
+        # credits 致谢体一行就是一行文案（分类头 + 名单），行数上限放宽
+        limit = (CAPTION_LINES_LIMIT_CREDITS
+                 if style == "credits" else CAPTION_LINES_LIMIT)
+        if not isinstance(caps, list) or not caps or len(caps) > limit \
                 or not all(isinstance(x, str) and x.strip() for x in caps):
-            errors.append(f"{tag}.captions 必须是 1~12 条非空字符串数组（文案行）。")
+            errors.append(f"{tag}.captions 必须是 1~{limit} 条非空字符串数组（文案行）。")
+    bgm = wf.get("bgm")
+    if bgm is not None and not isinstance(bgm, bool) \
+            and not (isinstance(bgm, str) and bgm.strip()):
+        errors.append(f"{tag}.bgm 必须是 true / false / 曲目路径"
+                      f"（{' 或 '.join(p.rstrip('/') for p in AUDIO_PREFIXES)} 下的"
+                      f"音频文件）/ 氛围描述文本（如「轻松欢快」「旅游」），"
+                      f"收到 {bgm!r}。")
+    elif bgm is not None and name in WORKFLOWS and name not in \
+            ("one_click_reel", "smart_create"):
+        errors.append(f"{tag}.bgm 目前只有 one_click_reel / smart_create 消费"
+                      f"（{name} 不支持，请删掉或改用这两个工作流）。")
     return errors
 
 
@@ -146,6 +183,42 @@ def _validate_cut(cut, allowed: set, tag: str) -> list[str]:
     for key, (lo, hi) in ranges.items():
         if key in cut and not (_num(cut[key]) and lo <= cut[key] <= hi):
             errors.append(f"{tag}.{key} 必须是 {lo}~{hi} 之间的数（收到 {cut[key]!r}）。")
+    return errors
+
+
+def _validate_clip_audio(ca, tag: str, project_root: str) -> list[str]:
+    """校验 clip 级 audio 对象（V7.7 逐段控声：静音原声 / 换声 / 调音量）。"""
+    if not isinstance(ca, dict):
+        return [f"{tag} 必须是对象（{{\"mute\": true}} 或 {{\"source\": ...}}）。"]
+    errors = _unknown_keys(
+        ca, {"mute", "source", "volume", "fade_in", "fade_out", "loop"}, tag)
+
+    mute = ca.get("mute")
+    src = ca.get("source")
+    if mute is not None and not isinstance(mute, bool):
+        errors.append(f"{tag}.mute 必须是 true/false。")
+    if src is not None:
+        if not isinstance(src, str) or not src.startswith(("INPUT/", "MUSIC/")):
+            errors.append(f"{tag}.source 必须以 INPUT/ 或 MUSIC/ 开头。")
+        elif not os.path.isfile(os.path.join(project_root, src)):
+            errors.append(f"{tag}.source 文件不存在：{src}。")
+    if mute and (src is not None or any(k in ca for k in
+                                        ("volume", "fade_in", "fade_out"))):
+        errors.append(f"{tag}.mute 与 source/volume/fade_* 互斥"
+                      f"（静音就是静音，没有可调的参数）。")
+    if "loop" in ca and src is None:
+        errors.append(f"{tag}.loop 只在换声（给 source）时有意义；"
+                      f"控制原声请只用 volume/fade_*。")
+
+    vol = ca.get("volume")
+    if vol is not None and (not _num(vol) or not (0 < vol <= 1)):
+        errors.append(f"{tag}.volume 必须在 (0, 1] 内。")
+    for k in ("fade_in", "fade_out"):
+        v = ca.get(k)
+        if v is not None and (not _num(v) or v < 0):
+            errors.append(f"{tag}.{k} 必须是非负数（秒）。")
+    if "loop" in ca and not isinstance(ca["loop"], bool):
+        errors.append(f"{tag}.loop 必须是 true/false。")
     return errors
 
 
@@ -322,6 +395,16 @@ def validate_plan(plan: dict, project_root: str) -> list[str]:
                 if kind == "image":
                     errors.append(f"{tag}.{ckey} 只适用于 video 素材（图片没有静音/黑场）。")
 
+        # V7.7 逐段控声：clip.audio（静音原声 / 换声）
+        if "audio" in c:
+            errors.extend(_validate_clip_audio(c["audio"], f"{tag}.audio",
+                                               project_root))
+            if ("audio" in c
+                    and any(k in c for k in ("cut_silence", "cut_black"))):
+                errors.append(
+                    f"{tag}.audio 与 cut_silence/cut_black 冲突：剪除废段依据"
+                    f"原声/画面检测，声音被 audio 覆盖后检测结果不再可信。")
+
         # effects（v2 扩展点①）：校验逻辑派发到 skills 注册表
         for j, eff in enumerate(c.get("effects") or []):
             tag_eff = f"{tag}.effects[{j}]"
@@ -437,6 +520,9 @@ def validate_plan(plan: dict, project_root: str) -> list[str]:
             fs = ov.get("font_size", 48)
             if not (_num(fs) and fs > 0):
                 errors.append(f"{tag}.font_size 必须为正数。")
+            ym = ov.get("y_margin")
+            if ym is not None and not (_num(ym) and ym >= 0):
+                errors.append(f"{tag}.y_margin 必须是非负数（贴边留白像素，缺省由编译器按画布高度换算）。")
             pos = ov.get("position", "center")
             if pos not in POSITIONS:
                 errors.append(f"{tag}.position 必须是九宫格之一：{sorted(POSITIONS)}。")
@@ -629,6 +715,16 @@ def check_material_fit(plan: dict, project_root: str, probe_fn=None) -> list[Mis
                     f"成片约 {D}s", f"BGM 只有 {info['duration']}s",
                     message=f"BGM {src} 只有 {info['duration']}s，成片约 {D}s "
                             f"且未开启 loop，音乐会中途静默结束。"))
+        if original_mode(audio) == "mute" and any(
+                isinstance(c, dict) and isinstance(c.get("audio"), dict)
+                and c["audio"].get("source") for c in clips):
+            out.append(Mismatch(
+                "mute_vs_clip_audio", "audio.original",
+                "全局静音原声（纯 BGM）", "同时存在逐段换声的 clip",
+                message="audio.original=mute 表示成片只有 BGM，而某些 clip 又"
+                        "指定了 audio.source 换声——换声属于原声轨，会被全局"
+                        "静音吞掉。请二选一：要么去掉 original=mute（BGM 与"
+                        "原声混音），要么删掉 clip 级换声。"))
         if audio.get("ducking"):
             any_audio = any(
                 real(c.get("source", "")).get("has_audio")
