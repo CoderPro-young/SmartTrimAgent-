@@ -15,6 +15,9 @@
         <mxCell id="n2" value="上传素材&#xa;（落到 INPUT/ 目录）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="sw1">
           <mxGeometry x="330" y="55" width="230" height="55" as="geometry" />
         </mxCell>
+        <mxCell id="n16" value="输出档位（V7.7）&#xa;☐ 快速预览（勾选生效）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;dashed=1;" vertex="1" parent="sw1">
+          <mxGeometry x="620" y="55" width="230" height="55" as="geometry" />
+        </mxCell>
 
         <mxCell id="sw2" value="② LLM Agent —— 只产出意图，不碰命令" style="swimlane;startSize=32;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;swimlaneFillColor=#faf7fc;fontStyle=1;fontSize=13;verticalAlign=middle;align=left;spacingLeft=12;" vertex="1" parent="1">
           <mxGeometry x="140" y="200" width="1100" height="180" as="geometry" />
@@ -50,21 +53,24 @@
         <mxCell id="n11" value="normalize　统一分辨率 / 帧率 / 音轨" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" vertex="1" parent="sw3">
           <mxGeometry x="710" y="95" width="300" height="40" as="geometry" />
         </mxCell>
-        <mxCell id="n12" value="render　转场 + 叠加 + 输出成品" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" vertex="1" parent="sw3">
+        <mxCell id="n12" value="render　转场 + 叠加 + 按档位编码输出" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" vertex="1" parent="sw3">
           <mxGeometry x="710" y="160" width="300" height="40" as="geometry" />
         </mxCell>
 
         <mxCell id="sw4" value="④ 执行与回验" style="swimlane;startSize=32;html=1;fillColor=#d5e8d4;strokeColor=#82b366;swimlaneFillColor=#f8fdf7;fontStyle=1;fontSize=13;verticalAlign=middle;align=left;spacingLeft=12;" vertex="1" parent="1">
           <mxGeometry x="140" y="740" width="1100" height="130" as="geometry" />
         </mxCell>
-        <mxCell id="n13" value="逐条执行&#xa;（subprocess 真实渲染）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;" vertex="1" parent="sw4">
-          <mxGeometry x="100" y="55" width="200" height="55" as="geometry" />
+        <mxCell id="n13" value="逐条执行（subprocess）&#xa;归一化缓存：未改片段直接复用" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;" vertex="1" parent="sw4">
+          <mxGeometry x="50" y="45" width="230" height="55" as="geometry" />
         </mxCell>
         <mxCell id="n14" value="ffprobe 回验&#xa;实际时长 vs 预期" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;" vertex="1" parent="sw4">
-          <mxGeometry x="380" y="55" width="200" height="55" as="geometry" />
+          <mxGeometry x="320" y="45" width="160" height="55" as="geometry" />
         </mxCell>
-        <mxCell id="n15" value="OUTPUT/ 成品" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;fontStyle=1;" vertex="1" parent="sw4">
-          <mxGeometry x="660" y="55" width="200" height="55" as="geometry" />
+        <mxCell id="n17" value="预览档产物（V7.7）&#xa;*_preview.mp4 · 540p 快编 · 秒级" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;fontStyle=1;" vertex="1" parent="sw4">
+          <mxGeometry x="550" y="45" width="230" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="n15" value="OUTPUT/ 成品&#xa;原分辨率完整编码" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;fontStyle=1;" vertex="1" parent="sw4">
+          <mxGeometry x="910" y="45" width="180" height="55" as="geometry" />
         </mxCell>
 
         <mxCell id="e_n3_n4" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="n3" target="n4">
@@ -96,8 +102,20 @@
         <mxCell id="e_n13_n14" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="n13" target="n14">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="e_n14_n15" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="n14" target="n15">
+        <mxCell id="e_n14_n17" value="预览档" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;fontSize=11;fontColor=#b8860b;" edge="1" parent="1" source="n14" target="n17">
           <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_n17_n15" value="满意后导出成品" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;fontSize=11;fontColor=#82b366;" edge="1" parent="1" source="n17" target="n15">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_loop" value="调整环路：继续对话 / 参数卡回改（勾选快速预览；未改片段归一化缓存秒级复用）" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;dashed=1;strokeColor=#82b366;fontColor=#82b366;fontSize=11;strokeWidth=1.5;" edge="1" parent="1" source="n17" target="sw2">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="855" y="890" />
+              <mxPoint x="100" y="890" />
+            </Array>
+          </mxGeometry>
         </mxCell>
 
         <mxCell id="e_sw1_sw2" value="需求 + 素材" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;fontSize=12;strokeWidth=2;" edge="1" parent="1" source="sw1" target="sw2">

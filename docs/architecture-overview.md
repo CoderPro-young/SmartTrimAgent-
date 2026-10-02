@@ -5,6 +5,9 @@
 >
 > 配图：[architecture-flow.drawio](./architecture-flow.drawio)（可编辑）·
 > [architecture-flow.png](./architecture-flow.png)
+> 细节图（计划如何生成：Agent 工具循环 / 校验闭环 / Skills 注册表）：
+> [architecture-plan-generation.drawio](./architecture-plan-generation.drawio) ·
+> [architecture-plan-generation.png](./architecture-plan-generation.png)
 
 ![架构流程](./architecture-flow.png)
 
@@ -58,6 +61,16 @@
 并把后续归一化命令的输入从 `INPUT/a.mp4` 悄悄替换成打码后的 `TMP/c1_masked.mp4`。
 
 生成后由 ④ 层逐条 `subprocess` 执行，最后用 ffprobe 回验产物时长。
+
+### 渲染档位（V7.7）
+
+命令序列带**质量档位**（`compile_plan(..., quality=...)`）：**预览档**把画布
+短边压到 540p、归一化/渲染改用 ultrafast 快编，产物落 `*_preview.mp4`——
+滤镜链与导出档完全相同，调整环路秒级看效果；**导出档**维持原分辨率与编码
+参数，出可直接发布的成品。档位只改写编译产物（math 的画布规格）与命令参数，
+**编辑计划本身不被修改**；归一化缓存键含分辨率与档位标记，两档天然分开，
+未改动的片段在任一档位都秒级复用。详见
+[v7.7-preview-quality.md](./v7.7-preview-quality.md)。
 
 ## 为什么这样分
 

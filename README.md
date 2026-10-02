@@ -20,7 +20,38 @@
   多素材都出镜），再把**选中的镜头序列**回喂模型**逐镜头写文案**，编译器把文案
   **逐片段绑定**烧录成底部字幕（也可在计划里自带 captions，数量对齐时同样逐段绑定）；
   镜头切分带护栏（<0.5s 碎段并入相邻段、平均粒度 <1.5s 判误切升阈值重试）；
+  `subtitle_style: "credits"`（V7.3）可切**致谢滚动字幕**：全部文案合并成一整块
+  逐行居中的白字描边文本，跨全片时长从画面底匀速滚到顶（电影片尾体，速度随时长
+  自适应）；排版策略收在 `CAPTION_STYLES` 预设表，新增样式不动渲染代码。
+  文案是**可插拔提供器链**（V7.4：plan 自带 → llm 现写 → labels 兜底，自带文案时
+  生成模块完全不参与）；credits + 自带文案 + 未显式给 budget_seconds 时成片总时长
+  **由文案驱动**（行数 × `seconds_per_line`，默认 1.2s/行，选材软预算装填后精确
+  收齐——文案定长度、画面来填满）；
+  **文案质量（V7.6）**：打标加 `desc` 一句话画面描述，文案模型的输入从标签词
+  升级为具体画面；prompt 重写（few-shot + 禁用词清单 + 首句钩子/末句收束），
+  句数不齐带反馈重试一次而非直接作废；`labels` 兜底在前端摘要显式标注；
   另有 `one_click_reel`（按关键词出集锦）/ `speech_clean`（口播去静音）内置工作流
+- **自动配乐（V7.5）**：一键成片自动挂 BGM——**内置曲库 `MUSIC/`**（Mixkit
+  免费授权 16 首，带人工情绪/场景标签，溯源见 `MUSIC/README.md`）+ INPUT/
+  里的纯音频一起作候选，**曲库优先**；候选多首时回喂模型**终选一首**
+  （FireRed select_bgm 思路的轻量版，失败回退第一首）。**V7.7 起加了 BGM
+  就删素材原声**（`original` 缺省 `"mute"`，音乐即成片声音，手写 `audio`
+  块同样生效）；想保留口播写 `original: "keep"`（或直接 `ducking: true`，
+  有人声自动压低音乐）。优先级：计划自带 `audio` > `workflow.bgm` 指定曲目 >
+  自动选曲；`workflow.bgm` 还接受**氛围描述**（`"轻松欢快"` / `"旅游"`，与
+  镜头筛选的 keyword 解耦）；`workflow.bgm: false` 一键关闭，配乐失败不卡
+  出片；曲库打标脚本见 `scripts/label_music.py`（人工标签抓取 / 可选 omni
+  听感打标）
+- **逐段控声（V7.7）**：每个 clip 可携带 `audio` 块决定**这一段用什么声音**——
+  `{"mute": true}` 静音本段（BGM-only）、`{"source": "INPUT/narration.m4a"}`
+  **换掉本段声音**（循环铺满/裁到片段时长，volume/fade 可调，图片配乐也行）、
+  或只调本段原声音量；与 `cut_silence`/`cut_black` 互斥（检测依据被覆盖），
+  全局静音×逐段换声冲突有预检。归一化阶段落地，下游转场/BGM 链路零特判
+- **预览档渲染（V7.7）**：调整环路不必每次全片完整编码——勾选「快速预览」后
+  走**同一条滤镜链**的低分辨率快编档（短边 540p + ultrafast，落 `*_preview.mp4`
+  不覆盖成品），秒级看效果；编辑计划保持原始分辨率不被档位污染，归一化缓存
+  按档位天然分开（未改片段两档各自秒级复用）；满意后点「导出成品（完整编码）」
+  才做一次原分辨率完整编码。详见 [docs/v7.7-preview-quality.md](docs/v7.7-preview-quality.md)
 - **多素材拼接**：自动把异构素材（mp4 / avi / 图片、不同分辨率 / 编码 / 帧率 / 声道）归一化成统一中间格式再拼接
 - **多模态内容理解（V4）**：`analyze_media` 建立镜头级语义索引（人数 / 场景 / 活动 / 情绪 / 画质 +
   V5 静音/黑场信号）——"帮我剪和朋友一起的时光""只留有人的画面"这类语义任务可直接表达；
@@ -94,7 +125,10 @@ python video_editing/video_demo.py "把 INPUT/a.mp4 和 INPUT/b.mp4 拼接，中
 **素材全部从界面上传**（不预置任何默认素材）。输入区顶部可切换两种模式（V7.1，选择会记住）：
 **✂️ 粗剪模式**（默认，筛镜头 / 剪静音 / 去黑屏等做减法的任务模板）与
 **✨ 智能创作**（一键成片 / Vlog / 作品展示等模板，引导模型走 smart_create 出带文案字幕的成片）。
-模式只影响模板与引导文案，任务自然语言里带什么意图就走什么链路。左边输入自然语言需求
+模式只影响模板与引导文案，任务自然语言里带什么意图就走什么链路。运行按钮旁的
+**「快速预览」开关（V7.7）**控制渲染档位：勾选后本轮与后续对话都走预览档
+（秒级低分辨率快编），满意后在成品标签点「导出成品（完整编码）」出正式成片。
+左边输入自然语言需求
 （上方有任务模板一键填入），右边三个标签页：
 
 - **素材库（V5，默认页）** —— 素材列表带**缩略图**与索引状态徽章；**上传即索引**：
@@ -103,7 +137,11 @@ python video_editing/video_demo.py "把 INPUT/a.mp4 和 INPUT/b.mp4 拼接，中
   点击镜头即在预览区**区间回放**（直接播原文件，播放钳制在镜头起止，不切片）
 - **成品** —— 内置播放器直接预览 + 下载，附 ffprobe 回验结果（实际时长 vs 预期时长）；
   **审阅报告**（本次剪除多少静音 / 筛选命中哪些镜头 / 用了什么效果）；
-  **只读时间线**（成片结构胶片条：片段缩略格宽∝时长、转场标记，点击回看源片段）
+  **可拖动时间线**（成片结构胶片条：片段按成片位置精确布局、转场重叠如实呈现；
+  自带播放/暂停按钮与时间读数（空格快捷键），播放头拖拽定位进度、播放中
+  反向同步并高亮当前片段，双击片段回看源素材）；
+  **预览档联动（V7.7）**：快速预览轮亮「预览版」徽标 + 「导出成品（完整编码）」按钮，
+  报告结尾提示语按档位切换
 - **流水线（高级）** —— **参数卡片**：出片后的计划渲染成人类可读卡片（trim 可改、效果可删、
   片段可删/排序、转场与输出可调；JSON 折叠进「高级」），改完点「按修改重新渲染」
   走 `/api/replan` **不经过大模型**；另有时间轴换算 / ffmpeg 命令序列 / 执行日志 / 历史产物
@@ -184,6 +222,7 @@ deepagent-demo/
 ├── tests/                   # 离线单测（content_analysis 等，全 mock 不联网）
 ├── model.py                 # 共用：加载 .env + 按优先级解析模型（含 V4 的 get_vlm_model）
 ├── INPUT/                   # 素材目录（默认空；Web 上传或手动放入）
+├── MUSIC/                   # 内置曲库（Mixkit 免费授权，音频不入 git；溯源见 MUSIC/README.md）
 ├── OUTPUT/                  # 产物（运行时生成）
 ├── TMP/                     # 归一化中间件（运行时生成，可缓存）
 └── docs/                    # 技术方案文档
@@ -226,8 +265,27 @@ VLM_BATCH=6                          # 每次请求带几帧
 
 详见 [docs/v4.0-multimodal-perception.md](docs/v4.0-multimodal-perception.md)。
 
+### 镜头切分的 TransNetV2 复核（V7.9，可选）
+
+场景切分首轮被判过碎（频闪/甩镜误切）时，可选用 TransNetV2 镜头边界网络
+重切（借鉴 FireRed-OpenStoryline）。不装依赖则自动回退原有升阈值阶梯，
+行为不变：
+
+```
+pip install transnetv2_pytorch==1.0.5   # MIT，包内自带权重，CPU 可跑
+# TRANSNET_RESCUE=0                     # 需要时整体关闭复核
+```
+
 ## 技术文档
 
+- [docs/v7.9-transnet-rescue.md](docs/v7.9-transnet-rescue.md) —— V7.9/V7.10 TransNetV2 镜头切分（过碎复核 → 主切分器 / 可选依赖优雅降级 / segmentation 字段）
+- [docs/v7.8-precheck-offset.md](docs/v7.8-precheck-offset.md) —— V7.8 dry-run 预检挂起修复（xfade offset 压平 / 报错原因优先级）
+- [docs/v7.7-preview-quality.md](docs/v7.7-preview-quality.md) —— V7.7 预览档渲染（快速预览/导出成品双档位 / 档位不污染计划 / 缓存分档 / 调整环路秒级化）
+- [docs/v7.7-audio-control.md](docs/v7.7-audio-control.md) —— V7.7 音频控制（audio.original 原声去留 / clip 级逐段控声 / 自动配乐纯 BGM 化）
+- [docs/v7.6-caption-quality.md](docs/v7.6-caption-quality.md) —— V7.6 文案质量升级（desc 画面描述输入 / prompt 重写 / 数量重试 / 字幕避水印）
+- [docs/v7.5-auto-bgm.md](docs/v7.5-auto-bgm.md) —— V7.5 自动配乐（workflow.bgm / 音乐候选发现 / LLM 终选 / 内置曲库）
+- [docs/v7.4-caption-providers.md](docs/v7.4-caption-providers.md) —— V7.4 文案可插拔提供器 + 文案驱动时长（credits 定长度、画面来填满）
+- [docs/v7.3-credits.md](docs/v7.3-credits.md) —— V7.3 致谢滚动字幕（subtitle_style / CAPTION_STYLES 预设表 / scroll 渲染原语）
 - [docs/v7.2-alignment-guards.md](docs/v7.2-alignment-guards.md) —— V7.2 感知粒度护栏 + 装填来源均衡 + 文案选材后对齐（实测驱动的迭代修复）
 - [docs/v7.1-smart-create.md](docs/v7.1-smart-create.md) —— V7.1 双模式前端 + 智能创作（smart_create / 文案铺字幕烧录 / 无音轨现场探测修复）
 - [docs/v7.0-oneclick-and-perf.md](docs/v7.0-oneclick-and-perf.md) —— V7 一键成片 workflow 宏 + 性能优化（VLM 并发 / 归一化内容寻址缓存）
@@ -242,6 +300,6 @@ VLM_BATCH=6                          # 每次请求带几帧
 ## 已知限制 / 路线图
 
 - 语义筛选依赖 VLM 标签质量（静音/黑场信号已进卡片；笑声/欢呼声等语义级音频信号待 ASR，二期）
-- 场景切分阈值 0.3 / 长镜头粒度 12s 为经验值，真实素材漏切或碎切时再调
+- 场景切分阈值 0.3 / 长镜头粒度 12s 为经验值，真实素材漏切或碎切时再调；过碎误切可装 TransNetV2 复核兜底（V7.9，漏切仍待观察）
 - 画布策略当前为 pad 黑边，blur-fill / crop-fill 留 v2.1
 - 计划 schema 已预留三个扩展点（clip 效果 / overlay 区域 / timeline 布局块），新增能力无需重构

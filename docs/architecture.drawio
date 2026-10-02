@@ -1,0 +1,194 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="drawio" version="26.0.0">
+  <diagram id="arch-layers" name="总体分层架构">
+    <mxGraphModel dx="1200" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1240" pageHeight="1160" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="a_user" value="用户（自然语言 / 网页操作）" style="rounded=1;whiteSpace=wrap;html=1;dashed=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="270" y="40" width="300" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="a_note" value="◆ = 本次工作区改动（V7.3 credits / V7.4 文案模块 / V7.5 自动配乐，尚未提交）" style="text;html=1;align=left;verticalAlign=middle;fontColor=#b85450;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="620" y="45" width="580" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="a_entry" value="入口层" style="swimlane;startSize=30;html=1;whiteSpace=wrap;fontSize=13;fontStyle=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="40" y="120" width="760" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="a_cli" value="video_demo.py&#xa;CLI 单发任务" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="a_entry">
+          <mxGeometry x="25" y="45" width="215" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="a_web" value="web/server.py&#xa;路由 · NDJSON 事件流" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="a_entry">
+          <mxGeometry x="265" y="45" width="225" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="a_front" value="web/static/js 零构建前端&#xa;素材库 / 成品 / 流水线 · 双模式 V7.1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="a_entry">
+          <mxGeometry x="515" y="45" width="220" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="a_agent" value="Agent 层 · video_agent.py（deepagents）— 只负责「意图」" style="swimlane;startSize=30;html=1;whiteSpace=wrap;fontSize=13;fontStyle=1;fillColor=#e1d5e7;strokeColor=#9673a6;" vertex="1" parent="1">
+          <mxGeometry x="40" y="280" width="760" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="a_tools" value="工具：probe_media → analyze_media → submit_plan →&#xa;ask_user（run_ffmpeg 仅兜底）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="a_agent">
+          <mxGeometry x="25" y="45" width="430" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="a_rule" value="约束：LLM 不写 ffmpeg、不抄时间码&#xa;只产出「编辑计划 JSON」" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="a_agent">
+          <mxGeometry x="480" y="45" width="255" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="a_perc" value="感知层（旁路 · sidecar 缓存）" style="swimlane;startSize=30;html=1;whiteSpace=wrap;fontSize=13;fontStyle=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="840" y="280" width="360" height="250" as="geometry" />
+        </mxCell>
+        <mxCell id="a_ca" value="content_analysis.py&#xa;场景切分 + VLM 打标 → 镜头级内容卡" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;fontSize=11;" vertex="1" parent="a_perc">
+          <mxGeometry x="25" y="45" width="310" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="a_sd" value="signal_detection.py&#xa;静音 / 黑场信号（并入内容卡）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;fontSize=11;" vertex="1" parent="a_perc">
+          <mxGeometry x="25" y="120" width="310" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="a_fm" value="face_mosaic.py&#xa;人脸打码（OpenCV YuNet）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;fontSize=11;" vertex="1" parent="a_perc">
+          <mxGeometry x="25" y="185" width="310" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="a_comp" value="编译器层 — 确定性程序 · 无 LLM · 负责「工程正确性」" style="swimlane;startSize=30;html=1;whiteSpace=wrap;fontSize=13;fontStyle=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="40" y="440" width="760" height="250" as="geometry" />
+        </mxCell>
+        <mxCell id="a_schema" value="plan_schema.py ◆&#xa;计划校验&#xa;白名单 + 语义规则" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="a_comp">
+          <mxGeometry x="25" y="45" width="200" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="a_wf" value="workflow.py ◆&#xa;宏：smart_create / one_click_reel / speech_clean&#xa;V7.3 credits · V7.4 文案链 · V7.5 自动配乐" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="a_comp">
+          <mxGeometry x="245" y="45" width="275" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="a_sel" value="shot_select.py 镜头筛选纯函数" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d6b656;fontSize=10;" vertex="1" parent="a_comp">
+          <mxGeometry x="540" y="45" width="195" height="28" as="geometry" />
+        </mxCell>
+        <mxCell id="a_cull" value="culling.py 粗筛漏斗（V6）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d6b656;fontSize=10;" vertex="1" parent="a_comp">
+          <mxGeometry x="540" y="81" width="195" height="28" as="geometry" />
+        </mxCell>
+        <mxCell id="a_tle" value="timeline_export.py EDL/CSV" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d6b656;fontSize=10;" vertex="1" parent="a_comp">
+          <mxGeometry x="540" y="117" width="195" height="28" as="geometry" />
+        </mxCell>
+        <mxCell id="a_pc" value="plan_compiler.py ◆ — 宏展开 → 时间轴换算 → ffmpeg 命令生成 → 执行 → 回验" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d6b656;fontSize=12;" vertex="1" parent="a_comp">
+          <mxGeometry x="25" y="160" width="710" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="a_exec" value="执行层" style="swimlane;startSize=30;html=1;whiteSpace=wrap;fontSize=13;fontStyle=1;fillColor=#ffe6cc;strokeColor=#d79b00;" vertex="1" parent="1">
+          <mxGeometry x="40" y="740" width="760" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="a_ff" value="ffmpeg_exec.py — ffmpeg 渲染 · ffprobe 回验（时长 / 分辨率 / 编码）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="a_exec">
+          <mxGeometry x="170" y="40" width="420" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="a_out" value="OUTPUT/&#xa;成片 + 审阅报告 + 只读时间线" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="290" y="880" width="260" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="a_replan" value="Web 参数卡片回改 → /api/replan 重新渲染（不经过 LLM）" style="rounded=1;whiteSpace=wrap;html=1;dashed=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="170" y="990" width="500" height="45" as="geometry" />
+        </mxCell>
+        <mxCell id="a_cross" value="横切：model.py（.env → LLM/VLM 解析） ｜ INPUT/ 素材 · TMP/ 归一化缓存 · OUTPUT/ 产物 ｜ tests/ 离线单测（全 mock）" style="rounded=1;html=1;dashed=1;fillColor=none;strokeColor=#999999;fontSize=11;align=center;" vertex="1" parent="1">
+          <mxGeometry x="40" y="1080" width="1160" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="ea1" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="a_user" target="a_entry">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ea2" value="任务文本 + NDJSON 事件流" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;fontSize=10;labelBackgroundColor=#ffffff;exitX=0.3;exitY=1;exitDx=0;exitDy=0;entryX=0.3;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="a_entry" target="a_agent">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="a_retry" value="校验失败：中文报错回传重出（≤2 次）" style="text;html=1;align=left;verticalAlign=middle;fontColor=#b85450;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="55" y="402" width="260" height="34" as="geometry" />
+        </mxCell>
+        <mxCell id="ea3" value="analyze_media 建卡&#xa;上传即索引" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;fontSize=10;dashed=1;labelBackgroundColor=#ffffff;exitX=1;exitY=0.3;exitDx=0;exitDy=0;entryX=0;entryY=0.15;entryDx=0;entryDy=0;" edge="1" parent="1" source="a_agent" target="a_perc">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ea4" value="select / workflow 宏读内容卡" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;fontSize=10;dashed=1;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=1;entryY=0.6;entryDx=0;entryDy=0;" edge="1" parent="1" source="a_perc" target="a_comp">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ea5" value="submit_plan（编辑计划 JSON）" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;fontSize=10;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="a_agent" target="a_comp">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ea6" value="ffmpeg 命令序列" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;fontSize=10;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="a_comp" target="a_exec">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ea7" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="a_exec" target="a_out">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ea8" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="a_out" target="a_replan">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ea9" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.76;entryDx=0;entryDy=0;" edge="1" parent="1" source="a_replan" target="a_comp">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="20" y="1012" />
+              <mxPoint x="20" y="630" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="ea10" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;strokeColor=#b85450;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="a_schema" target="a_agent">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="30" y="535" />
+              <mxPoint x="30" y="340" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram id="smart-create-flow" name="smart_create 数据流">
+    <mxGraphModel dx="1200" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="900" pageHeight="960" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="b_in" value="INPUT/ 全部素材（视频 + 纯音频）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="270" y="40" width="340" height="45" as="geometry" />
+        </mxCell>
+        <mxCell id="b_sel" value="① 确定性选材（编译器 · 无 LLM）&#xa;粗筛废料 → 画质选材 → 最短 1.5s 门槛 → 跨素材轮转装填（软预算 budget_seconds）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="170" y="135" width="540" height="65" as="geometry" />
+        </mxCell>
+        <mxCell id="b_shots" value="选中镜头序列" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="310" y="250" width="260" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="b_llm" value="② 回喂 LLM 逐镜头写文案（V7.4 提供器链）&#xa;plan 自带文案 → LLM 现写 → labels 兜底" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="170" y="340" width="540" height="65" as="geometry" />
+        </mxCell>
+        <mxCell id="b_cap" value="③ 字幕逐片段绑定烧录&#xa;bottom 底部字幕 / credits 致谢滚动（V7.3）&#xa;credits + 自带文案：行数 × 1.2s 定长 → 画面填满" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="60" y="460" width="360" height="75" as="geometry" />
+        </mxCell>
+        <mxCell id="b_bgm" value="④ 自动配乐（V7.5）&#xa;纯音频候选 →（多首 LLM 终选）→ 低音量 + 淡入淡出 + 循环 + 人声闪避&#xa;失败不卡出片；优先级 计划 audio &gt; workflow.bgm &gt; 自动选曲" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="460" y="460" width="380" height="75" as="geometry" />
+        </mxCell>
+        <mxCell id="b_comp" value="plan_compiler ◆ — 时间轴换算 → ffmpeg 命令生成" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="230" y="590" width="420" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="b_ff" value="ffmpeg 渲染 + ffprobe 回验" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="290" y="690" width="300" height="45" as="geometry" />
+        </mxCell>
+        <mxCell id="b_out" value="OUTPUT/ 成片" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="330" y="780" width="220" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="b_note" value="LLM 仅在 ② 写文案与 ④ 终选 BGM 两处参与；选材 / 装填 / 绑定 / 混音全部确定性执行" style="text;html=1;align=center;verticalAlign=middle;fontColor=#666666;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="60" y="880" width="780" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="eb1" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="b_in" target="b_sel">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="eb2" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="b_sel" target="b_shots">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="eb3" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="b_shots" target="b_llm">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="eb4" value="③" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;fontSize=11;labelBackgroundColor=#ffffff;exitX=0.25;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="b_llm" target="b_cap">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="eb5" value="④" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;fontSize=11;labelBackgroundColor=#ffffff;exitX=0.75;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="b_llm" target="b_bgm">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="eb6" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.25;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="b_cap" target="b_comp">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="eb7" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.75;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="b_bgm" target="b_comp">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="eb8" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="b_comp" target="b_ff">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="eb9" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="b_ff" target="b_out">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
