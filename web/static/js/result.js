@@ -10,8 +10,12 @@ export function showResult(ev){
   const a = $('#dl');
   a.href = ev.url;
   a.setAttribute('download', (ev.output || '').split('/').pop());
+  a.textContent = ev.preview ? '下载预览视频' : '下载 / 打开原视频';
+  /* 预览轮：亮出徽标 + 「导出成品」按钮，提醒还要做一次完整编码 */
+  $('#previewBadge').hidden = !ev.preview;
+  $('#exportFinalBtn').hidden = !ev.preview;
   $('#outMeta').textContent = ev.output;
-  renderReport(ev.report);
+  renderReport(ev.report, ev.preview);
   renderExports(ev.exports);
   $('#tabResult').click();
   card.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -44,7 +48,7 @@ function rline(parts){
   return l;
 }
 
-export function renderReport(rep){
+export function renderReport(rep, preview = false){
   const box = $('#reportBody');
   box.replaceChildren();
   if (!rep){ box.append(el('span', 'empty', '—')); return; }
@@ -90,8 +94,16 @@ export function renderReport(rep){
   }
   if (rep.bgm) r.append(rline([el('span', null, '含 BGM 配乐')]));
   if ((rep.overlays || 0) > 0) r.append(rline([el('span', null, `叠加 ${rep.overlays} 处`)]));
+  /* V7.5 文案来源透明化：labels 兜底不是创作，提醒用户别把它当文案水平 */
+  const wf = rep.workflow || {};
+  if (wf.captions_source === 'labels'){
+    r.append(rline([el('span', 'sub',
+      '⚠ 字幕为标签兜底（文案模型未产出）——在对话里描述想要的文案或直接给文案后重渲更好')]));
+  }
 
-  r.append(el('span', 'rtag', '✓ 生成完毕，可直接下载发布；要微调请用左侧对话或流水线标签的参数卡'));
+  r.append(el('span', 'rtag', preview
+    ? '⚡ 这是快速预览版（低分辨率）：确认构图与节奏后，点上方「导出成品（完整编码）」出正式成片；微调可直接继续对话'
+    : '✓ 生成完毕，可直接下载发布；要微调请用左侧对话或流水线标签的参数卡'));
   box.append(r);
 }
 

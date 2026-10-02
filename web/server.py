@@ -467,6 +467,16 @@ _GATE_EDIT_HINTS = {
 }
 
 
+# L1 幻觉扫描的合法能力名：与白名单的单一来源同源派生（effects 注册表 +
+# plan_schema 转场白名单），注册表加能力这里自动生效，不再脱节——
+# 2026-09-30 实测误报：旁白「加了 fade 转场」被标记，因名单漏了 TRANSITIONS
+# （fade 是合法转场类型；SKILLS 只覆盖逐 clip effects）。音频侧的
+# fade_in/fade_out/bgm 与时间轴概念名 transition/captions 同属合法说法。
+_L1_KNOWN_EFFECTS = (set(SKILLS) | set(plan_schema.TRANSITIONS)
+                     | {"fade_in", "fade_out", "bgm", "audio",
+                        "transition", "captions"})
+
+
 def _intent_gate(task: str) -> dict | None:
     """规则闸门：只拦「一眼没意图」的高置信度负例，其余放行给 agent + ask_user。
 
@@ -492,7 +502,7 @@ def _l1_scan(text: str, tool_calls: list, existing: set) -> list[dict]:
     """L1 幻觉扫描（启发式，只标记不拦截）。
 
     信号：① 文本/工具参数引用了 INPUT/ 里不存在的文件；
-    ② 文本声称使用了能力注册表之外的效果名。
+    ② 文本声称使用了能力注册表/转场白名单之外的效果名。
     """
     signals: list[dict] = []
     blob = text or ""
@@ -505,12 +515,8 @@ def _l1_scan(text: str, tool_calls: list, existing: set) -> list[dict]:
                 "signal": "missing_source_ref",
                 "evidence": f"提到了素材 {ref}，但 INPUT/ 里没有这个文件。",
             })
-    known = set(SKILLS) | {
-        "拼接", "裁剪", "转场", "字幕", "花字", "画中画", "水印", "打码", "马赛克",
-        "镜像", "翻转", "变速", "调色", "淡入", "淡出", "背景音乐", "混音",
-    }
     for claim in re.findall(r"(?:加了|添加|应用了|使用了|做了|用了)\s*([A-Za-z_][A-Za-z0-9_]*)", text or ""):
-        if claim not in known:
+        if claim not in _L1_KNOWN_EFFECTS:
             signals.append({
                 "signal": "unknown_effect_claim",
                 "evidence": f"声称使用了「{claim}」，但它不在能力注册表里。",
@@ -518,11 +524,14 @@ def _l1_scan(text: str, tool_calls: list, existing: set) -> list[dict]:
     return signals
 
 
-def _run_pipeline(task: str, emit, session_id: str | None = None) -> None:
+def _run_pipeline(task: str, emit, session_id: str | None = None,
+                  preview: bool = False) -> None:
     """完整流程：出计划 → Preflight → 编译 → 执行 → 回验。所有进度通过 emit 上报。
 
     多轮（v3.1）：同一 session_id 内，每条消息按「问答接续 > 修订 > 首轮」
     优先级构造上下文；只有前端点「启动新任务」换新 id 才重置。
+    preview=True：预览档渲染（低分辨率快编，落 *_preview.* 文件），调整环路用；
+    档位记入会话，后续对话消息沿用最后一次的档位，导出成品时前端显式带 false。
     """
     if not task:
         emit({"type": "error", "message": "请先描述剪辑需求（可以先上传素材，再写一句需求）。"})
@@ -538,6 +547,7 @@ def _run_pipeline(task: str, emit, session_id: str | None = None) -> None:
     emit({"type": "materials", "names": materials})
 
     session, _created = _get_session(session_id, task)
+    session["preview"] = bool(preview)   # 预览档位入会话，多轮对话沿用
 
     # 规则闸门（零成本拦「一眼没意图」；question 也是 pending_question）
     gate = _intent_gate(task)
@@ -595,6 +605,7 @@ def _run_pipeline(task: str, emit, session_id: str | None = None) -> None:
         base_output=base_output,
         output_suffix=suffix if base_output else None,
         probe_fn=probe_fn,
+        quality="preview" if session.get("preview") else "final",
     )
     if compiled is None:
         # question / 放弃类返回：事件已 emit，last_plan 不动；
@@ -696,26 +707,31 @@ def _execute_compiled(compiled, emit, session: dict | None) -> None:
         session["last_verify"] = compiled.verify
     emit({"type": "verify", "verify": compiled.verify})
 
-    out = compiled.plan["output"]["filename"]
+    # 预览档产物落 *_preview.* 文件；EDL/CSV 是正式交付物，预览轮跳过
+    is_preview = bool(compiled.math.get("preview"))
+    out = plan_compiler.output_filename(compiled.plan, compiled.math)
     # V6 粗剪交付：成片之外顺手落 EDL/CSV（交给剪映/Premiere/Resolve 精剪）
     exports: list[dict] = []
-    try:
-        for rel in timeline_export.export_files(compiled.plan, compiled.math, out):
-            exports.append({"file": rel,
-                            "url": "/media/" + rel.replace("\\", "/")})
-    except Exception as exc:  # noqa: BLE001 —— 导出失败不该影响成片交付
-        sys.stderr.write(f"[timeline-export] {type(exc).__name__}: {exc}\n")
+    if not is_preview:
+        try:
+            for rel in timeline_export.export_files(compiled.plan, compiled.math, out):
+                exports.append({"file": rel,
+                                "url": "/media/" + rel.replace("\\", "/")})
+        except Exception as exc:  # noqa: BLE001 —— 导出失败不该影响成片交付
+            sys.stderr.write(f"[timeline-export] {type(exc).__name__}: {exc}\n")
     emit({
         "type": "done",
         "output": out,
         "url": "/media/" + out.replace("\\", "/"),
+        "preview": is_preview,
         "ok": bool((compiled.verify or {}).get("ok")),
         "report": _build_report(compiled),
         "exports": exports,
     })
 
 
-def _safe_run(task: str, emit, session_id: str | None = None) -> None:
+def _safe_run(task: str, emit, session_id: str | None = None,
+              preview: bool = False) -> None:
     """包一层异常兜底：任何未预期异常都要作为事件上报，不能让前端空等。"""
     CANCEL.clear()                       # 新任务从干净状态开始
     acquired = RUN_LOCK.acquire(timeout=1)
@@ -724,7 +740,7 @@ def _safe_run(task: str, emit, session_id: str | None = None) -> None:
         emit(None)
         return
     try:
-        _run_pipeline(task, emit, session_id)
+        _run_pipeline(task, emit, session_id, preview=preview)
     except Exception as exc:  # noqa: BLE001
         emit({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
         emit({"type": "traceback", "text": traceback.format_exc()[-2000:]})
@@ -734,17 +750,22 @@ def _safe_run(task: str, emit, session_id: str | None = None) -> None:
         emit(None)  # 结束哨兵
 
 
-def _run_replan(plan: dict, emit, session_id: str | None) -> None:
+def _run_replan(plan: dict, emit, session_id: str | None,
+                preview: bool = False) -> None:
     """/api/replan：跳过 LLM，直接对（前端改过的）计划做 校验→Preflight→编译→执行。
 
     T16 参数卡片回改的落点：新手在卡片上改 trim/开关效果，前端把改后的完整
     计划发上来，这里复用与 /api/run 完全相同的编译与执行管线。
+    preview 语义与 /api/run 相同：档位入会话并作用于本次编译。
     """
     session, _created = _get_session(session_id, "(卡片回改)")
+    session["preview"] = bool(preview)
     probe_fn = lambda src: _probe_file(os.path.join(PROJECT_ROOT, src))  # noqa: E731
 
     try:
-        compiled = plan_compiler.compile_plan(plan, PROJECT_ROOT)
+        compiled = plan_compiler.compile_plan(
+            plan, PROJECT_ROOT,
+            quality="preview" if session.get("preview") else "final")
     except plan_compiler.CompileError as exc:
         emit({"type": "compile_error", "errors": exc.errors})
         emit({"type": "error", "message": "计划没有通过校验：\n- " + "\n- ".join(exc.errors)})
@@ -769,7 +790,8 @@ def _run_replan(plan: dict, emit, session_id: str | None) -> None:
     _execute_compiled(compiled, emit, session)
 
 
-def _safe_replan(plan: dict, emit, session_id: str | None = None) -> None:
+def _safe_replan(plan: dict, emit, session_id: str | None = None,
+                 preview: bool = False) -> None:
     """_run_replan 的异常兜底（与 _safe_run 同款）。"""
     CANCEL.clear()
     acquired = RUN_LOCK.acquire(timeout=1)
@@ -778,7 +800,7 @@ def _safe_replan(plan: dict, emit, session_id: str | None = None) -> None:
         emit(None)
         return
     try:
-        _run_replan(plan, emit, session_id)
+        _run_replan(plan, emit, session_id, preview=preview)
     except Exception as exc:  # noqa: BLE001
         emit({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
         emit({"type": "traceback", "text": traceback.format_exc()[-2000:]})
@@ -1374,11 +1396,12 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/replan":
             plan = payload.get("plan")
             session_id = (payload.get("session_id") or "").strip() or None
+            preview = bool(payload.get("preview"))
             if not isinstance(plan, dict):
                 self._fail(400, "缺少 plan（编辑后的完整计划 JSON）。")
                 return
             self._stream_ndjson(
-                lambda emit: _safe_replan(plan, emit, session_id))
+                lambda emit: _safe_replan(plan, emit, session_id, preview))
             return
 
         if path != "/api/run":
@@ -1387,8 +1410,9 @@ class Handler(BaseHTTPRequestHandler):
 
         task = (payload.get("task") or "").strip()
         session_id = (payload.get("session_id") or "").strip() or None
+        preview = bool(payload.get("preview"))
         self._stream_ndjson(
-            lambda emit: _safe_run(task, emit, session_id))
+            lambda emit: _safe_run(task, emit, session_id, preview))
 
     def _stream_ndjson(self, runner) -> None:
         """公共 NDJSON 事件流：后台线程跑 runner(emit)，主连接逐行写出事件。"""

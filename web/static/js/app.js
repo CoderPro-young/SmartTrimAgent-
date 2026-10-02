@@ -35,6 +35,7 @@ function setBusy(v){
   busy = v;
   $('#send').disabled = v || materials.busyMaterials() === false;
   $('#replanBtn').disabled = v || !lastExecPlan;
+  $('#exportFinalBtn').disabled = v;
   $('#cancelBtn').style.display = v ? '' : 'none';
   $('#newTaskBtn').disabled = v;
 }
@@ -127,14 +128,18 @@ async function streamRun(url, payload, { silentUser = null } = {}){
 }
 
 function run(task){
-  return streamRun('/api/run', { task, session_id: sessionId }, { silentUser: task });
+  return streamRun('/api/run', {
+    task, session_id: sessionId,
+    preview: $('#previewToggle').checked,   // 快速预览档：低分辨率快编，导出再全量
+  }, { silentUser: task });
 }
 
-function replan(){
+function replan(preview, silentUser){
   const plan = pipeline.getWorkPlan();
   if (!plan || busy) return;
-  return streamRun('/api/replan', { plan, session_id: sessionId },
-                   { silentUser: '（按参数卡的修改重新渲染）' });
+  if (typeof preview !== 'boolean') preview = $('#previewToggle').checked;
+  return streamRun('/api/replan', { plan, session_id: sessionId, preview },
+                   { silentUser: silentUser || '（按参数卡的修改重新渲染）' });
 }
 
 async function cancelRun(){
@@ -202,7 +207,9 @@ async function boot(){
     $('#task').style.height = 'auto';
     run(v);
   };
-  $('#replanBtn').onclick = replan;
+  $('#replanBtn').onclick = () => replan();
+  $('#exportFinalBtn').onclick = () =>
+    replan(false, '（导出成品：按原始分辨率完整编码）');
   $('#cancelBtn').onclick = cancelRun;
   $('#newTaskBtn').onclick = newTask;
   $('#task').addEventListener('keydown', e => {

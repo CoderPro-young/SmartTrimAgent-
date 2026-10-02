@@ -33,6 +33,13 @@ header{
 }
 .pill.ok{color:var(--ok);border-color:rgba(61,220,132,.35);background:rgba(61,220,132,.08)}
 .pill.bad{color:var(--bad);border-color:rgba(255,107,107,.35);background:rgba(255,107,107,.08)}
+.pill.pv{color:#e8b34c;border-color:rgba(232,179,76,.35);background:rgba(232,179,76,.08)}
+/* 快速预览开关：贴在运行按钮旁的小档位 */
+.pvtoggle{
+  display:flex;align-items:center;gap:5px;white-space:nowrap;
+  font-size:12.5px;color:var(--muted);cursor:pointer;padding:7px 4px;user-select:none;
+}
+.pvtoggle input{accent-color:var(--accent);cursor:pointer}
 /* ---------- layout ---------- */
 main{flex:1;display:grid;grid-template-columns:minmax(360px,44fr) 56fr;
      grid-template-rows:minmax(0,1fr);min-height:0}
@@ -319,14 +326,20 @@ button.ghost.danger{color:var(--bad)}
   font-size:11px;padding:2px 9px;border-radius:6px;background:rgba(61,220,132,.10);
   border:1px solid rgba(61,220,132,.3);color:var(--ok);align-self:flex-start;
 }
-/* ---------- 只读时间线胶片条 ---------- */
-.filmstrip{display:flex;width:100%;gap:2px;align-items:stretch}
+/* ---------- 成片时间线胶片条（可拖动定位） ---------- */
+.tlbar{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+.tlbar .ghost{padding:3px 12px;font-size:12px}
+.tltime{font-family:var(--mono);font-size:12px;color:var(--muted)}
+.tlhint{font-size:11px;color:var(--dim);margin-left:auto}
+.filmstrip{position:relative;width:100%;height:64px;border-radius:6px;
+           cursor:ew-resize;user-select:none;touch-action:none}
 .fsclip{
-  position:relative;border-radius:6px;overflow:hidden;border:1px solid var(--line);
-  cursor:pointer;min-width:34px;background:#0b0d11;height:64px;flex:0 0 auto;
+  position:absolute;top:0;height:100%;border-radius:6px;overflow:hidden;
+  border:1px solid var(--line);background:#0b0d11;
 }
-.fsclip img{width:100%;height:100%;object-fit:cover;display:block;opacity:.9}
+.fsclip img{width:100%;height:100%;object-fit:cover;display:block;opacity:.9;pointer-events:none}
 .fsclip:hover{border-color:rgba(124,156,255,.7)}
+.fsclip.on{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent) inset}
 .fsclip .cid{
   position:absolute;top:3px;left:5px;font-family:var(--mono);font-size:9.5px;
   color:#fff;background:rgba(11,13,17,.72);border-radius:3px;padding:0 4px;
@@ -336,9 +349,18 @@ button.ghost.danger{color:var(--bad)}
   color:var(--accent);background:rgba(11,13,17,.72);border-radius:3px;padding:0 4px;
 }
 .fstrans{
-  flex:0 0 auto;align-self:center;font-size:9.5px;color:var(--accent2);
+  position:absolute;bottom:2px;transform:translateX(-50%);z-index:3;pointer-events:none;
+  font-size:9.5px;color:var(--accent2);
   border:1px dashed rgba(176,140,255,.5);border-radius:5px;padding:1px 6px;
-  white-space:nowrap;background:rgba(176,140,255,.07);
+  white-space:nowrap;background:rgba(11,13,17,.72);
+}
+.fsplayhead{
+  position:absolute;top:-4px;bottom:-4px;left:0;width:2px;z-index:4;pointer-events:none;
+  background:var(--accent);box-shadow:0 0 6px rgba(124,156,255,.8);
+}
+.fsplayhead::before{
+  content:'';position:absolute;top:0;left:-4px;
+  border:5px solid transparent;border-top-color:var(--accent);
 }
 .fsruler{display:flex;justify-content:space-between;font-family:var(--mono);
          font-size:10px;color:var(--dim);margin-top:5px}

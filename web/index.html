@@ -40,6 +40,8 @@
       <div class="tpls" id="tpls"></div>
       <div class="inputrow">
         <textarea id="task" placeholder="先用一句话描述要剪成什么样"></textarea>
+        <label class="pvtoggle" title="调整环路用低分辨率快速渲染（秒级出片），满意后到成品标签点「导出成品」做完整编码">
+          <input type="checkbox" id="previewToggle"> 快速预览</label>
         <button id="send">运行</button>
       </div>
       <div class="hint">上传后自动建立镜头索引 · 出片后可继续提修改 · 拖文件到左侧也能上传</div>
@@ -97,11 +99,14 @@
     <!-- ---- 标签 2：成品（播放器 + 时间线 + 审阅报告） ---- -->
     <div class="tabpane scroll" id="paneResult">
       <div class="card" id="cardResult" hidden>
-        <h3>成品 <span class="grow"></span><span class="verify" id="verifyBox"></span></h3>
+        <h3>成品 <span id="previewBadge" class="pill pv" hidden>预览版 · 快速渲染</span>
+          <span class="grow"></span><span class="verify" id="verifyBox"></span></h3>
         <div class="body">
           <video id="player" controls playsinline preload="metadata"></video>
           <div class="resultbar">
             <a id="dl" download>下载 / 打开原视频</a>
+            <button class="ghost" id="exportFinalBtn" hidden
+                    title="用原始分辨率完整编码一遍，覆盖导出正式成品">导出成品（完整编码）</button>
             <span id="outMeta" style="color:var(--muted);font-size:12.5px"></span>
           </div>
           <div class="resultbar" id="exportBar" title="时间线导出"></div>
@@ -116,7 +121,12 @@
 
       <div class="card">
         <h3>成品时间线</h3>
-        <div class="body" id="filmstrip"><span class="empty">出片后这里展示成片结构（片段缩略 / 转场 / 时长），点击可回看源片段</span></div>
+        <div class="tlbar">
+          <button class="ghost" id="tlPlay" disabled title="播放 / 暂停（快捷键：空格）">▶ 播放</button>
+          <span class="tltime" id="tlTime">0s / —</span>
+          <span class="tlhint">单击 / 拖动定位 · 双击片段回看源素材</span>
+        </div>
+        <div class="body" id="filmstrip"><span class="empty">出片后这里展示成片结构（片段缩略 / 转场 / 时长）</span></div>
       </div>
     </div>
 
