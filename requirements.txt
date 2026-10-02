@@ -11,6 +11,12 @@ python-dotenv
 # 人脸检测打码（v3.0）：OpenCV YuNet（MIT 许可）
 opencv-python
 
+# 镜头切分（V7.10，借鉴 FireRed-OpenStoryline）：TransNetV2 镜头边界
+# 检测网络（MIT，包内自带权重，CPU 可跑）为主切分器，未装则回退 ffmpeg
+# 启发式阶梯（行为同 V7.8）。详见 docs/v7.9-transnet-rescue.md
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+transnetv2_pytorch==1.0.5
+
 # 安装方式（项目根目录）：
 #   py -m venv .venv
 #   .venv\Scripts\activate            # PowerShell: .venv\Scripts\Activate.ps1

@@ -2,7 +2,7 @@
 
 「LLM 出意图，编译器保正确」不变；本模块给规划模型补上"看得见内容"的信号：
 
-    ffmpeg 场景切分（确定性，产生时间边界）
+    ffmpeg 场景切分（确定性，产生时间边界；首轮判过碎时 TransNetV2 复核，V7.9）
       → 每镜头抽一帧代表画面（长边 640px JPEG）
       → VLM 批量打标（只出语义标签，绝不输出时间戳）
       → 内容卡片（纯文本）经 analyze_media 工具返回给规划模型
@@ -29,6 +29,7 @@ from datetime import datetime
 
 import ffmpeg_exec
 import signal_detection
+import transnet
 from model import get_vlm_model
 
 SCENE_THRESHOLD = 0.3     # 场景切分灵敏度（roadmap T9 预定值）
@@ -207,18 +208,35 @@ def _avg_shot_span(times: list[float], duration) -> float:
     return sum(spans) / len(spans) if spans else float("inf")
 
 
-def _detect_boundaries(run, full: str, duration, budget: int) -> tuple[list[float], str]:
-    """场景切分（select=gt(scene,0.3) + showinfo）；过碎升阈值重试，仍碎取最粗。
+def _detect_boundaries(run, full: str, duration, budget: int,
+                       transnet_fn=None, run_binary=None) -> tuple[list[float], str]:
+    """场景切分（V7.10：TransNetV2 主切分优先；未装依赖/模型失败回退
+    select=gt(scene,0.3) + showinfo 启发式阶梯，过碎先模型复核再升阈值，
+    仍碎取最粗）。
 
-    返回 (边界时间列表, "scene"|"scene_rescued"|"uniform")。
+    返回 (边界时间列表, "scene"|"transnet"|"scene_rescued"|"uniform")。
     频闪/快速甩镜会把 scene 分数间歇性顶过阈值，把一段连续镜头误切成
-    0.1s 级碎片（实测：10.1s 餐厅素材切成 13 段、12 段不足 0.4s）——
-    平均粒度低于 OVERSEG_AVG 判为误切，逐级升阈值重试（0.45 → 0.6；
-    真实硬切的 scene 分数远高于频闪尖峰，升阈值只滤误切不丢真切）；
-    全部仍碎时取边界最少的一档，残余碎片交给 build_shots 的并段护栏。
+    0.1s 级碎片（实测：10.1s 餐厅素材切成 13 段、12 段不足 0.4s）。
+    V7.9 首轮被判过碎时先请 TransNetV2（专用镜头边界网络，借鉴
+    FireRed-OpenStoryline）重切：模型更粗或粒度达标即采纳，跳过升阈值
+    （省 1~2 遍全片解码）；复核不可用/失败（返回 None）时行为与从前一致——
+    逐级升阈值重试（0.45 → 0.6；真实硬切的 scene 分数远高于频闪尖峰，
+    升阈值只滤误切不丢真切）；全部仍碎时取边界最少的一档，残余碎片交给
+    build_shots 的并段护栏。
     探测本身失败/整段无切点时维持原有兜底（均匀等分 / 12s 粒度等分）。
     """
     best: list[float] | None = None
+    # ① 主切分（V7.10 B 方案，OpenStoryline 同款）：模型先行。模型对渐变
+    #    转场敏感，帧差法漏切的边界它看得见；任何失败返回 None 落到下方
+    #    ffmpeg 阶梯。模型刚失败过，阶梯内的过碎复核不再重复调用。
+    if transnet_fn is not None and transnet.primary_enabled():
+        tn = transnet_fn(run_binary or ffmpeg_exec.run_binary, full, duration)
+        if tn is not None:
+            _report(stage="transnet", file=os.path.basename(full),
+                    boundaries=len(tn),
+                    avg_span=round(_avg_shot_span(tn, duration), 2))
+            return list(tn), "transnet"
+        transnet_fn = None
     for i, th in enumerate((SCENE_THRESHOLD, 0.45, 0.6)):
         res = run(
             ["ffmpeg", "-nostdin", "-loglevel", "info", "-i", full,
@@ -236,6 +254,17 @@ def _detect_boundaries(run, full: str, duration, budget: int) -> tuple[list[floa
             best = times
         if _avg_shot_span(times, duration) >= OVERSEG_AVG:
             return times, "scene" if i == 0 else "scene_rescued"
+        if i == 0 and transnet_fn is not None:
+            # 首轮过碎 → TransNetV2 复核（V7.9）。模型边界更可信：更粗
+            # （含零边界 = 整段一镜）或粒度达标即采纳——真·快剪素材不该
+            # 被升阈值误并；模型比启发式还碎则忽略，继续升阈值阶梯。
+            tn = transnet_fn(run_binary or ffmpeg_exec.run_binary, full, duration)
+            if tn is not None and (len(tn) < len(times)
+                                   or _avg_shot_span(tn, duration) >= OVERSEG_AVG):
+                _report(stage="transnet", file=os.path.basename(full),
+                        boundaries=len(tn),
+                        avg_span=round(_avg_shot_span(tn, duration), 2))
+                return list(tn), "transnet"
     if best is None:                    # 探测失败 → 按时长均匀兜底（原行为）
         if not duration:
             return [0.0], "uniform"
@@ -336,6 +365,8 @@ _TAG_PROMPT = (
     "scene（场景，如 餐厅/海边/街道/家中/户外草地）、"
     "activity（活动，如 聚餐/合影/奔跑/讲话/表演/风景空镜）、"
     "mood（氛围，如 欢笑/温馨/安静/热闹）、"
+    "desc（一句话画面描述，30~40 字：主体在做什么、景物有什么，写具体的名词和"
+    "动作与光线，不要评价词不要抒情，如「穿红裙的女孩背对镜头走向金色草地，风把裙摆吹起」）、"
     "tags（2-5 个补充标签的字符串数组，如 多人、举杯、夜景、日落、宠物）、"
     'quality（"good"|"ok"|"poor"，模糊/过曝/严重抖动为 poor）。\n'
     "只输出一个 JSON 数组（长度必须等于 {n}，顺序与帧一致），不要输出任何其他文字。"
@@ -380,6 +411,8 @@ def sanitize_label(raw) -> dict:
         "scene": _s(lab.get("scene")),
         "activity": _s(lab.get("activity")),
         "mood": _s(lab.get("mood")),
+        # V7.6：一句话画面描述（喂给文案模型的原材料，替代干瘪标签词）
+        "desc": _s(lab.get("desc"), 48),
         "tags": tags,
         "quality": quality,
         "usable": quality != "poor",
@@ -494,13 +527,14 @@ def build_summary(shots: list[dict], duration, signals: dict | None = None) -> s
 # ----------------------------------------------------------- 编排入口 ---- #
 
 def analyze_media(path: str, project_root: str, *, model=None, run_fn=None,
-                  probe_fn=None) -> dict:
+                  probe_fn=None, transnet_hook=None,
+                  run_binary_fn=None) -> dict:
     """对单个素材做内容分析，返回内容卡片 dict（sidecar 命中时零计算）。
 
     依赖注入（离线测试用）：model（假 VLM；传 False = 强制禁用走降级路径）/
-    run_fn（假 ffmpeg）/ probe_fn（假 ffprobe）。失败从不抛出——返回
-    {"error": ...} 或带 degradations 的降级卡片，保证 analyze_media 工具
-    永远有结构化返回。
+    run_fn（假 ffmpeg）/ probe_fn（假 ffprobe）/ transnet_hook + run_binary_fn
+    （假 TransNet 复核，V7.9）。失败从不抛出——返回 {"error": ...} 或带
+    degradations 的降级卡片，保证 analyze_media 工具永远有结构化返回。
     """
     rel = (path or "").replace("\\", "/").strip()
     full = os.path.join(project_root, rel)
@@ -541,14 +575,23 @@ def analyze_media(path: str, project_root: str, *, model=None, run_fn=None,
         if signals is None:
             degradations.append("signals_failed")
 
-    # ① 时间边界：场景切分（确定性）；失败/过疏按时长均匀兜底
+    # ① 时间边界：场景切分（确定性）；首轮过碎先 TransNetV2 复核（V7.9，
+    #    可选依赖，未装/失败零行为变化）；失败/过疏按时长均匀兜底
     if meta.get("kind") == "image":
         shots: list[dict] = [{"start": 0.0, "end": None}]
+        seg_how = "image"
     else:
-        boundaries, how = _detect_boundaries(run, full, duration, budget)
+        transnet_fn = None
+        if transnet.enabled():            # TRANSNET_RESCUE=0 → 复核整体不接线
+            transnet_fn = (transnet_hook if transnet_hook is not None
+                           else transnet.detect)
+        boundaries, how = _detect_boundaries(
+            run, full, duration, budget,
+            transnet_fn=transnet_fn, run_binary=run_binary_fn)
         if how == "uniform":
             degradations.append("uniform_fallback")
         shots = downsample(build_shots(boundaries, duration), budget)
+        seg_how = how
 
     # ② 代表帧抽取（每镜头 0.35 分位处，长边 640px JPEG）
     frames_dir = os.path.join(project_root, "TMP", "probe", "frames")
@@ -590,6 +633,7 @@ def analyze_media(path: str, project_root: str, *, model=None, run_fn=None,
         "vlm_model": vlm_name,
         "duration": duration,
         "frame_budget": budget,
+        "segmentation": seg_how,     # 边界来源（V7.9）：scene/transnet/scene_rescued/uniform
         "degradations": degradations,
         "signals": signals,
         "summary": build_summary(shots, duration, signals),

@@ -37,9 +37,12 @@ def kill_all() -> int:
     return n
 
 
-def _run_tracked(argv: list[str], timeout: int, cwd: str | None) -> dict:
+def _run_tracked(argv: list[str], timeout: int, cwd: str | None,
+                 text: bool = True) -> dict:
+    """text=True 时 stdout/stderr 是 str（showinfo 解析等）；False 时 stdout 为
+    bytes（rawvideo 管道解码，transnet.py 用）。两者同样登记进 _PROCS。"""
     proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            text=True, cwd=cwd)
+                            text=text, cwd=cwd)
     with _PROC_LOCK:
         _PROCS.add(proc)
     try:
@@ -51,15 +54,17 @@ def _run_tracked(argv: list[str], timeout: int, cwd: str | None) -> dict:
         try:
             out, err = proc.communicate(timeout=10)
         except subprocess.TimeoutExpired:
-            out, err = "", ""
+            out, err = ("" if text else b""), ("" if text else b"")
         returncode = proc.returncode
         timed_out = True
     finally:
         with _PROC_LOCK:
             _PROCS.discard(proc)
     if timed_out:
+        empty = "" if text else b""
         return {"ok": False, "returncode": returncode,
-                "stdout": out or "", "stderr": err or "",
+                "stdout": out if out is not None else empty,
+                "stderr": err if err is not None else empty,
                 "error": f"命令超时（>{timeout}s）", "command": argv}
     return {"ok": returncode == 0, "returncode": returncode,
             "stdout": out or "", "stderr": err or "", "command": argv}
@@ -104,6 +109,32 @@ def run(cmd: str | list[str], timeout: int = FFMPEG_TIMEOUT, cwd: str | None = N
     except OSError as exc:
         return {"ok": False, "returncode": None, "error": f"启动失败：{exc}",
                 "command": cmd}
+
+
+def run_binary(cmd: str | list[str], timeout: int = FFMPEG_TIMEOUT,
+               cwd: str | None = None) -> dict:
+    """执行命令并捕获二进制 stdout（ffmpeg -f rawvideo pipe 输出用）。
+
+    返回 {ok, returncode, stdout: bytes, stderr: str, command}；进程同样
+    进 _PROCS，取消按钮对它生效。
+    """
+    argv = shlex.split(cmd) if isinstance(cmd, str) else list(cmd)
+    if not argv:
+        return {"ok": False, "error": "空命令", "command": cmd}
+    if shutil.which(argv[0]) is None:
+        return {
+            "ok": False, "returncode": None, "stdout": b"", "stderr": "",
+            "error": f"`{argv[0]}` 未安装（PATH 查找失败），命令未执行。",
+            "command": cmd,
+        }
+    try:
+        res = _run_tracked(argv, timeout, cwd, text=False)
+    except OSError as exc:
+        return {"ok": False, "returncode": None, "stdout": b"", "stderr": "",
+                "error": f"启动失败：{exc}", "command": cmd}
+    res["stderr"] = (res.get("stderr") or b"").decode("utf-8", errors="replace")
+    res.setdefault("stdout", b"")
+    return res
 
 
 def probe(path: str) -> dict:
