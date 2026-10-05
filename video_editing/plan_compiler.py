@@ -1122,14 +1122,28 @@ def _expand_workflow(plan: dict, project_root: str) -> tuple[dict, dict]:
 
 
 def _expand_plan(plan: dict, project_root: str, run_fn=None) -> tuple[dict, dict]:
-    """V5/V7 计划展开总入口：workflow 宏 → select 宏；cut 参数 → 保留子段。"""
+    """V5/V7/V8 计划展开总入口：workflow 宏 → select 宏；cut 参数 → 保留子段。"""
     expansions: dict = {}
-    if plan.get("workflow"):
+    has_workflow = bool(plan.get("workflow"))
+    if has_workflow:
         plan, report = _expand_workflow(plan, project_root)
         expansions["workflow"] = report
     if plan.get("select"):
         plan, report = _expand_select(plan, project_root)
         expansions["select"] = report
+    if not has_workflow and ("_narration" in plan or "_captions" in plan):
+        # V8.0 agent 手写文案：来源/标题进报告（铺轴在 _apply_captions，
+        # 铺完 _narration/_captions/_caption_style 从计划中移除）
+        narr = plan.get("_narration")
+        expansions["captions"] = {
+            "source": "agent",
+            "mode": "narration" if narr else "captions",
+            "style": plan.get("_caption_style") or "bottom",
+            "title": plan.get("_title"),
+            "captions": (sum(len(g.get("units") or []) for g in narr)
+                         if narr else len(plan.get("_captions") or [])),
+        }
+        plan.pop("_title", None)
     plan, cuts = _expand_cuts(plan, project_root, run_fn=run_fn)
     if cuts:
         expansions["cuts"] = cuts

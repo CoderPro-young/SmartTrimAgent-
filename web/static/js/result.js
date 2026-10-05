@@ -99,6 +99,14 @@ export function renderReport(rep, preview = false){
   }
   if (rep.bgm) r.append(rline([el('span', null, '含 BGM 配乐')]));
   if ((rep.overlays || 0) > 0) r.append(rline([el('span', null, `叠加 ${rep.overlays} 处`)]));
+  /* V8.0 agent 手写文案：旁白制/一镜一句的来源与句数 */
+  if (rep.captions && rep.captions.captions){
+    const c = rep.captions;
+    r.append(rline([el('span', 'sub',
+      c.mode === 'narration'
+        ? `旁白 ${c.captions} 句（agent 按叙事组撰写，编译器按字数加权铺轴）`
+        : `字幕 ${c.captions} 句（agent 逐镜头撰写）`)]));
+  }
   /* V7.5 文案来源透明化：labels 兜底不是创作，提醒用户别把它当文案水平 */
   const wf = rep.workflow || {};
   if (wf.captions_source === 'labels'){

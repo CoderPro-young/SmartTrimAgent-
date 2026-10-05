@@ -645,12 +645,15 @@ def _build_report(compiled) -> dict:
         "cuts": compiled.expansions.get("cuts") or [],
         "select": compiled.expansions.get("select"),
         "workflow": compiled.expansions.get("workflow"),
+        "captions": compiled.expansions.get("captions"),   # V8.0 agent 手写文案
     }
     if rep["cuts"]:
         removed = round(sum(c["removed_seconds"] for c in rep["cuts"]), 3)
         rep["removed_total_seconds"] = removed
     if rep["select"]:
         rep["selected_shots"] = len(rep["select"].get("picked") or [])
+    if rep["captions"] and rep["captions"].get("title"):
+        rep["title"] = rep["captions"]["title"]     # V8.0 agent 手写标题（复用展示行）
     return rep
 
 

@@ -49,7 +49,9 @@ POSITIONS = {
 # 成品是原速、系统却报告成功。这是最坏的失败模式，必须堵死。
 
 PLAN_KEYS = {"schema_version", "output", "clips", "timeline", "overlays", "audio",
-             "select", "workflow"}
+             "select", "workflow",
+             # V8.0 创作流 agent 化：agent 手写文案进计划（编译器铺轴后移除）
+             "_narration", "_captions", "_caption_style", "_title"}
 OUTPUT_KEYS = {"filename", "resolution", "fps"}
 RESOLUTION_KEYS = {"width", "height"}
 CLIP_KEYS = {"id", "source", "kind", "trim_start", "trim_end", "duration",
@@ -168,6 +170,77 @@ def _validate_workflow(wf, tag: str = "workflow") -> list[str]:
 
 def _num(x) -> bool:
     return isinstance(x, (int, float)) and not isinstance(x, bool)
+
+
+def _validate_agent_captions(plan: dict, has_workflow: bool) -> list[str]:
+    """校验 V8.0 agent 手写文案键（_narration / _captions / _caption_style / _title）。
+
+    - `_narration = [{"group_id", "clip_ids": [...], "units": ["句", ...]}, ...]`
+      （编译器按组铺轴：单元时长 ∝ 字数，一句可跨剪辑点）；
+    - `_captions = ["一句一镜", ...]`（数量与 timeline 片段一致时逐段绑定）；
+    - 二者互斥；带 workflow 宏的计划不允许手写这些键（宏路径由编译器注入，
+      防双重来源）；clip_ids 必须引用计划里真实存在的 clip id。
+    """
+    errors: list[str] = []
+    keys = [k for k in ("_narration", "_captions", "_caption_style", "_title")
+            if k in plan]
+    if not keys:
+        return errors
+    if has_workflow:
+        return ["workflow 宏与手写文案键（_narration/_captions 等）互斥："
+                "宏路径的文案由编译器生成注入，请二选一。"]
+    if "_narration" in plan and "_captions" in plan:
+        errors.append("_narration 与 _captions 互斥：旁白制与一镜一句二选一。")
+
+    clip_ids = {c.get("id") for c in plan.get("clips") or []
+                if isinstance(c, dict)}
+    narr = plan.get("_narration")
+    if "_narration" in plan:
+        if not isinstance(narr, list) or not narr:
+            errors.append("_narration 必须是非空数组："
+                          '[{"group_id": "g1", "clip_ids": ["c1"], '
+                          '"units": ["句一。"]}, ...]。')
+        else:
+            for i, g in enumerate(narr):
+                tag = f"_narration[{i}]"
+                if not isinstance(g, dict):
+                    errors.append(f"{tag} 必须是对象（group_id/clip_ids/units）。")
+                    continue
+                extra = [k for k in g if k not in ("group_id", "clip_ids", "units")]
+                if extra:
+                    errors.append(f"{tag} 含不支持的字段 {extra}。")
+                cids = g.get("clip_ids")
+                if not isinstance(cids, list) or not cids:
+                    errors.append(f"{tag}.clip_ids 必须是非空数组（引用计划里的 clip id）。")
+                else:
+                    bad = [c for c in cids if c not in clip_ids]
+                    if bad:
+                        errors.append(f"{tag}.clip_ids 引用了不存在的 clip：{bad}；"
+                                      f"计划里的 clip id 有 {sorted(clip_ids)}。")
+                units = g.get("units")
+                if not isinstance(units, list) or \
+                        not all(isinstance(u, str) and u.strip() for u in units) \
+                        or not units:
+                    errors.append(f"{tag}.units 必须是非空字符串数组（旁白断句）。")
+
+    caps = plan.get("_captions")
+    if "_captions" in plan:
+        limit = (CAPTION_LINES_LIMIT_CREDITS
+                 if plan.get("_caption_style") == "credits" else CAPTION_LINES_LIMIT)
+        if not isinstance(caps, list) or not caps \
+                or not all(isinstance(c, str) and c.strip() for c in caps):
+            errors.append(f"_captions 必须是 1~{limit} 条非空字符串数组（文案行）。")
+        elif len(caps) > limit:
+            errors.append(f"_captions 超过上限（{len(caps)} > {limit} 条）。")
+
+    style = plan.get("_caption_style")
+    if "_caption_style" in plan and style not in CAPTION_STYLES:
+        errors.append(f"_caption_style 必须是 {caption_style_menu()} 之一"
+                      f"（收到 {style!r}）。")
+    title = plan.get("_title")
+    if "_title" in plan and (not isinstance(title, str) or not title.strip()):
+        errors.append("_title 必须是非空字符串（成片标题）。")
+    return errors
 
 
 def _validate_cut(cut, allowed: set, tag: str) -> list[str]:
@@ -302,6 +375,7 @@ def validate_plan(plan: dict, project_root: str) -> list[str]:
                              ("timeline", "timeline"), ("overlays", "overlays")):
             if plan.get(other):
                 errors.append(f"workflow 与 {label} 互斥：宏由编译器生成，请二选一。")
+    errors.extend(_validate_agent_captions(plan, has_workflow))
     if has_select:
         if not isinstance(plan["select"], dict):
             errors.append("select 必须是对象（筛选宏）。")
