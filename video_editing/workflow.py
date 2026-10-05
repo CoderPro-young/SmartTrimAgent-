@@ -75,6 +75,14 @@ V7.6 变更（文案质量）：打标加 desc 一句话画面描述（content_a
 镜头卡的输入从标签词升级为具体画面）；_write_captions 重写 prompt
 （few-shot + 禁用词 + 首句钩子/末句收束），解析失败或句数不齐带反馈
 重试一次而非直接作废；labels 兜底在前端摘要显式标注来源。
+
+V8.0 变更（创作流 agent 化，见 docs/v8.0-agent-workflow.md）：
+① **取消创作流强制粗筛**——_usable_cards 不再用 culling.judge_material
+判废拦截（判断权交给模型：agent 路径经 list_shots 看到全量镜头池，
+宏路径由镜头级 quality/静音过滤兜底）；素材库 UI 的手动粗筛报告
+（/api/cull/report|apply）不受影响。② 本模块的宏整体**降位为兜底**：
+创作类任务的默认路径是 agent 逐步执行 WORKFLOW SKILL（video_agent 的
+提示词 + list_shots/list_music 工具），手写完整计划后仍走同一编译链。
 """
 
 from __future__ import annotations
@@ -233,10 +241,13 @@ class Workflow:
 # --------------------------------------------------------------- 选材 ----- #
 
 def _usable_cards(ctx: dict, sources: list[str] | None):
-    """取素材卡片并先做粗筛：废料（culling 规则）不进选材池。
+    """取素材卡片（V8.0 起不做粗筛拦截：所有有卡素材进选材池）。
 
     ctx —— {cards: {rel: card}, probes: {rel: probe}, project_root}
     缺卡的素材返回 (cards, missing) 由调用方决定报错。
+    历史行为（V6–V7.11）：culling.judge_material 判废的素材不进池——V8.0
+    创作流 agent 化后判断权交给模型（list_shots 全量可见 + 镜头级 quality/
+    静音信号作参考），素材库 UI 的手动粗筛报告（/api/cull/report）不受影响。
     """
     cards, missing, culled = {}, [], []
     for rel, card in (ctx.get("cards") or {}).items():
@@ -244,10 +255,6 @@ def _usable_cards(ctx: dict, sources: list[str] | None):
             continue
         if not card or card.get("error") or not card.get("shots"):
             missing.append(rel)
-            continue
-        verdict = culling.judge_material(rel, card, (ctx.get("probes") or {}).get(rel))
-        if verdict.junk:
-            culled.append({"source": rel, "reasons": verdict.reasons})
             continue
         cards[rel] = card
     return cards, missing, culled
@@ -426,9 +433,7 @@ def _expand_one_click_reel(wf: dict, ctx: dict) -> tuple[dict, dict]:
             "以下素材还没有内容索引：" + "、".join(missing) +
             "。请先对这些素材调用 analyze_media（通常上传后已自动建好）。")
     if not cards:
-        raise ValueError(
-            "所有素材都被粗筛判定为废料（全静音/全黑场/画质全差/过短），"
-            "没有可用的画面。请换素材，或用 ask_user 向用户说明实情。")
+        raise ValueError("INPUT/ 里没有任何已建卡的视频素材，没有可用画面。")
 
     where: dict = {"quality_in": ["good", "ok"], "max_silence_ratio": 0.8,
                    "min_duration": MIN_SHOT_DURATION}
@@ -800,7 +805,7 @@ def _expand_smart_create(wf: dict, ctx: dict) -> tuple[dict, dict]:
             "以下素材还没有内容索引：" + "、".join(missing) +
             "。请先对这些素材调用 analyze_media（通常上传后已自动建好）。")
     if not cards:
-        raise ValueError("所有素材都被粗筛判定为废料，没有可用画面。")
+        raise ValueError("INPUT/ 里没有任何已建卡的视频素材，没有可用画面。")
 
     where: dict = {"quality_in": ["good", "ok"], "max_silence_ratio": 0.8,
                    "min_duration": MIN_SHOT_DURATION}
@@ -973,9 +978,12 @@ def workflow_menu() -> str:
 
 def render_workflow_doc() -> str:
     """派生提示词里的 workflow 用法文档（与 skills.render_prompt_doc 同思想）。"""
-    lines = ["## Workflows (V7 one-click macros — replace clips/timeline/overlays)",
-             "When the request is vague (\"just edit it for me\" / one-click),",
-             "submit a top-level `workflow` block instead of hand-writing clips:"]
+    lines = ["## Workflows (V7 one-click macros — DETERMINISTIC FALLBACK)",
+             "V8.0: creative/one-click tasks should use the Creative workflow above",
+             "(you drive: list_shots → filter → group → narration → music →",
+             "hand-written plan). These macros remain for simple batch/parameter-",
+             "only tasks, or as a fallback when the creative path is unnecessary.",
+             "A macro replaces clips/timeline/overlays with one `workflow` block:"]
     for w in WORKFLOWS.values():
         lines.append(f"- `{w.name}`: {w.summary}")
         if w.prompt_doc:

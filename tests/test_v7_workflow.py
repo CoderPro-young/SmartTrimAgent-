@@ -93,7 +93,7 @@ def t02_validate_workflow_block():
 
 
 def t03_one_click_reel_expansion():
-    """粗筛丢 silent → poor 镜头被拒 → 预算内挑 good 镜头 → 默认 fade。"""
+    """V8.0 取消粗筛拦截：全部素材进池，废信号在镜头级被拒（带原因）。"""
     with tempfile.TemporaryDirectory() as tmp:
         _make_project(tmp)
         ctx = _ctx(tmp, CARDS, PROBES)
@@ -102,11 +102,11 @@ def t03_one_click_reel_expansion():
         ids = [c["id"] for c in plan["clips"]]
         assert ids == ["s00"], ids                      # 日落 6s 装进 10s 预算
         assert plan["timeline"][0] == {"clip": "s00"}   # 单段无转场
-        culled_srcs = {c["source"] for c in report["culled"]}
-        assert culled_srcs == {"INPUT/b.mp4", "INPUT/silent.mp4"}, culled_srcs
-        # 全 poor 素材在粗筛层就被拦下；进筛选的只剩 a.mp4 的两个镜头
-        # （第二个被 10s 预算拒掉）
-        assert report["rejected_total"] == 1
+        # V8.0：不再有素材级粗筛拦截（culled 恒空）；
+        # b.mp4 的 poor 镜头与 silent.mp4 的高静音镜头在候选层被拒（带原因），
+        # a.mp4 第二个镜头被 10s 预算拒掉
+        assert report["culled"] == []
+        assert report["rejected_total"] == 3, report["rejected_total"]
         assert report["picked"] == 1
 
 
@@ -137,6 +137,7 @@ def t05_one_click_reel_keyword_filter():
 
 
 def t06_one_click_reel_no_usable():
+    """V8.0：全静音素材不再被粗筛拦下，而是进候选层被静音比拒绝后报「没挑到镜头」。"""
     with tempfile.TemporaryDirectory() as tmp:
         _make_project(tmp)
         ctx = _ctx(tmp, {"INPUT/silent.mp4": CARDS["INPUT/silent.mp4"]},
@@ -145,7 +146,7 @@ def t06_one_click_reel_no_usable():
             wf_mod.WORKFLOWS["one_click_reel"].expand({}, ctx)
             assert False, "应抛 ValueError"
         except ValueError as exc:
-            assert "废料" in str(exc)
+            assert "没有挑到可用镜头" in str(exc), exc
 
 
 def t07_speech_clean_skips_silent_and_no_audio():
@@ -174,8 +175,8 @@ def t08_compile_plan_with_workflow_end_to_end():
                 "workflow": {"name": "one_click_reel", "budget_seconds": 8}}
         result = plan_compiler.compile_plan(plan, tmp)
         assert result.expansions["workflow"]["name"] == "one_click_reel"
-        culled_srcs = {c["source"] for c in result.expansions["workflow"]["culled"]}
-        assert "INPUT/silent.mp4" in culled_srcs
+        # V8.0：粗筛拦截取消，culled 恒空（silent 的高静音镜头在候选层被拒）
+        assert result.expansions["workflow"]["culled"] == []
         assert [c["id"] for c in result.plan["clips"]] == ["s00"]
         assert any(c.stage == "render" for c in result.commands)
         # 归一化产物走内容寻址缓存路径
