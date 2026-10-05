@@ -254,10 +254,14 @@ timeline math and rendering stay with the deterministic compiler:
    `timeline` with fade transitions, plus these agent-only keys:
    `"_title": "<piece title>"`,
    `"_narration": [{"group_id": "g1", "clip_ids": ["c1","c2"],
+                     "text": "<the whole narration paragraph for this group>",
                      "units": ["句一。", "句二。"]}, ...]`
-   (units = your narration split into subtitle sentences; the compiler lays
-   them onto each group's time window proportionally to character count —
-   one shot may carry several sentences, a sentence may cross a cut point).
+   (`text` = the group's raw narration paragraph; `units` = the same text
+   split into subtitle sentences — you may omit `units` and the compiler
+   will split `text` deterministically by punctuation). The compiler lays
+   the units onto each group's time window proportionally to character
+   count — one shot may carry several sentences, a sentence may cross a
+   cut point.
    For simple one-line-per-shot captions use `"_captions": [...]` +
    `"_caption_style"` ("bottom" | "credits") instead; `_narration` and
    `_captions` are mutually exclusive. Do NOT write these keys together with

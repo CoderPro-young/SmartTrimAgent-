@@ -236,7 +236,35 @@ def t09_compile_agent_captions_binding():
         assert hosts == {"c1": "日落开场", "c2": "海边收尾"}
 
 
-def t10_macro_junk_material_now_in_pool():
+def t10_narration_text_field():
+    """e2e 实测发现：模型自然写 text（整段原文）+ units —— 应被接受；
+    只写 text 不写 units 也合法（编译器断句）；text 非字符串仍拒。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        _make_project(tmp)
+        # text + units 共存（e2e 第一稿的实际形态，此前被误拒）
+        plan = _agent_plan(tmp, _narration=[
+            {"group_id": "g1", "clip_ids": ["c1"],
+             "text": "把车开到了没有信号的地方。风比想象的大。",
+             "units": ["把车开到了没有信号的地方。", "风比想象的大。"]},
+            {"group_id": "g2", "clip_ids": ["c2"], "text": "海是蓝色的。"},
+        ])
+        assert plan_schema.validate_plan(plan, tmp) == []
+        # 只写 text：编译器用标点断句铺轴（断句剥句尾标点，V7.11 既有行为）
+        result = plan_compiler.compile_plan(plan, tmp)
+        texts = [o["text"] for o in result.plan["overlays"]]
+        assert texts == ["把车开到了没有信号的地方。", "风比想象的大。",
+                         "海是蓝色的"], texts
+        # text 非字符串 → 拒
+        errs = plan_schema.validate_plan(_agent_plan(tmp, _narration=[
+            {"group_id": "g1", "clip_ids": ["c1"], "text": 123}]), tmp)
+        assert any("_narration[0].text" in e for e in errs), errs
+        # 既无 units 也无 text → 拒
+        errs = plan_schema.validate_plan(_agent_plan(tmp, _narration=[
+            {"group_id": "g1", "clip_ids": ["c1"]}]), tmp)
+        assert any("units" in e for e in errs), errs
+
+
+def t11_macro_junk_material_now_in_pool():
     """V8.0 粗筛取消：全 poor 素材不再被拦下（由镜头级条件拒绝并报原因）。"""
     with tempfile.TemporaryDirectory() as tmp:
         _make_project(tmp)

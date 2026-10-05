@@ -206,7 +206,8 @@ def _validate_agent_captions(plan: dict, has_workflow: bool) -> list[str]:
                 if not isinstance(g, dict):
                     errors.append(f"{tag} 必须是对象（group_id/clip_ids/units）。")
                     continue
-                extra = [k for k in g if k not in ("group_id", "clip_ids", "units")]
+                extra = [k for k in g if k not in
+                         ("group_id", "clip_ids", "units", "text")]
                 if extra:
                     errors.append(f"{tag} 含不支持的字段 {extra}。")
                 cids = g.get("clip_ids")
@@ -217,11 +218,19 @@ def _validate_agent_captions(plan: dict, has_workflow: bool) -> list[str]:
                     if bad:
                         errors.append(f"{tag}.clip_ids 引用了不存在的 clip：{bad}；"
                                       f"计划里的 clip id 有 {sorted(clip_ids)}。")
+                # text（可选）= 该组旁白整段原文（FireRed raw_text 同位）；只写
+                # text 不写 units 也合法——编译器用 _split_narration_units 断句
+                raw = g.get("text")
+                if "text" in g and (not isinstance(raw, str) or not raw.strip()):
+                    errors.append(f"{tag}.text 必须是非空字符串（该组旁白原文）。")
                 units = g.get("units")
-                if not isinstance(units, list) or \
-                        not all(isinstance(u, str) and u.strip() for u in units) \
-                        or not units:
-                    errors.append(f"{tag}.units 必须是非空字符串数组（旁白断句）。")
+                has_raw = isinstance(raw, str) and raw.strip()
+                if "units" in g or not has_raw:
+                    if not isinstance(units, list) or \
+                            not all(isinstance(u, str) and u.strip() for u in units) \
+                            or not units:
+                        errors.append(f"{tag}.units 必须是非空字符串数组（旁白断句；"
+                                      f"或只给 text 由编译器断句）。")
 
     caps = plan.get("_captions")
     if "_captions" in plan:

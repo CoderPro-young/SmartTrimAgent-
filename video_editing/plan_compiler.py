@@ -1167,6 +1167,12 @@ def _apply_narration(plan: dict, math: dict, style: dict) -> None:
     for g in narration:
         clip_ids = [cid for cid in g.get("clip_ids") or [] if cid in math["starts"]]
         units = [str(u).strip() for u in g.get("units") or [] if str(u).strip()]
+        if not units:
+            # 只给了 text 原文（agent 手写路径常见形态）→ 编译器确定性断句
+            raw = str(g.get("text") or "").strip()
+            if raw:
+                from workflow import _split_narration_units
+                units = _split_narration_units(raw)
         if not clip_ids or not units:
             continue
         g_start = math["starts"][clip_ids[0]]
