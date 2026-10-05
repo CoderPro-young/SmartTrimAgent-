@@ -15,9 +15,19 @@
   最短静音 / 保留缓冲）
 - **粗剪 · 批量镜头筛选（V5）**：`select` 筛选宏 ——按内容卡标签（场景 / 人数 / 画质 /
   静音比…）+ 时长预算，编译器从卡片确定性生成片段，模型不手抄时间区间
-- **智能创作 · 一键成片（V7/V7.2）**：`smart_create` 工作流宏——编译器先确定性
-  选材（粗筛废料 → 画质选材 → **最短 1.5s 门槛** → **跨素材轮转装填**，闪帧不入片、
-  多素材都出镜），再把**选中的镜头序列**回喂模型**逐镜头写文案**，编译器把文案
+- **智能创作 · agent 逐步执行（V8.0，默认路径）**：创作类任务（"帮我剪个视频" /
+  一键成片 / Vlog）由 **agent 驱动整个工作流**——`list_shots()` 拿**全量镜头池**
+  （**不做粗筛**，poor/高静音/过短仅 ⚠ 标注，判断权在模型）→ 自己筛选
+  （借 FireRed 硬规则：≤5 不删、保留 >80%、相似留优）→ 按 Hook→Core→Vibe→End
+  **分组叙事**（场景聚合、单组 2-4 镜）→ **写整段旁白**（第一人称、组时长 ×
+  3~5 字/秒，`_narration` 按叙事组进计划）→ `list_music()` **自选 BGM** 写 audio
+  块 → `submit_plan` **手写完整计划**。时间轴数学、旁白铺轴（字数加权、句可跨
+  剪辑点）、渲染、回验仍是编译器的确定性职责——「LLM 出意图、编译器保正确」
+  不变，Preflight 防线（越界/编造 probe）原样承接手写计划。
+- **智能创作 · 宏兜底（V7/V7.2，降位保留）**：`smart_create` 工作流宏——编译器先确定性
+  选材（画质选材 → **最短 1.5s 门槛** → **跨素材轮转装填**，闪帧不入片、
+  多素材都出镜；**V8.0 起宏路径也取消素材级粗筛**，废信号在镜头级拒绝），
+  再把**选中的镜头序列**回喂模型**逐镜头写文案**，编译器把文案
   **逐片段绑定**烧录成底部字幕（也可在计划里自带 captions，数量对齐时同样逐段绑定）；
   镜头切分带护栏（<0.5s 碎段并入相邻段、平均粒度 <1.5s 判误切升阈值重试）；
   `subtitle_style: "credits"`（V7.3）可切**致谢滚动字幕**：全部文案合并成一整块
@@ -282,6 +292,8 @@ pip install transnetv2_pytorch==1.0.5   # MIT，包内自带权重，CPU 可跑
 
 ## 技术文档
 
+- [docs/v8.0-agent-workflow.md](docs/v8.0-agent-workflow.md) —— V8.0 创作流 agent 化（list_shots/list_music 工具 / FireRed 筛选分组规则进提示词 / _narration 手写键 / 取消粗筛 / 宏降位兜底）
+- [docs/v7.11-caption-pipeline.drawio.png](docs/v7.11-caption-pipeline.drawio.png) —— V7.11 旁白制数据流图（分组 → 断句 → 铺轴）
 - [docs/v7.9-transnet-rescue.md](docs/v7.9-transnet-rescue.md) —— V7.9/V7.10 TransNetV2 镜头切分（过碎复核 → 主切分器 / 可选依赖优雅降级 / segmentation 字段）
 - [docs/v7.8-precheck-offset.md](docs/v7.8-precheck-offset.md) —— V7.8 dry-run 预检挂起修复（xfade offset 压平 / 报错原因优先级）
 - [docs/v7.7-preview-quality.md](docs/v7.7-preview-quality.md) —— V7.7 预览档渲染（快速预览/导出成品双档位 / 档位不污染计划 / 缓存分档 / 调整环路秒级化）

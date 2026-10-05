@@ -28,7 +28,7 @@
         <mxCell id="n4" value="probe_media&#xa;探测时长 / 分辨率 / 音轨" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;" vertex="1" parent="sw2">
           <mxGeometry x="240" y="76" width="230" height="60" as="geometry" />
         </mxCell>
-        <mxCell id="n5" value="推理剪辑方案&#xa;手写 clips / select /&#xa;workflow 宏（一键成片）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;" vertex="1" parent="sw2">
+        <mxCell id="n5" value="推理剪辑方案&#xa;手写 clips / select 宏 /&#xa;创作流 agent 逐步执行（V8）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;" vertex="1" parent="sw2">
           <mxGeometry x="510" y="76" width="225" height="60" as="geometry" />
         </mxCell>
         <mxCell id="n6" value="submit_plan&#xa;提交「编辑计划 JSON」" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;fontStyle=1;" vertex="1" parent="sw2">
