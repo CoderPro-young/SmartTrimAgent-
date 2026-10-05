@@ -28,7 +28,7 @@
         <mxCell id="q2" value="probe_media&#xa;ffprobe：时长 / 分辨率 / 音轨" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;" vertex="1" parent="sw2">
           <mxGeometry x="260" y="66" width="220" height="60" as="geometry" />
         </mxCell>
-        <mxCell id="q3" value="analyze_media（语义任务才调用）&#xa;VLM 内容卡：场景 / 画质 / 人数&#xa;结果缓存 TMP/probe/" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;" vertex="1" parent="sw2">
+        <mxCell id="q3" value="analyze_media（语义任务才调用）&#xa;TransNetV2/场景切分 + VLM 内容卡：&#xa;场景 / 画质 / 人数 / desc · 静音/黑场信号&#xa;缓存 TMP/probe/（上传即索引）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;" vertex="1" parent="sw2">
           <mxGeometry x="520" y="66" width="260" height="60" as="geometry" />
         </mxCell>
         <mxCell id="q4" value="推理剪辑方案&#xa;（系统提示词含能力清单与用法）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;" vertex="1" parent="sw2">
@@ -50,7 +50,7 @@
         <mxCell id="r2" value="preflight check_material_fit&#xa;计划 ↔ 素材实况匹配（真实探针 / 内容卡）&#xa;D4：修订轮产物自动改名防覆盖" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" vertex="1" parent="sw3">
           <mxGeometry x="400" y="60" width="320" height="75" as="geometry" />
         </mxCell>
-        <mxCell id="r3" value="compile_plan 编译&#xa;宏 / 筛选 / 剪除展开 → 时间轴数学&#xa;→ 归一化 + 渲染命令序列" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" vertex="1" parent="sw3">
+        <mxCell id="r3" value="compile_plan 编译&#xa;宏 / 筛选 / 剪除展开 → 字幕/配乐 → 时间轴数学&#xa;→ dry-run 预检 → 归一化 + 渲染命令序列" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" vertex="1" parent="sw3">
           <mxGeometry x="770" y="60" width="290" height="75" as="geometry" />
         </mxCell>
         <mxCell id="r4" value="可执行计划 → 渲染管线（见 architecture-flow 总览图）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;fontStyle=1;" vertex="1" parent="sw3">
@@ -66,7 +66,7 @@
         <mxCell id="s2" value="face_mosaic（PREPASS 类）&#xa;前置 OpenCV YuNet 人脸检测打码&#xa;归一化输入自动替换为打码产物" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;" vertex="1" parent="sw4">
           <mxGeometry x="410" y="65" width="300" height="105" as="geometry" />
         </mxCell>
-        <mxCell id="s3" value="计划级编译展开（非 effects）&#xa;workflow 宏：smart_create / one_click_reel / speech_clean&#xa;select 镜头筛选宏&#xa;cut_silence / cut_black 保留子段" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;" vertex="1" parent="sw4">
+        <mxCell id="s3" value="计划级编译展开（非 effects）&#xa;workflow 宏：smart_create / one_click_reel / speech_clean&#xa;（bgm / 字幕样式 / 文案参数）· select 镜头筛选宏&#xa;cut_silence / cut_black 保留子段" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;" vertex="1" parent="sw4">
           <mxGeometry x="750" y="65" width="310" height="105" as="geometry" />
         </mxCell>
         <mxCell id="s4" value="注册表单一生效点：新技能注册一行 → 提示词（render_prompt_doc）/ 校验白名单（effects_menu）/ 编译器映射同步生效" style="text;html=1;align=left;verticalAlign=middle;fontSize=12;fontStyle=2;fontColor=#4d7d43;" vertex="1" parent="sw4">

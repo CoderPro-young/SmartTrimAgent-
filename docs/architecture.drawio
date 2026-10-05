@@ -8,7 +8,7 @@
         <mxCell id="a_user" value="用户（自然语言 / 网页操作）" style="rounded=1;whiteSpace=wrap;html=1;dashed=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=13;" vertex="1" parent="1">
           <mxGeometry x="270" y="40" width="300" height="40" as="geometry" />
         </mxCell>
-        <mxCell id="a_note" value="◆ = 本次工作区改动（V7.3 credits / V7.4 文案模块 / V7.5 自动配乐，尚未提交）" style="text;html=1;align=left;verticalAlign=middle;fontColor=#b85450;fontSize=11;" vertex="1" parent="1">
+        <mxCell id="a_note" value="◆ = 智能创作线（V7.3–V7.5：字幕样式 / 文案链 / 自动配乐）相关模块" style="text;html=1;align=left;verticalAlign=middle;fontColor=#b85450;fontSize=11;" vertex="1" parent="1">
           <mxGeometry x="620" y="45" width="580" height="30" as="geometry" />
         </mxCell>
         <mxCell id="a_entry" value="入口层" style="swimlane;startSize=30;html=1;whiteSpace=wrap;fontSize=13;fontStyle=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
@@ -35,7 +35,7 @@
         <mxCell id="a_perc" value="感知层（旁路 · sidecar 缓存）" style="swimlane;startSize=30;html=1;whiteSpace=wrap;fontSize=13;fontStyle=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
           <mxGeometry x="840" y="280" width="360" height="250" as="geometry" />
         </mxCell>
-        <mxCell id="a_ca" value="content_analysis.py&#xa;场景切分 + VLM 打标 → 镜头级内容卡" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;fontSize=11;" vertex="1" parent="a_perc">
+        <mxCell id="a_ca" value="content_analysis.py TransNetV2 主切分（V7.9/10）+ 场景切分兜底 + VLM 打标（desc）→ 镜头级内容卡" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;fontSize=11;" vertex="1" parent="a_perc">
           <mxGeometry x="25" y="45" width="310" height="60" as="geometry" />
         </mxCell>
         <mxCell id="a_sd" value="signal_detection.py&#xa;静音 / 黑场信号（并入内容卡）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;fontSize=11;" vertex="1" parent="a_perc">
@@ -50,7 +50,7 @@
         <mxCell id="a_schema" value="plan_schema.py ◆&#xa;计划校验&#xa;白名单 + 语义规则" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="a_comp">
           <mxGeometry x="25" y="45" width="200" height="100" as="geometry" />
         </mxCell>
-        <mxCell id="a_wf" value="workflow.py ◆&#xa;宏：smart_create / one_click_reel / speech_clean&#xa;V7.3 credits · V7.4 文案链 · V7.5 自动配乐" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="a_comp">
+        <mxCell id="a_wf" value="workflow.py ◆ 宏：smart_create / one_click_reel / speech_clean · V7.3–V7.6 字幕/文案/配乐" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="a_comp">
           <mxGeometry x="245" y="45" width="275" height="100" as="geometry" />
         </mxCell>
         <mxCell id="a_sel" value="shot_select.py 镜头筛选纯函数" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d6b656;fontSize=10;" vertex="1" parent="a_comp">
@@ -62,7 +62,7 @@
         <mxCell id="a_tle" value="timeline_export.py EDL/CSV" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d6b656;fontSize=10;" vertex="1" parent="a_comp">
           <mxGeometry x="540" y="117" width="195" height="28" as="geometry" />
         </mxCell>
-        <mxCell id="a_pc" value="plan_compiler.py ◆ — 宏展开 → 时间轴换算 → ffmpeg 命令生成 → 执行 → 回验" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d6b656;fontSize=12;" vertex="1" parent="a_comp">
+        <mxCell id="a_pc" value="plan_compiler.py ◆ — 宏展开 → 铺字幕/配乐 → 时间轴换算 → dry-run 预检 → 命令生成 → 执行 → 回验（预览/导出双档）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d6b656;fontSize=12;" vertex="1" parent="a_comp">
           <mxGeometry x="25" y="160" width="710" height="60" as="geometry" />
         </mxCell>
         <mxCell id="a_exec" value="执行层" style="swimlane;startSize=30;html=1;whiteSpace=wrap;fontSize=13;fontStyle=1;fillColor=#ffe6cc;strokeColor=#d79b00;" vertex="1" parent="1">
@@ -146,10 +146,10 @@
         <mxCell id="b_cap" value="③ 字幕逐片段绑定烧录&#xa;bottom 底部字幕 / credits 致谢滚动（V7.3）&#xa;credits + 自带文案：行数 × 1.2s 定长 → 画面填满" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;" vertex="1" parent="1">
           <mxGeometry x="60" y="460" width="360" height="75" as="geometry" />
         </mxCell>
-        <mxCell id="b_bgm" value="④ 自动配乐（V7.5）&#xa;纯音频候选 →（多首 LLM 终选）→ 低音量 + 淡入淡出 + 循环 + 人声闪避&#xa;失败不卡出片；优先级 计划 audio &gt; workflow.bgm &gt; 自动选曲" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;" vertex="1" parent="1">
+        <mxCell id="b_bgm" value="④ 自动配乐（V7.5→V7.7 纯 BGM） 候选 →（多首 LLM 终选）→ 原声静音 · 音量1.0 + fade + 循环（keep 才混音+闪避）；优先级 计划 audio > workflow.bgm > 自动" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;" vertex="1" parent="1">
           <mxGeometry x="460" y="460" width="380" height="75" as="geometry" />
         </mxCell>
-        <mxCell id="b_comp" value="plan_compiler ◆ — 时间轴换算 → ffmpeg 命令生成" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+        <mxCell id="b_comp" value="plan_compiler ◆ — 铺字幕/配乐 → 时间轴换算 → 命令生成（预检后）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;fontStyle=1;" vertex="1" parent="1">
           <mxGeometry x="230" y="590" width="420" height="50" as="geometry" />
         </mxCell>
         <mxCell id="b_ff" value="ffmpeg 渲染 + ffprobe 回验" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" vertex="1" parent="1">

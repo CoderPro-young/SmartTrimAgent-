@@ -28,8 +28,8 @@
         <mxCell id="n4" value="probe_media&#xa;探测时长 / 分辨率 / 音轨" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;" vertex="1" parent="sw2">
           <mxGeometry x="240" y="76" width="230" height="60" as="geometry" />
         </mxCell>
-        <mxCell id="n5" value="推理剪辑方案&#xa;（算裁剪点、转场）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;" vertex="1" parent="sw2">
-          <mxGeometry x="510" y="76" width="160" height="60" as="geometry" />
+        <mxCell id="n5" value="推理剪辑方案&#xa;手写 clips / select /&#xa;workflow 宏（一键成片）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;" vertex="1" parent="sw2">
+          <mxGeometry x="510" y="76" width="225" height="60" as="geometry" />
         </mxCell>
         <mxCell id="n6" value="submit_plan&#xa;提交「编辑计划 JSON」" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;fontStyle=1;" vertex="1" parent="sw2">
           <mxGeometry x="770" y="76" width="240" height="60" as="geometry" />
@@ -38,32 +38,32 @@
         <mxCell id="sw3" value="③ 下游编译器 —— 把意图编译成确定性命令" style="swimlane;startSize=32;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;swimlaneFillColor=#fffaf5;fontStyle=1;fontSize=13;verticalAlign=middle;align=left;spacingLeft=12;" vertex="1" parent="1">
           <mxGeometry x="140" y="450" width="1100" height="240" as="geometry" />
         </mxCell>
-        <mxCell id="n7" value="① 校验&#xa;schema + 语义规则" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" vertex="1" parent="sw3">
-          <mxGeometry x="40" y="85" width="170" height="60" as="geometry" />
+        <mxCell id="n7" value="① 校验 + Preflight&#xa;schema · 白名单 · 素材实况&#xa;（用户可决 → 反问）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" vertex="1" parent="sw3">
+          <mxGeometry x="40" y="85" width="210" height="60" as="geometry" />
         </mxCell>
-        <mxCell id="n8" value="② 推导时间轴数学&#xa;片段时长 / 起点 / 总时长" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" vertex="1" parent="sw3">
-          <mxGeometry x="250" y="85" width="200" height="60" as="geometry" />
+        <mxCell id="n8" value="② 宏/剪除展开 + 时间轴数学&#xa;workflow · select · cut_silence →&#xa;片段时长 / 起点 / 总时长" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" vertex="1" parent="sw3">
+          <mxGeometry x="250" y="85" width="240" height="60" as="geometry" />
         </mxCell>
-        <mxCell id="n9" value="③ 生成命令序列" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" vertex="1" parent="sw3">
+        <mxCell id="n9" value="③ dry-run 预检&#xa;+ 生成命令序列" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" vertex="1" parent="sw3">
           <mxGeometry x="490" y="85" width="160" height="60" as="geometry" />
         </mxCell>
         <mxCell id="n10" value="detect　人脸检测打码（OpenCV YuNet）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" vertex="1" parent="sw3">
           <mxGeometry x="710" y="30" width="300" height="40" as="geometry" />
         </mxCell>
-        <mxCell id="n11" value="normalize　统一分辨率 / 帧率 / 音轨" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" vertex="1" parent="sw3">
+        <mxCell id="n11" value="normalize　统一规格 + clip 级控声（静音/换声，V7.7）· 内容寻址缓存" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" vertex="1" parent="sw3">
           <mxGeometry x="710" y="95" width="300" height="40" as="geometry" />
         </mxCell>
-        <mxCell id="n12" value="render　转场 + 叠加 + 按档位编码输出" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" vertex="1" parent="sw3">
+        <mxCell id="n12" value="render　转场 + 字幕/叠加 + BGM 混音 · 按档位编码输出" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" vertex="1" parent="sw3">
           <mxGeometry x="710" y="160" width="300" height="40" as="geometry" />
         </mxCell>
 
         <mxCell id="sw4" value="④ 执行与回验" style="swimlane;startSize=32;html=1;fillColor=#d5e8d4;strokeColor=#82b366;swimlaneFillColor=#f8fdf7;fontStyle=1;fontSize=13;verticalAlign=middle;align=left;spacingLeft=12;" vertex="1" parent="1">
           <mxGeometry x="140" y="740" width="1100" height="130" as="geometry" />
         </mxCell>
-        <mxCell id="n13" value="逐条执行（subprocess）&#xa;归一化缓存：未改片段直接复用" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;" vertex="1" parent="sw4">
+        <mxCell id="n13" value="执行（subprocess）· detect/normalize 并行&#xa;归一化缓存：未改片段直接复用" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;" vertex="1" parent="sw4">
           <mxGeometry x="50" y="45" width="230" height="55" as="geometry" />
         </mxCell>
-        <mxCell id="n14" value="ffprobe 回验&#xa;实际时长 vs 预期" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;" vertex="1" parent="sw4">
+        <mxCell id="n14" value="ffprobe 回验 + EDL/CSV&#xa;时长 vs 预期 · 时间线交付物" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;" vertex="1" parent="sw4">
           <mxGeometry x="320" y="45" width="160" height="55" as="geometry" />
         </mxCell>
         <mxCell id="n17" value="预览档产物（V7.7）&#xa;*_preview.mp4 · 540p 快编 · 秒级" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;fontStyle=1;" vertex="1" parent="sw4">
@@ -121,14 +121,14 @@
         <mxCell id="e_sw1_sw2" value="需求 + 素材" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;fontSize=12;strokeWidth=2;" edge="1" parent="1" source="sw1" target="sw2">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="e_sw2_sw3" value="编辑计划 JSON（LLM 唯一的产出物）" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;fontSize=12;strokeWidth=2;" edge="1" parent="1" source="sw2" target="sw3">
+        <mxCell id="e_sw2_sw3" value="编辑计划 JSON / workflow 宏（LLM 唯一的产出物）" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;fontSize=12;strokeWidth=2;" edge="1" parent="1" source="sw2" target="sw3">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
         <mxCell id="e_sw3_sw4" value="命令序列" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;fontSize=12;strokeWidth=2;" edge="1" parent="1" source="sw3" target="sw4">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
 
-        <mxCell id="e_retry" value="校验失败：错误回传 LLM 重出计划（≤2 次）" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;dashed=1;strokeColor=#b85450;fontColor=#b85450;fontSize=11;strokeWidth=1.5;" edge="1" parent="1" source="sw3" target="sw2">
+        <mxCell id="e_retry" value="校验/编译失败：模型可修 → 回传重出（≤2 次）&#xa;素材不满足 → 反问用户（零重试）" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;dashed=1;strokeColor=#b85450;fontColor=#b85450;fontSize=11;strokeWidth=1.5;" edge="1" parent="1" source="sw3" target="sw2">
           <mxGeometry relative="1" as="geometry">
             <Array as="points">
               <mxPoint x="1300" y="570" />
