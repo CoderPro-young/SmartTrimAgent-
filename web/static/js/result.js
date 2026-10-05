@@ -57,6 +57,11 @@ export function renderReport(rep, preview = false){
   const b = el('b', null, `本片 ${rep.clips} 个片段 · 总时长 ${fmtClock(rep.duration)}`);
   r.append(rline([b]));
 
+  /* V7.11 旁白制附带的全片标题（可复制去当发布文案） */
+  if (rep.title){
+    r.append(rline([el('span', null, `标题：${rep.title}`)]));
+  }
+
   if (rep.cuts && rep.cuts.length){
     const total = rep.removed_total_seconds ?? 0;
     const segs = rep.cuts.reduce((n, c) => n + (c.kept_segments || 0), 0);

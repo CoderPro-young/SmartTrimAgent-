@@ -1136,12 +1136,71 @@ def _expand_plan(plan: dict, project_root: str, run_fn=None) -> tuple[dict, dict
     return plan, expansions
 
 
-def _apply_captions(plan: dict, math: dict) -> None:
-    """smart_create 的文案铺字幕（V7.2 起默认逐片段绑定，V7.3 样式化）。
+def _apply_narration(plan: dict, math: dict, style: dict) -> None:
+    """V7.11 旁白铺轴（FireRed plan_timeline._build_subtitle_track 同构）：
 
-    credits（致谢滚动体）：优先级最高——全部文案行合并成一整块多行文本，
-    跨全片时长从画面底部匀速滚到顶部；排版参数来自 workflow.CAPTION_STYLES
-    预设，滚动原语见 _drawtext_chain。
+    每个叙事组取绝对时间窗 [首镜起点, 末镜终点]，组内字幕单元按时长
+    ∝ 字数加权分配（末条吃余数），游标累计铺满——一个镜头可挂多句、
+    一句可跨剪辑点（drawtext 的 enable 是绝对时间轴，天然支持）。
+    host 片段 = 覆盖该单元起点的镜头（组末兜底）。
+    """
+    narration = plan.pop("_narration", None)
+    if not narration:
+        return
+    overlays = plan.setdefault("overlays", [])
+    y_margin = _round2(int(math["height"]) * (style.get("bottom_margin_ratio") or 0))
+    fs = style.get("font_size", 44)
+    for g in narration:
+        clip_ids = [cid for cid in g.get("clip_ids") or [] if cid in math["starts"]]
+        units = [str(u).strip() for u in g.get("units") or [] if str(u).strip()]
+        if not clip_ids or not units:
+            continue
+        g_start = math["starts"][clip_ids[0]]
+        last = clip_ids[-1]
+        g_end = _round2(math["starts"][last] + (math["durations"][last] or 0))
+        span = max(0.2, g_end - g_start)
+        weights = [max(1, len(u)) for u in units]
+        total_w = sum(weights)
+        cursor = g_start
+        used = 0.0
+        for i, (u, w) in enumerate(zip(units, weights)):
+            if i == len(units) - 1:
+                dur = _round2(g_end - cursor)          # 末条吃余数（FireRed 同款）
+            else:
+                dur = _round2(span * w / total_w)
+                used = _round2(used + dur)
+            dur = max(0.4, dur)
+            ts = cursor
+            cursor = _round2(min(g_end, ts + dur))
+            # host：覆盖 ts 的镜头（组末兜底）
+            host = clip_ids[-1]
+            for cid in clip_ids:
+                s = math["starts"][cid]
+                d = math["durations"][cid] or 0
+                if s <= ts < s + d:
+                    host = cid
+                    break
+            overlays.append({
+                "type": "text",
+                "text": u,
+                "at_clip": host,
+                "start_offset": _round2(max(0.0, ts - math["starts"][host]) + 0.04),
+                "duration": round(max(0.4, dur - 0.08), 3),
+                "position": "bottom",
+                "font_size": fs,
+                "color": "#FFFFFF",
+                "y_margin": y_margin,
+            })
+
+
+def _apply_captions(plan: dict, math: dict) -> None:
+    """smart_create 的文案铺字幕（V7.2 逐片段绑定，V7.3 样式化，V7.11 旁白制）。
+
+    narration（旁白制，优先）：_narration 携带分组字幕单元，按字数加权
+    铺进各组的绝对时间窗——多句/镜、句可跨剪辑点（见 _apply_narration）。
+    credits（致谢滚动体）：全部文案行合并成一整块多行文本，跨全片时长
+    从画面底部匀速滚到顶部；排版参数来自 workflow.CAPTION_STYLES 预设，
+    滚动原语见 _drawtext_chain。
     其余样式按 V7.2 逻辑：文案行数 == 片段数 → 第 i 句贴第 i 个片段
     （文案跟着画面走；两端各留 0.05s 避开 fade 起止）。数量不齐（agent
     自带文案且数目对不上）时退回旧行为：逐行均分总时长。各种模式的
@@ -1151,11 +1210,14 @@ def _apply_captions(plan: dict, math: dict) -> None:
 
     captions = plan.pop("_captions", None)
     style_name = plan.pop("_caption_style", None) or DEFAULT_CAPTION_STYLE
+    style = CAPTION_STYLES.get(style_name) or CAPTION_STYLES[DEFAULT_CAPTION_STYLE]
+    if "_narration" in plan:
+        _apply_narration(plan, math, style)
+        return
     if not captions:
         return
     order = math["order"]
     overlays = plan.setdefault("overlays", [])
-    style = CAPTION_STYLES.get(style_name) or CAPTION_STYLES[DEFAULT_CAPTION_STYLE]
     if style["mode"] == "scroll":
         overlays.append({
             "type": "text",

@@ -64,6 +64,13 @@ omni 听感打标通道预留（DASHSCOPE_API_KEY + --provider omni）。本地
 DSP 推 mood 的方案实测不可行（RMS/响度密度/起始率均无感知区分度），
 已放弃——感知语义要么用人工标注，要么用音频大模型。
 
+V7.11 变更（旁白制，对比 FireRed generate_script/plan_timeline 的结论）：
+「一镜一句」升级为「按叙事组写整段旁白 → 标点断句 → 字符加权铺轴」——
+分组/断句/铺轴全是纯函数（_group_picked/_split_narration_units/
+plan_compiler._apply_narration），LLM 一次调用写全片旁白 + 标题（组字数
+预算 = 时长 × 3~5 字/秒）。一个镜头可挂多句、一句可跨剪辑点；失败静默
+回退一镜一句链；自带文案（plan）与 credits 滚动体不走旁白。
+
 V7.6 变更（文案质量）：打标加 desc 一句话画面描述（content_analysis，
 镜头卡的输入从标签词升级为具体画面）；_write_captions 重写 prompt
 （few-shot + 禁用词 + 首句钩子/末句收束），解析失败或句数不齐带反馈
@@ -598,6 +605,175 @@ def _label_captions(picked: list[dict]) -> list[str]:
     return caps
 
 
+# ------------------------------------------------- 旁白制（V7.11） ------- #
+# 对比 FireRed-OpenStoryline generate_script.py / plan_timeline.py 的结论：
+# 「一镜一句」是文案质感的瓶颈——他们按叙事组写整段旁白（字数预算 =
+# 组时长 × 3~5 字/秒），按标点确定性断句，再按字数加权铺进组的绝对
+# 时间窗（一个镜头可挂多句、一句可跨剪辑点）。本节把同一套结构搬进来：
+# 分组/断句/铺轴都是纯函数（编译器哲学），LLM 只负责写旁白本身。
+
+MAX_GROUP_SECONDS = 25.0     # 单组时长上限：旁白的最小叙事单元
+NARRATION_SPLIT_PUNCT = "。！？；，,.！？；"   # 断句标点（含中英）
+UNIT_MIN_CHARS = 5           # 短于此的断句碎片并入相邻单元
+UNIT_MAX_CHARS = 18          # 单条字幕上限，超出硬换行
+CAPTION_BANNED_WORDS = (
+    "治愈、宁静、岁月静好、定格、美好时光、难忘、风景如画、心旷神怡、"
+    "流连忘返、逃离城市、家人们谁懂啊、原来快乐如此简单")
+
+
+def _narration_budget(seconds: float) -> tuple[int, int]:
+    """组时长 → 旁白字数预算（FireRed _estimate_script_budget 同款公式）。"""
+    seconds = max(0.0, float(seconds or 0))
+    lo = max(round(seconds * 3), 8)
+    hi = max(round(seconds * 5), lo + 6)
+    return lo, hi
+
+
+def _group_picked(clips: list[dict], picked: list[dict]) -> list[dict]:
+    """选中镜头 → 叙事组（纯规则）：场景标签连续 + 组时长 ≤ 上限。
+
+    clips[i]["id"] 与 picked[i] 一一对应（select_shots 按同一次序构建）。
+    场景变化或超上限即开新组；每组至少一个镜头。
+    """
+    groups: list[dict] = []
+    for c, p in zip(clips, picked):
+        cid = c["id"]
+        d = round((c.get("trim_end") or 0) - (c.get("trim_start") or 0), 3)
+        scene = str((p.get("label") or {}).get("scene") or "").strip()
+        if groups and scene and groups[-1]["scene"] == scene \
+                and groups[-1]["seconds"] + d <= MAX_GROUP_SECONDS:
+            groups[-1]["clip_ids"].append(cid)
+            groups[-1]["seconds"] = round(groups[-1]["seconds"] + d, 3)
+        else:
+            groups.append({"group_id": f"g{len(groups) + 1}", "scene": scene,
+                           "clip_ids": [cid], "seconds": d})
+    for g in groups:
+        g.pop("scene")               # 内部字段，不进暂存键
+    return groups
+
+
+def _split_narration_units(text: str) -> list[str]:
+    """旁白段 → 字幕单元（纯函数）：标点断句 + 碎片并入前条 + 超长硬换行。"""
+    parts, buf = [], ""
+    for ch in str(text or ""):
+        buf += ch
+        if ch in NARRATION_SPLIT_PUNCT:
+            parts.append(buf)
+            buf = ""
+    if buf.strip():
+        parts.append(buf)
+    units = [p.strip("。，！？；,.!?；、 \n\t") for p in parts]
+    units = [u for u in units if u]
+    # 碎片并入前一条：自身太短、或前一条还太短时合并（合并后不超上限）
+    merged: list[str] = []
+    for u in units:
+        if merged and (len(u) < UNIT_MIN_CHARS or len(merged[-1]) < UNIT_MIN_CHARS) \
+                and len(merged[-1]) + len(u) <= UNIT_MAX_CHARS:
+            merged[-1] += u
+        else:
+            merged.append(u)
+    # 超长硬换行（中文无词边界，按字数切）
+    final: list[str] = []
+    for u in merged:
+        while len(u) > UNIT_MAX_CHARS:
+            final.append(u[:UNIT_MAX_CHARS])
+            u = u[UNIT_MAX_CHARS:]
+        if u:
+            final.append(u)
+    return final
+
+
+def _write_narration(clips: list[dict], picked: list[dict],
+                     keyword: str = "") -> tuple[list[dict] | None, str | None]:
+    """整片一次旁白（V7.11，FireRed 同构）：按组写整段 → 断句成字幕单元。
+
+    返回 (narration, title)；narration = [{group_id, clip_ids, units}]，
+    时间窗与加权铺轴由编译器在时间轴推导后完成（_apply_captions）。
+    解析失败/组缺失带反馈重试一次；两次不行返回 (None, None)，
+    调用方回退 CAPTION_PROVIDERS 链——旁白是升级不是依赖。
+    """
+    groups = _group_picked(clips, picked)
+    if not groups:
+        return None, None
+    # clips/picked 平行数组 → 组内镜头描述行
+    idx = 0
+    blocks = []
+    for g in groups:
+        lo, hi = _narration_budget(g["seconds"])
+        rows = []
+        for _ in g["clip_ids"]:
+            p = picked[idx]
+            lab = p.get("label") or {}
+            desc = str(lab.get("desc") or "").strip()
+            scene = str(lab.get("scene") or "").strip() or "未知"
+            rows.append(f"  - [{p.get('duration', 0):.1f}s] "
+                        + (desc if desc else f"场景={scene}"))
+            idx += 1
+        blocks.append(f"[{g['group_id']}] 时长 {g['seconds']:.1f}s "
+                      f"字数预算 {lo}~{hi} 字\n" + "\n".join(rows))
+    prompt = (
+        "你是资深短视频/Vlog 文案策划大师。你将化身视频的主角（第一人称「我」），"
+        "用轻叙事感的口语，把碎片素材串联成有温度、有逻辑的故事。\n"
+        "【输入】按播放顺序给出镜头组（组间有时长与字数预算，预算是关键约束，"
+        "按 3~5 字/秒 与时长匹配），组内每行列出一个镜头的真实画面。\n"
+        "【任务】为每组写一段旁白 raw_text：字数严格落在该组预算内；全片连贯——"
+        "第一组开头是钩子（提问/断言/悬念），最后一组收束（感受或呼应）；"
+        "同时为全片起一个标题。\n"
+        "【写法】第一人称「我」视角，口语化，像博主本人说话；用具体的名词和动作；"
+        "每组最多 1 个 emoji；不用括号和省略号。\n"
+        f"【禁用词】{CAPTION_BANNED_WORDS}。\n"
+        "【信息保真】只写画面里有的人/事/物，禁止编造画面没有的内容；专有名词保留。\n"
+        + (f"【主题关键词】{keyword}（在钩子或收束里体现）。\n" if keyword else "")
+        + "【输出】只输出 JSON：{\"title\": \"8~15字标题\", \"groups\": "
+        "[{\"group_id\": \"...\", \"raw_text\": \"...\"}]}，"
+        "groups 必须覆盖输入的每一个 group_id。\n\n镜头组：\n" + "\n\n".join(blocks))
+
+    def _invoke(text: str):
+        from model import get_model
+        msg = get_model().invoke(text)
+        content = msg.content if isinstance(msg.content, str) else "".join(
+            str(b.get("text") or "") for b in (msg.content or [])
+            if isinstance(b, dict))
+        s, e = content.find("{"), content.rfind("}")
+        if s < 0 or e <= s:
+            return None
+        try:
+            obj = json.loads(content[s:e + 1])
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(obj, dict):
+            return None
+        return obj
+
+    try:
+        obj = _invoke(prompt)
+        gmap = {str(x.get("group_id")): str(x.get("raw_text") or "").strip()
+                for x in (obj or {}).get("groups", []) if isinstance(x, dict)} \
+            if isinstance(obj, dict) else {}
+        if obj is None or not gmap or any(not gmap.get(g["group_id"]) for g in groups):
+            missing = [g["group_id"] for g in groups if not gmap.get(g["group_id"])]
+            why = "解析失败" if obj is None else f"缺少 {','.join(missing or ['全部'])} 组"
+            obj = _invoke(prompt + f"\n\n注意：你上一次的输出{why}。"
+                                    "请重新只输出符合要求的 JSON。")
+            gmap = {str(x.get("group_id")): str(x.get("raw_text") or "").strip()
+                    for x in (obj or {}).get("groups", []) if isinstance(x, dict)} \
+                if isinstance(obj, dict) else {}
+        if not gmap or any(not gmap.get(g["group_id"]) for g in groups):
+            return None, None
+        narration = []
+        for g in groups:
+            raw = gmap[g["group_id"]]
+            units = _split_narration_units(raw)
+            if not units:
+                return None, None
+            narration.append({"group_id": g["group_id"],
+                              "clip_ids": g["clip_ids"], "units": units})
+        title = str((obj or {}).get("title") or "").strip()[:30] or None
+        return narration, title
+    except Exception:
+        return None, None
+
+
 def _expand_smart_create(wf: dict, ctx: dict) -> tuple[dict, dict]:
     """智能创作（FireRed 一键成片的无配音版）：自动画面编排 + 文案烧录。
 
@@ -657,13 +833,22 @@ def _expand_smart_create(wf: dict, ctx: dict) -> tuple[dict, dict]:
         res = _fit_duration_to_captions(
             res, target, float(wf.get("transition", DEFAULT_TRANSITION)))
 
-    captions, cap_src = None, None
-    for provide in CAPTION_PROVIDERS.values():
-        captions, cap_src = provide(wf, res["picked"], ctx)
-        if captions:
-            break
-    if not captions:
-        raise ValueError("所有文案提供器都没有产出文案（plan/llm/labels 全部落空）。")
+    narration, title = None, None
+    if not plan_captions and style != "credits":
+        # V7.11 旁白制优先：整片一次按组写旁白（多句/镜、句可跨剪辑点）；
+        # 失败静默回退下方的一镜一句链——旁白是升级不是依赖
+        narration, title = _write_narration(res["clips"], res["picked"], keyword)
+
+    if narration:
+        captions, cap_src = None, "narration"
+    else:
+        captions, cap_src = None, None
+        for provide in CAPTION_PROVIDERS.values():
+            captions, cap_src = provide(wf, res["picked"], ctx)
+            if captions:
+                break
+        if not captions:
+            raise ValueError("所有文案提供器都没有产出文案（plan/llm/labels 全部落空）。")
 
     trans = wf.get("transition", DEFAULT_TRANSITION)
     timeline = []
@@ -676,13 +861,18 @@ def _expand_smart_create(wf: dict, ctx: dict) -> tuple[dict, dict]:
     plan = {
         "clips": res["clips"],
         "timeline": timeline,
-        "_captions": captions,          # 编译器推导时间轴后消费（见 _apply_captions）
-        "_caption_style": style,        # 排版预设名，随 _captions 一起暂存传递
     }
+    if narration:
+        plan["_narration"] = narration       # 编译器推导时间轴后消费（字符加权铺轴）
+    elif captions:
+        plan["_captions"] = captions         # 一镜一句回退路径（见 _apply_captions）
+    plan["_caption_style"] = style
     report = {
         "workflow": "smart_create",
-        "captions": len(captions),
+        "captions": (sum(len(g["units"]) for g in narration) if narration
+                     else len(captions or [])),
         "captions_source": cap_src,
+        "title": title,                      # V7.11 旁白制附带的全片标题
         "subtitle_style": style,
         "duration_source": duration_source,
         "target_seconds": target,

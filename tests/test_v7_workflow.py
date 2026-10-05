@@ -219,6 +219,9 @@ def t10_smart_create_without_captions_uses_llm_or_labels():
         ctx = _ctx(tmp, {"INPUT/a.mp4": CARDS["INPUT/a.mp4"]},
                    {"INPUT/a.mp4": PROBES["INPUT/a.mp4"]})
         orig = wf_mod._write_captions
+        # V7.11 旁白制打桩为失败：本用例测的是一镜一句回退链
+        orig_narr = wf_mod._write_narration
+        wf_mod._write_narration = lambda clips, picked, kw="": (None, None)
         # (1) LLM ok: one caption per picked shot, source = llm
         wf_mod._write_captions = lambda picked, kw="": (
             [f"shot{i}" for i in range(1, len(picked) + 1)], "llm")
@@ -230,7 +233,9 @@ def t10_smart_create_without_captions_uses_llm_or_labels():
             assert report["captions_source"] == "llm"
         finally:
             wf_mod._write_captions = orig
+            wf_mod._write_narration = orig_narr
         # (2) LLM failed -> label captions fallback
+        wf_mod._write_narration = lambda clips, picked, kw="": (None, None)
         wf_mod._write_captions = lambda picked, kw="": (None, "failed")
         try:
             plan2, report2 = wf_mod.WORKFLOWS["smart_create"].expand(
@@ -240,6 +245,7 @@ def t10_smart_create_without_captions_uses_llm_or_labels():
             assert all(isinstance(x, str) and x for x in plan2["_captions"])
         finally:
             wf_mod._write_captions = orig
+            wf_mod._write_narration = orig_narr
 
 
 def t10b_write_captions_parses_llm_json_offline():
