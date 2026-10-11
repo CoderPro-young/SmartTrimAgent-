@@ -16,12 +16,15 @@
 - **粗剪 · 批量镜头筛选（V5）**：`select` 筛选宏 ——按内容卡标签（场景 / 人数 / 画质 /
   静音比…）+ 时长预算，编译器从卡片确定性生成片段，模型不手抄时间区间
 - **智能创作 · agent 逐步执行（V8.0，默认路径）**：创作类任务（"帮我剪个视频" /
-  一键成片 / Vlog）由 **agent 驱动整个工作流**——`list_shots()` 拿**全量镜头池**
-  （**不做粗筛**，poor/高静音/过短仅 ⚠ 标注，判断权在模型）→ 自己筛选
-  （借 FireRed 硬规则：≤5 不删、保留 >80%、相似留优）→ 按 Hook→Core→Vibe→End
+  一键成片 / Vlog）由 **agent 驱动整个工作流**——按**创作 skill 注册表**（V8.1：
+  general/travel/food 三模板，按任务意图路由）的七步流程走：`list_shots()` 拿**全量镜头池**
+  （**不做粗筛**，poor/高静音/过短仅 ⚠ 标注，判断权在模型；镜头带 **aes_score
+  美学分** 0~1，V8.3）→ 自己筛选（借 FireRed 硬规则：≤5 不删、保留 >80%、
+  相似镜头留 aes_score 高者）→ 按 Hook→Core→Vibe→End
   **分组叙事**（场景聚合、单组 2-4 镜）→ **写整段旁白**（第一人称、组时长 ×
   3~5 字/秒，`_narration` 按叙事组进计划）→ `list_music()` **自选 BGM** 写 audio
-  块 → `submit_plan` **手写完整计划**。时间轴数学、旁白铺轴（字数加权、句可跨
+  块（可加 `"snap_beats": true` 开**节拍卡点**——编译器检测 BGM 节拍，把剪辑点
+  吸附到拍上，单次 ≤±0.35s，V8.2）→ `submit_plan` **手写完整计划**。时间轴数学、旁白铺轴（字数加权、句可跨
   剪辑点）、渲染、回验仍是编译器的确定性职责——「LLM 出意图、编译器保正确」
   不变，Preflight 防线（越界/编造 probe）原样承接手写计划。
 - **智能创作 · 宏兜底（V7/V7.2，降位保留）**：`smart_create` 工作流宏——编译器先确定性
@@ -292,6 +295,7 @@ pip install transnetv2_pytorch==1.0.5   # MIT，包内自带权重，CPU 可跑
 
 ## 技术文档
 
+- [docs/v8.1-registry-beats-aes.md](docs/v8.1-registry-beats-aes.md) —— V8.1–V8.3 创作流注册表化（general/travel/food 多模板）/ BGM 节拍卡点（audio.snap_beats，±0.35s 边界吸附）/ aes_score 美学分
 - [docs/v8.0-agent-workflow.md](docs/v8.0-agent-workflow.md) —— V8.0 创作流 agent 化（list_shots/list_music 工具 / FireRed 筛选分组规则进提示词 / _narration 手写键 / 取消粗筛 / 宏降位兜底）
 - [docs/v7.11-caption-pipeline.drawio.png](docs/v7.11-caption-pipeline.drawio.png) —— V7.11 旁白制数据流图（分组 → 断句 → 铺轴）
 - [docs/v7.9-transnet-rescue.md](docs/v7.9-transnet-rescue.md) —— V7.9/V7.10 TransNetV2 镜头切分（过碎复核 → 主切分器 / 可选依赖优雅降级 / segmentation 字段）
