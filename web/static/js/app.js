@@ -55,8 +55,31 @@ materials.setMaterialsCallback(has => {
   $('#send').title = has === false ? '请先上传素材' : '';
 });
 
+/* ---------- 等待指示（后端 heartbeat 驱动：LLM/渲染静默期可见） ---------- */
+let waitTicker = null, waitBase = { idle: 0, at: 0 };
+
+function markWaiting(idle){
+  if (!(idle >= 5)) return;                       // 短暂间隙不闪条
+  waitBase = { idle, at: Date.now() };
+  $('#waitBar').hidden = false;
+  if (!waitTicker){ paintWaiting(); waitTicker = setInterval(paintWaiting, 1000); }
+}
+function paintWaiting(){
+  const s = waitBase.idle + (Date.now() - waitBase.at) / 1000;
+  $('#waitBar').classList.toggle('slow', s >= 60);
+  $('#waitText').textContent = s >= 60
+    ? `后端响应偏慢 · 已等待 ${Math.floor(s)}s（请求超时会自动重试，也可点「取消」）`
+    : `模型响应中 · 已等待 ${Math.floor(s)}s`;
+}
+function clearWaiting(){
+  $('#waitBar').hidden = true;
+  if (waitTicker){ clearInterval(waitTicker); waitTicker = null; }
+}
+
 /* ---------- 事件分发 ---------- */
 function handleEvent(ev){
+  if (ev.type === 'heartbeat'){ markWaiting(ev.idle); return; }
+  clearWaiting();                                  // 任何真实事件都算有进展
   switch (ev.type){
     case 'attempt':
       if (ev.max > 1) chat.addSys(`第 ${ev.n}/${ev.max} 轮：让 agent 出编辑计划…`, true);
@@ -122,6 +145,7 @@ async function streamRun(url, payload, { silentUser = null } = {}){
   } catch (e){
     chat.addError('请求失败：' + e.message);
   } finally {
+    clearWaiting();
     stopTimer();
     setBusy(false);
   }

@@ -21,6 +21,13 @@ from langchain_core.language_models import BaseChatModel
 # 已存在的环境变量不会被覆盖，所以命令行 export 的值优先于 .env。
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 
+# 主模型单次请求超时（秒）与 SDK 级重试次数，可用环境变量覆盖。
+# 2026-10-11 线上实测：不设超时的话，一次挂起的请求能无声吊 10+ 分钟（前端零反馈）；
+# 超时后由 openai SDK 指数退避自动重试，重试耗尽才把异常抛给上层 plan_with_retry。
+# 注意在 load_dotenv 之后取值，.env 里配的 MODEL_TIMEOUT 才能生效。
+MODEL_TIMEOUT = float(os.environ.get("MODEL_TIMEOUT", "180"))
+MODEL_RETRIES = int(os.environ.get("MODEL_RETRIES", "2"))
+
 
 def get_model() -> BaseChatModel:
     """按优先级解析模型配置，返回可直接传给 create_deep_agent 的模型实例。"""
@@ -44,6 +51,8 @@ def get_model() -> BaseChatModel:
                 "SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1"
             ),
             temperature=0,
+            timeout=MODEL_TIMEOUT,
+            max_retries=MODEL_RETRIES,
         )
 
     # 3) 任意 OpenAI 兼容端点（OpenAI / DeepSeek / 本地 vLLM 等）
@@ -56,6 +65,8 @@ def get_model() -> BaseChatModel:
             api_key=openai_key,
             base_url=os.environ.get("OPENAI_BASE_URL"),
             temperature=0,
+            timeout=MODEL_TIMEOUT,
+            max_retries=MODEL_RETRIES,
         )
 
     # 4) Anthropic 兼容端点（Claude / DashScope Qwen 等）

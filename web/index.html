@@ -24,6 +24,10 @@
     <div class="scroll" id="chatScroll"><div id="msgs"></div></div>
     <div class="composer">
       <input type="file" id="fileInput" multiple hidden>
+      <div class="waitbar" id="waitBar" hidden
+           title="事件流静默期由后端心跳驱动；后端超时会自动重试，长时间无进展可点「取消」">
+        <span class="wdot"></span><span id="waitText">等待后端响应…</span>
+      </div>
       <div class="toolbar">
         <button class="btn-flat" id="newTaskBtn">启动新任务</button>
         <span class="tsep"></span>

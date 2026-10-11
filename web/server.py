@@ -79,6 +79,17 @@ FRAMES_DIR = os.path.join(TMP_DIR, "probe", "frames")
 STATIC_DIR = os.path.join(WEB_DIR, "static")
 MAX_UPLOAD = 500 * 1024 * 1024   # 单文件上限，可用 --max-upload-mb 覆盖
 
+# 静默期心跳间隔（秒）：LLM 调用 / ffmpeg 渲染等无事件阶段，前端靠它显示等待状态
+HEARTBEAT_INTERVAL = 5.0
+
+
+def _heartbeat_pump(events: "queue.Queue", stop: threading.Event,
+                    last_ts: list, interval: float = HEARTBEAT_INTERVAL) -> None:
+    """runner 长时间不发事件时按周期补一条 heartbeat 事件（idle = 距上一真实事件秒数）。"""
+    while not stop.wait(interval):
+        events.put({"type": "heartbeat",
+                    "idle": round(time.monotonic() - last_ts[0], 1)})
+
 # 「取消任务」：置位后各阶段检查点抛出/返回，ffmpeg 进程由 kill_all 硬终止
 CANCEL = threading.Event()
 
@@ -1419,7 +1430,11 @@ class Handler(BaseHTTPRequestHandler):
             lambda emit: _safe_run(task, emit, session_id, preview))
 
     def _stream_ndjson(self, runner) -> None:
-        """公共 NDJSON 事件流：后台线程跑 runner(emit)，主连接逐行写出事件。"""
+        """公共 NDJSON 事件流：后台线程跑 runner(emit)，主连接逐行写出事件。
+
+        静默期（LLM 调用、渲染等）由心跳线程兜底发 heartbeat，前端据此显示
+        「已等待 Xs」；真实事件到达时前端立即收起等待条。
+        """
         self.close_connection = True
         self.send_response(200)
         self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
@@ -1428,10 +1443,15 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
         events: queue.Queue = queue.Queue()
+        stop = threading.Event()
+        last_ts = [time.monotonic()]
 
         def emit(ev) -> None:
+            last_ts[0] = time.monotonic()
             events.put(ev)
 
+        threading.Thread(target=_heartbeat_pump, args=(events, stop, last_ts),
+                         daemon=True).start()
         threading.Thread(target=runner, args=(emit,), daemon=True).start()
 
         while True:
@@ -1442,7 +1462,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write((json.dumps(ev, ensure_ascii=False, default=str) + "\n").encode("utf-8"))
                 self.wfile.flush()
             except (BrokenPipeError, ConnectionResetError):
-                return  # 前端关掉了页面
+                break  # 前端关掉了页面（后台 runner 继续跑完）
+        stop.set()
 
     def log_message(self, fmt: str, *args) -> None:
         sys.stderr.write("[web] %s - %s\n" % (self.address_string(), fmt % args))
