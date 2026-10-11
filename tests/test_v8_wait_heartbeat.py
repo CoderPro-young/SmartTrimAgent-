@@ -92,7 +92,9 @@ def main():
           len(beats2) >= 2 and beats2[-1] < 10 and beats2[0] > 5,
           f"beats={beats2}")
 
-    # t3 stop 置位后泵及时退出
+    # t3 stop 置位后泵及时退出（join 等待调度，避免 stop 后立即 is_alive 的竞态）
+    pump.join(timeout=2)
+    pump2.join(timeout=2)
     check("t3 stop 后泵退出", not pump.is_alive() and not pump2.is_alive())
 
     print("== 主模型超时/重试 ==")
