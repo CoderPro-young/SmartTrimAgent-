@@ -23,6 +23,7 @@ import plan_compiler
 import plan_schema
 from model import get_model
 from skills import AUDIO_PROMPT_DOC, render_prompt_doc
+from creative_skills import render_creative_doc
 from workflow import render_workflow_doc
 
 # 仓库根：INPUT/ OUTPUT/ 在根下，LocalShellBackend 也锚定到根
@@ -217,59 +218,7 @@ with the `submit_plan` tool.
    `ask_user` instead: state the real facts you probed and offer concrete
    options the user can pick from.
 
-## Creative workflow (V8 — for "make me a video" / one-click creation tasks)
-
-When the user wants a CREATED piece ("帮我剪个视频", "make a vlog", "一键成片",
-"做成带文案的成片"), YOU drive the editing workflow step by step — the
-judgment calls (which shots, what order, what text, which music) are YOURS;
-timeline math and rendering stay with the deterministic compiler:
-
-1. `ls INPUT/` → `analyze_media` on every video material (cards are usually
-   pre-built on upload; missing ones are listed by `list_shots`).
-2. Call `list_shots()` — the FULL cross-material shot pool, one line per shot
-   (id / source / time range / duration / scene / people / quality / desc).
-   Shots marked ⚠ (poor quality, mostly silent, very short) are listed too;
-   there is NO pre-culling — you decide.
-3. **Filter (your judgment)**: keep the shots that serve the request.
-   Hard rules (borrowed from OpenStoryline): if the pool has ≤5 shots, drop
-   none; otherwise keep MORE than 80% and at least 5; among near-duplicate
-   shots keep the better quality / better-paced one; ⚠ shots are usually
-   dropped unless the content is uniquely valuable.
-4. **Group into a narrative (your judgment)**: order groups as
-   Hook (grab attention) → Core (the substance) → Vibe (atmosphere) →
-   End (closing beat); aggregate same-scene shots and never interleave
-   scene A → B → A; each group 2–4 shots / 3–20s unless the material
-   forces otherwise.
-5. **Write narration (you write it)**: for each group write ONE flowing
-   first-person narration paragraph (Chinese, concrete nouns and actions,
-   no clichés like 治愈/岁月静好/美好时光, no addressing the label words);
-   budget 3–5 characters per second of group duration. Also produce a
-   short title for the whole piece.
-6. **Pick music (you pick)**: `list_music()` → write the chosen track into
-   the top-level `audio` block ({"source": ..., "volume": 1.0, "loop": true}
-   — original sound is muted by default when BGM is present). No music
-   wanted → omit the `audio` block.
-7. `submit_plan` a HAND-WRITTEN complete plan: `clips` whose trim values are
-   the card shot boundaries (may split/merge shots, mind the durations),
-   `timeline` with fade transitions, plus these agent-only keys:
-   `"_title": "<piece title>"`,
-   `"_narration": [{"group_id": "g1", "clip_ids": ["c1","c2"],
-                     "text": "<the whole narration paragraph for this group>",
-                     "units": ["句一。", "句二。"]}, ...]`
-   (`text` = the group's raw narration paragraph; `units` = the same text
-   split into subtitle sentences — you may omit `units` and the compiler
-   will split `text` deterministically by punctuation). The compiler lays
-   the units onto each group's time window proportionally to character
-   count — one shot may carry several sentences, a sentence may cross a
-   cut point.
-   For simple one-line-per-shot captions use `"_captions": [...]` +
-   `"_caption_style"` ("bottom" | "credits") instead; `_narration` and
-   `_captions` are mutually exclusive. Do NOT write these keys together with
-   a `workflow` block.
-8. Simple batch/parameter-only tasks may still use the `workflow` macros
-   (deterministic fallback) — see the workflow doc below.
-
-## When to ask instead of submit
+{CREATIVE_DOC}
 
 ## When to ask instead of submit
 
@@ -415,6 +364,7 @@ V2_SYSTEM_PROMPT = (
     V2_SYSTEM_PROMPT_TEMPLATE
     .replace("{EFFECTS_DOC}", render_prompt_doc())
     .replace("{WORKFLOW_DOC}", render_workflow_doc())
+    .replace("{CREATIVE_DOC}", render_creative_doc())
     .replace("{AUDIO_DOC}", AUDIO_PROMPT_DOC)
 )
 
@@ -522,11 +472,13 @@ def list_shots() -> str:
             mark = " ⚠" + "/".join(flags) if flags else ""
             desc = str(lab.get("desc") or "").strip()
             desc = (desc[:40] + "…") if len(desc) > 40 else desc
+            aes = lab.get("aes_score")
+            aes_s = f"  美学{aes}" if isinstance(aes, (int, float)) else ""
             lines.append(
                 f"{rel}#{i:02d}  {s:.3f}-{e if e is not None else '?'}s"
                 f"  {dur}s  {lab.get('scene') or '?'}/{lab.get('activity') or '?'}"
                 f"  {lab.get('person_count', 0)}人  {lab.get('quality') or '?'}"
-                f"{mark}  {desc}")
+                f"{aes_s}{mark}  {desc}")
             total_shots += 1
             total_seconds += dur or 0.0
     if not lines and not missing:
