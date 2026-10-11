@@ -21,27 +21,45 @@
 
 | 文件 | 曲名 | 作者 | 风格 | 时长 |
 | --- | --- | --- | --- | --- |
-| mixkit-playground-fun-12 | Playground Fun | Ahjay Stelino | Children | 3:02 |
-| mixkit-just-kidding-11 | Just Kidding | Ahjay Stelino | Children | 2:59 |
-| mixkit-i-believe-in-us-1030 | I Believe in Us | Michael Ramir C. | Pop | 2:48 |
-| mixkit-dreaming-of-you-952 | Dreaming of You | Michael Ramir C. | Film Score | 2:29 |
-| mixkit-wind-leaves-617 | Wind Leaves | Eugenio Mininni | Country | 3:25 |
-| mixkit-old-letter-854 | Old Letter | Michael Ramir C. | Pop | 2:45 |
-| mixkit-vastness-184 | Vastness | Andrew Ev | Ambient | 3:50 |
-| mixkit-forest-walk-607 | Forest Walk | Eugenio Mininni | Electronica | 2:54 |
-| mixkit-your-breath-634 | Your Breath | Eugenio Mininni | Corporate | 3:56 |
-| mixkit-moon-walk-609 | Moon Walk | Eugenio Mininni | Electronica | 3:25 |
-| mixkit-never-going-broke-301 | Never Going Broke | Arulo | Trap | 2:13 |
-| mixkit-like-a-loop-machine-876 | Like a Loop Machine | Michael Ramir C. | Hip Hop | 2:09 |
-| mixkit-pop-03-700 | Pop 03 | Grigoriy Nuzhny | Jazz | 2:51 |
-| mixkit-smooth-like-jazz-24 | Smooth Like Jazz | Ahjay Stelino | Jazz | 2:38 |
-| mixkit-machine-drum-vibes-117 | Machine Drum Vibes | Alejandro Magaña | Techno | 2:12 |
-| mixkit-deep-techno-ambience-134 | Deep Techno Ambience | Alejandro Magaña | Techno | 2:03 |
 | incompetech-carefree | Carefree | Kevin MacLeod | Pop | 3:25 |
-| incompetech-life-of-riley | Life of Riley | Kevin MacLeod | Pop | 3:55 |
-| incompetech-wallpaper | Wallpaper | Kevin MacLeod | Pop | 3:40 |
 | incompetech-inspired | Inspired | Kevin MacLeod | Film Score | 4:46 |
+| incompetech-life-of-riley | Life of Riley | Kevin MacLeod | Pop | 3:55 |
 | incompetech-monkeys-spinning-monkeys | Monkeys Spinning Monkeys | Kevin MacLeod | Children | 2:05 |
+| incompetech-wallpaper | Wallpaper | Kevin MacLeod | Pop | 3:40 |
+| mixkit-a-man-with-a-broken-heart-788 | A Man with a Broken Heart | Michael Ramir C. | Rock | 3:22 |
+| mixkit-adone-635 | Adone | Eugenio Mininni | Funk | 3:02 |
+| mixkit-classical-10-717 | Classical 10 | Jonny S. | Film Score | 3:32 |
+| mixkit-deep-techno-ambience-134 | Deep Techno Ambience | Alejandro Magaña (A. M.) | Techno | 2:02 |
+| mixkit-deep-urban-623 | Deep Urban | Eugenio Mininni | House | 4:49 |
+| mixkit-do-you-know-god-s-name-775 | Do You Know God's Name? | Mauro Urbina | House | 4:54 |
+| mixkit-drawing-the-sky-606 | Drawing the Sky | Eugenio Mininni | Orchestral Pop | 3:27 |
+| mixkit-dreaming-of-you-952 | Dreaming of You | Michael Ramir C. | Film Score | 2:29 |
+| mixkit-echoes-188 | Echoes | Andrew Ev | Atmospheres | 3:46 |
+| mixkit-forest-walk-607 | Forest Walk | Eugenio Mininni | Electronica | 2:54 |
+| mixkit-games-music-706 | Games Music | Grigoriy Nuzhny | Trailer Music | 1:58 |
+| mixkit-gear-180 | Gear | Andrew Ev | EDM | 4:06 |
+| mixkit-i-believe-in-us-1030 | I Believe in Us | Michael Ramir C. | Pop | 2:48 |
+| mixkit-i-ll-take-you-to-my-heart-957 | I'll Take You to My Heart | Michael Ramir C. | Film Score | 2:43 |
+| mixkit-just-kidding-11 | Just Kidding | Ahjay Stelino | Children | 2:59 |
+| mixkit-kroks-591 | Kroks | Eugenio Mininni | Rock | 3:48 |
+| mixkit-like-a-loop-machine-876 | Like a Loop Machine | Michael Ramir C. | Hip Hop | 2:09 |
+| mixkit-machine-drum-vibes-117 | Machine Drum Vibes | Alejandro Magaña (A. M.) | Techno | 2:12 |
+| mixkit-moon-walk-609 | Moon Walk | Eugenio Mininni | Electronica | 3:25 |
+| mixkit-motivation-gets-in-the-way-519 | Motivation Gets in the Way | Diego Nava | Rock | 3:03 |
+| mixkit-never-going-broke-301 | Never Going Broke | Arulo | Trap | 2:13 |
+| mixkit-old-letter-854 | Old Letter | Michael Ramir C. | Pop | 2:45 |
+| mixkit-playground-fun-12 | Playground Fun | Ahjay Stelino | Children | 3:02 |
+| mixkit-pop-03-700 | Pop 03 | Grigoriy Nuzhny | Jazz | 2:51 |
+| mixkit-pop-04-696 | Pop 04 | Grigoriy Nuzhny | Funk | 3:10 |
+| mixkit-pop-181 | Pop | Andrew Ev | House | 4:26 |
+| mixkit-rest-now-584 | Rest Now | Eugenio Mininni | Ambient | 5:00 |
+| mixkit-river-flow-594 | River Flow | Eugenio Mininni | Electronica | 4:30 |
+| mixkit-skyline-601 | Skyline | Eugenio Mininni | Classical | 3:26 |
+| mixkit-smooth-like-jazz-24 | Smooth Like Jazz | Ahjay Stelino | Jazz | 2:38 |
+| mixkit-vastness-184 | Vastness | Andrew Ev | Ambient | 3:50 |
+| mixkit-voxscape-571 | Voxscape | Eugenio Mininni | Ambient | 5:00 |
+| mixkit-wind-leaves-617 | Wind Leaves | Eugenio Mininni | Country | 3:25 |
+| mixkit-your-breath-634 | Your Breath | Eugenio Mininni | Corporate Music | 3:56 |
 
 完整溯源字段（source_url / category_page / license / downloaded_at / 实测时长）
 与**选曲语义标签**（`tags`——Mixkit 编辑标注的情绪/场景/乐器标签，选曲
