@@ -368,7 +368,9 @@ _TAG_PROMPT = (
     "desc（一句话画面描述，30~40 字：主体在做什么、景物有什么，写具体的名词和"
     "动作与光线，不要评价词不要抒情，如「穿红裙的女孩背对镜头走向金色草地，风把裙摆吹起」）、"
     "tags（2-5 个补充标签的字符串数组，如 多人、举杯、夜景、日落、宠物）、"
-    'quality（"good"|"ok"|"poor"，模糊/过曝/严重抖动为 poor）。\n'
+    'quality（"good"|"ok"|"poor"，模糊/过曝/严重抖动为 poor）、'
+    "aes_score（美学质量 0.0~1.0 两位小数：≥0.80 构图光影出色、0.60~0.79 良好、"
+    "0.40~0.59 一般、<0.40 废片级——按构图/光影/主体清晰度综合评，不是内容有趣度）。\n"
     "只输出一个 JSON 数组（长度必须等于 {n}，顺序与帧一致），不要输出任何其他文字。"
     "标签语言用中文。严格禁止输出时间戳或时间信息——时间由系统另行管理。"
 )
@@ -405,6 +407,15 @@ def sanitize_label(raw) -> dict:
     quality = str(lab.get("quality") or "ok").lower()
     if quality not in ("good", "ok", "poor"):
         quality = "ok"
+    # V8.3 美学分：0~1 两位小数；缺省 None（旧卡/未打分），消费方一律 .get
+    aes = lab.get("aes_score")
+    if isinstance(aes, (int, float)) and not isinstance(aes, bool):
+        aes = round(min(1.0, max(0.0, float(aes))), 2)
+    else:
+        try:
+            aes = round(min(1.0, max(0.0, float(str(aes)[:4]))), 2)
+        except (TypeError, ValueError):
+            aes = None
     return {
         "person_count": pc,
         "has_children": bool(lab.get("has_children")),
@@ -415,6 +426,7 @@ def sanitize_label(raw) -> dict:
         "desc": _s(lab.get("desc"), 48),
         "tags": tags,
         "quality": quality,
+        "aes_score": aes,
         "usable": quality != "poor",
     }
 

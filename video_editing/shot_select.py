@@ -64,6 +64,11 @@ def _reject_reason(shot: dict, where: dict) -> str | None:
     quality_in = where.get("quality_in")
     if quality_in and lab.get("quality", "ok") not in quality_in:
         return f"画质 {lab.get('quality', 'ok')} 不在 {('、'.join(quality_in))}"
+    # V8.3 美学分门槛：镜头卡缺 aes_score（旧卡）时视为未约束，不拦
+    aes_min = where.get("aes_min")
+    aes = lab.get("aes_score")
+    if aes_min is not None and isinstance(aes, (int, float)) and aes < aes_min:
+        return f"美学分 {aes} 低于 {aes_min}"
     return None
 
 
