@@ -436,10 +436,15 @@ def validate_audio(audio: dict, tag: str, project_root: str) -> list[str]:
 
     unknown = [k for k in audio if k not in
                ("source", "volume", "fade_in", "fade_out", "loop", "ducking",
-                "original")]
+                "original", "snap_beats")]
     if unknown:
         errors.append(f"{tag} 含未知字段 {unknown}；只支持 "
-                      f"source/volume/fade_in/fade_out/loop/ducking/original。")
+                      f"source/volume/fade_in/fade_out/loop/ducking/"
+                      f"original/snap_beats。")
+    snap = audio.get("snap_beats")
+    if snap is not None and not isinstance(snap, bool):
+        errors.append(f"{tag}.snap_beats 必须是 true/false（节拍卡点：编译器"
+                      f"把剪辑点吸附到 BGM 节拍上，±0.35s 内，V8.2）。")
     return errors
 
 
@@ -459,6 +464,11 @@ create a clip entry for the music:
   (below) use 0.2–0.4 to sit under speech.
 - `fade_in` / `fade_out` seconds, default 0.
 - `loop` default true: short music repeats to fill the video.
+- `snap_beats` (V8.2) default false: `true` = the compiler detects the
+  music's beats and snaps the CUT POINTS between clips onto them (each
+  boundary shifts at most ±0.35s, shot durations permitting). Use it for
+  music-driven pacing (dance / energy cuts); leave it off when narration
+  alignment matters more than rhythm.
 - `original` (V7.7.1) default **"mute"**: the clips' original audio is
   REMOVED — the music IS the soundtrack. Do NOT write `ducking` in this
   mode (rejected). To KEEP the clips' audio (e.g. speech under music)

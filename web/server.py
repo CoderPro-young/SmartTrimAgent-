@@ -646,6 +646,7 @@ def _build_report(compiled) -> dict:
         "select": compiled.expansions.get("select"),
         "workflow": compiled.expansions.get("workflow"),
         "captions": compiled.expansions.get("captions"),   # V8.0 agent 手写文案
+        "beats": compiled.expansions.get("beats"),         # V8.2 节拍卡点
     }
     if rep["cuts"]:
         removed = round(sum(c["removed_seconds"] for c in rep["cuts"]), 3)

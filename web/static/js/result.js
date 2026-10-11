@@ -107,6 +107,12 @@ export function renderReport(rep, preview = false){
         ? `旁白 ${c.captions} 句（agent 按叙事组撰写，编译器按字数加权铺轴）`
         : `字幕 ${c.captions} 句（agent 逐镜头撰写）`)]));
   }
+  /* V8.2 节拍卡点：剪辑点吸附到 BGM 节拍 */
+  if (rep.beats){
+    r.append(rline([el('span', 'sub', rep.beats.snapped
+      ? `🎵 节拍卡点 ${rep.beats.snapped} 处（BPM ${rep.beats.bpm}，最大位移 ${rep.beats.max_shift}s）`
+      : `🎵 ${rep.beats.reason || '未启用卡点'}`)]));
+  }
   /* V7.5 文案来源透明化：labels 兜底不是创作，提醒用户别把它当文案水平 */
   const wf = rep.workflow || {};
   if (wf.captions_source === 'labels'){

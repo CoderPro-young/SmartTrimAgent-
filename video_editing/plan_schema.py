@@ -73,7 +73,7 @@ CUT_BLACK_KEYS = {"min_duration", "keep_padding", "min_keep"}
 SELECT_KEYS = {"sources", "where", "budget_seconds", "order"}
 SELECT_WHERE_KEYS = {"scene_any", "activity_any", "mood_any", "tag_any", "text_any",
                      "person_count_min", "person_count_max", "has_children",
-                     "quality_in", "min_duration", "max_duration",
+                     "quality_in", "aes_min", "min_duration", "max_duration",
                      "max_silence_ratio"}
 SELECT_ORDERS = {"as_listed", "best_first"}
 QUALITY_VALUES = {"good", "ok", "poor"}

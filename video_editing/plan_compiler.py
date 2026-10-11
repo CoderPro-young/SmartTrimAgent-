@@ -1147,7 +1147,99 @@ def _expand_plan(plan: dict, project_root: str, run_fn=None) -> tuple[dict, dict
     plan, cuts = _expand_cuts(plan, project_root, run_fn=run_fn)
     if cuts:
         expansions["cuts"] = cuts
+    audio = plan.get("audio") or {}
+    if audio.get("snap_beats") and len(plan.get("clips") or []) > 1:
+        expansions["beats"] = _snap_to_beats(plan, project_root)
     return plan, expansions
+
+
+# V8.2 节拍卡点：单次剪辑点最大位移（秒）——超过这个量宁可不对齐也不破坏镜头
+BEAT_SNAP_MAX = float(os.environ.get("BEAT_SNAP_MAX", "0.35"))
+BEAT_SNAP_MIN_D = 0.6      # 吸附后片段最短时长
+
+
+def _num(x) -> bool:
+    return isinstance(x, (int, float)) and not isinstance(x, bool)
+
+
+def _snap_to_beats(plan: dict, project_root: str) -> dict:
+    """把相邻 clip 的剪辑点吸附到 BGM 节拍（借鉴 FireRed plan_timeline 的
+    use_beats；本项目在 trim 层面实现——调整入画片段的 trim_end，下游
+    时间轴数学/字幕窗/BGM 铺轨自动跟随）。
+
+    剪辑点定义：转场中点 start[i+1] + trans[i]/2（硬切时即起点）。
+    每个内部边界取最近节拍，位移 |Δ| ≤ BEAT_SNAP_MAX；延长片段需要
+    clip 带 probe 且源内有余量（无 probe 只允许缩短）。最后一个边界
+    （成片结尾）不吸附。检测失败/置信度低返回 skipped 报告，不硬凑。
+    """
+    import beat_detect
+
+    audio = plan.get("audio") or {}
+    beats = beat_detect.detect_beats(audio.get("source") or "", project_root)
+    if not beats or not beats.get("beats"):
+        return {"snapped": 0, "reason": "未检测到清晰节拍（纯氛围乐或检测失败），本次不卡点"}
+
+    order = [t.get("clip") for t in plan.get("timeline") or []]
+    by_id = {c.get("id"): c for c in plan.get("clips") or []}
+    clips = [by_id[cid] for cid in order if cid in by_id]
+    if len(clips) < 2:
+        return {"snapped": 0, "reason": "片段不足 2 个，没有可吸附的剪辑点"}
+    beat_times = beats["beats"]
+
+    def _dur(c: dict) -> float | None:
+        ts, te = c.get("trim_start"), c.get("trim_end")
+        if _num(ts) and _num(te):
+            return float(te) - float(ts)
+        if c.get("kind") == "image" and _num(c.get("duration")):
+            return float(c["duration"])     # 展示时长可自由伸缩
+        return None
+
+    durs = [_dur(c) for c in clips]
+    trans = []
+    tl = plan.get("timeline") or []
+    # 转场挂在后一个 timeline 项上（“当前片段与前一个之间”）——
+    # 边界 i（clips[i]↔clips[i+1]）对应 tl[i+1].transition
+    for i in range(1, len(tl)):
+        t = ((tl[i].get("transition") or {}).get("duration")) or 0
+        trans.append(float(t) if _num(t) else 0.0)
+
+    snapped, skipped, max_shift = 0, 0, 0.0
+    cursor = 0.0
+    for i in range(len(clips) - 1):
+        d = durs[i]
+        if d is None:
+            # 校验后的计划理论上不会走到这（时长必可确定）——防御分支：
+            # 后续边界无从估计，保留已完成的吸附并停在这里
+            skipped += 1
+            break
+        cut = cursor + d - trans[i] / 2     # 转场中点
+        delta = min(beat_times, key=lambda b: abs(b - cut)) - cut
+        if abs(delta) < 0.02 or abs(delta) > BEAT_SNAP_MAX:
+            cursor = cursor + d - trans[i]
+            continue
+        new_d = d + delta
+        if new_d < BEAT_SNAP_MIN_D:
+            new_d = BEAT_SNAP_MIN_D
+        is_image = clips[i].get("kind") == "image"
+        if new_d > d and not is_image:      # 视频延长需要源内有余量
+            src_dur = ((clips[i].get("probe") or {}).get("duration"))
+            if not _num(src_dur):
+                skipped += 1
+                cursor = cursor + d - trans[i]
+                continue
+            room = float(src_dur) - float(clips[i].get("trim_start") or 0)
+            new_d = min(new_d, room)
+        durs[i] = new_d
+        if is_image:
+            clips[i]["duration"] = _round2(new_d)
+        else:
+            clips[i]["trim_end"] = _round2(
+                (clips[i].get("trim_start") or 0) + new_d)
+        snapped += 1
+        max_shift = max(max_shift, abs(new_d - d))
+        cursor = cursor + new_d - trans[i]
+    return {"bpm": beats.get("bpm"), "snapped": snapped,
+            "skipped": skipped, "max_shift": round(max_shift, 3)}
 
 
 def _apply_narration(plan: dict, math: dict, style: dict) -> None:
