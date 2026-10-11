@@ -32,3 +32,6 @@ MUSIC/*
 # ZCode 会话数据（本地脚本 / 运行痕迹）
 .zcode/
 -
+
+# V9.0 会话落盘（含 last_plan / expansions，本机私有）
+web/.sessions/

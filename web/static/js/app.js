@@ -1,4 +1,4 @@
-/* app.js —— 入口与胶水：会话 / 标签页 / 运行流 / 事件分发 / 引导 */
+/* app.js —— 入口与胶水：会话（登记/切换/持久化）/ 标签页 / 运行流 / 事件分发 / 引导 */
 import { $ } from './util.js';
 import { ndjsonStream, getJSON, postJSON } from './api.js';
 import * as chat from './chat.js';
@@ -6,10 +6,11 @@ import * as materials from './materials.js';
 import * as shots from './shots.js';
 import * as pipeline from './pipeline.js';
 import * as result from './result.js';
+import * as sess from './sessions.js';
 import { initTemplates } from './templates.js';
 import { initCull } from './cull.js';
 
-/* ---------- 会话（v3.1 语义保持不变） ---------- */
+/* ---------- 会话 ---------- */
 const PH_FIRST = '先用一句话描述要剪成什么样，例如：把这两段拼起来，中间加 0.5 秒 fade 转场，输出 720p';
 const PH_MORE  = '继续提修改要求，例如：把花字改成 3 秒 / 输出换成 1080p；没看懂它的反问也可以直接回答';
 const WELCOME  = '还没有素材 —— 先把视频/图片拖进左侧，再用一句话描述要剪成什么样。';
@@ -23,13 +24,108 @@ let sessionId = localStorage.getItem('st_session');
 if (!sessionId){ sessionId = _newSessionId(); localStorage.setItem('st_session', sessionId); }
 let turnCount = parseInt(localStorage.getItem('st_turns_' + sessionId) || '0', 10);
 
+/* 本轮运行的成品快照（持久化到 st_state_<id>，切会话 / 刷新页面可恢复） */
+let lastDone = null, lastExecPlan = null, lastMath = null, lastVerify = null;
+
 function refreshPlaceholder(){
   $('#task').placeholder = turnCount > 0 ? PH_MORE : PH_FIRST;
 }
 
+/* ---------- 每会话持久化：对话 st_chat_<id> + 成品状态 st_state_<id> ---------- */
+function firstUserText(){
+  const u = chat.getTranscript().find(e => e.k === 'user');
+  if (!u || !u.t) return '';
+  const t = u.t.replace(/\s+/g, ' ').trim();
+  return t.length > 24 ? t.slice(0, 24) + '…' : t;
+}
+
+/* 空会话（没发过消息、没有成品快照）不入册不落盘，
+   否则连点几次「启动新任务」下拉里就堆一列「未命名任务」 */
+function sessionHasContent(){
+  return chat.getTranscript().some(e => e && (e.k === 'user' || e.k === 'assistant'))
+    || !!(lastDone || lastExecPlan || lastMath || lastVerify);
+}
+
+function paintSessionSelect(){
+  sess.renderSelect($('#sessSel'), sessionId, switchSession,
+    sessionHasContent() ? '当前任务' : '当前任务（未开始）');
+}
+
+function saveChat(){
+  if (!sessionHasContent()){
+    try { localStorage.removeItem('st_chat_' + sessionId); } catch {}
+    paintSessionSelect();
+    return;
+  }
+  try {
+    localStorage.setItem('st_chat_' + sessionId, JSON.stringify(chat.getTranscript()));
+  } catch {                         // 配额超限：丢工具调用参数再存一次
+    try {
+      const slim = chat.getTranscript().map(e => e.tcs ? { ...e, tcs: null } : e);
+      localStorage.setItem('st_chat_' + sessionId, JSON.stringify(slim));
+    } catch {}
+  }
+  sess.touch(sessionId, firstUserText());
+  paintSessionSelect();
+}
+
+function saveState(){
+  try {
+    if (lastDone || lastExecPlan || lastMath || lastVerify){
+      localStorage.setItem('st_state_' + sessionId, JSON.stringify(
+        { ev: lastDone, plan: lastExecPlan, math: lastMath, verify: lastVerify }));
+    } else {
+      localStorage.removeItem('st_state_' + sessionId);
+    }
+  } catch {}
+}
+
+/* 恢复某会话的成品区 / 计划卡（切换与启动共用） */
+function restoreState(id){
+  lastDone = null; lastExecPlan = null; lastMath = null; lastVerify = null;
+  pipeline.resetPipeline();
+  shots.hideAnalysis();
+  let st = null;
+  try { st = JSON.parse(localStorage.getItem('st_state_' + id) || 'null'); } catch {}
+  result.resetResult();             // 先全清，避免残留上一个会话的报告/胶片条
+  if (st && st.ev){
+    lastDone = st.ev;
+    result.showResult(st.ev, { activate: false });   // 不抢当前标签页
+  }
+  if (st && st.plan){
+    lastExecPlan = st.plan;
+    pipeline.renderPlan(st.plan, { editable: true });
+    $('#replanBtn').disabled = busy;
+  } else {
+    pipeline.renderPlan(null);
+    $('#replanBtn').disabled = true;
+  }
+  if (st && st.math){
+    lastMath = st.math;
+    pipeline.renderMath(st.math);
+    if (lastExecPlan) result.feedTimeline(lastExecPlan, lastMath);
+  }
+  if (st && st.verify) renderVerify(st.verify);
+}
+
+/* 切回历史会话：重放对话 + 恢复成品。运行中禁止切（事件流不能写到别的会话）。 */
+function switchSession(id){
+  if (busy || id === sessionId){
+    sess.renderSelect($('#sessSel'), sessionId, switchSession);
+    return;
+  }
+  sessionId = id;
+  localStorage.setItem('st_session', id);
+  turnCount = parseInt(localStorage.getItem('st_turns_' + id) || '0', 10);
+  refreshPlaceholder();
+  let entries = [];
+  try { entries = JSON.parse(localStorage.getItem('st_chat_' + id) || '[]'); } catch {}
+  chat.setTranscript(entries);      // 触发 onChange → 归档到最前 + 刷新下拉
+  restoreState(id);
+}
+
 /* ---------- busy / 计时 / 取消 ---------- */
 let busy = false, t0 = 0, timer = null;
-let lastExecPlan = null;
 
 function setBusy(v){
   busy = v;
@@ -77,6 +173,16 @@ function clearWaiting(){
 }
 
 /* ---------- 事件分发 ---------- */
+function renderVerify(v){
+  const box = $('#verifyBox'); box.replaceChildren();
+  const span = document.createElement('span');
+  span.className = 'pill ' + (v.ok ? 'ok' : 'bad');
+  span.textContent = v.duration != null
+    ? `回验 ${v.ok ? '通过' : '不一致'} · 实际 ${v.duration}s / 预期 ${v.expected}s`
+    : '回验：' + (v.note || v.error || '无结果');
+  box.append(span);
+}
+
 function handleEvent(ev){
   if (ev.type === 'heartbeat'){ markWaiting(ev.idle); return; }
   clearWaiting();                                  // 任何真实事件都算有进展
@@ -92,30 +198,29 @@ function handleEvent(ev){
       lastExecPlan = ev.plan;
       pipeline.renderPlan(ev.plan, { editable: true });
       $('#replanBtn').disabled = busy;
+      saveState();
       break;
     case 'math':
+      lastMath = ev.math;
       pipeline.renderMath(ev.math);
       if (lastExecPlan) result.feedTimeline(lastExecPlan, ev.math);
+      saveState();
       break;
     case 'commands': pipeline.renderCommands(ev.commands); break;
     case 'status':   chat.addSys(ev.text, true); break;
     case 'exec':     pipeline.appendLog(ev.ok, ev.description, ev.ok ? null : (ev.error || ev.stderr_tail)); break;
     case 'verify':{
-      const v = ev.verify || {};
-      const box = $('#verifyBox'); box.replaceChildren();
-      const span = document.createElement('span');
-      span.className = 'pill ' + (v.ok ? 'ok' : 'bad');
-      span.textContent = v.duration != null
-        ? `回验 ${v.ok ? '通过' : '不一致'} · 实际 ${v.duration}s / 预期 ${v.expected}s`
-        : '回验：' + (v.note || v.error || '无结果');
-      box.append(span);
+      const v = ev.verify || null;
+      if (v){ lastVerify = v; renderVerify(v); saveState(); }
       break;
     }
     case 'done':
       turnCount += 1;
       localStorage.setItem('st_turns_' + sessionId, String(turnCount));
       refreshPlaceholder();
+      lastDone = ev;
       result.showResult(ev);
+      saveState();
       pipeline.loadOutputs();
       materials.loadInputs();          // 侧栏索引状态可能已更新
       break;
@@ -128,6 +233,8 @@ function handleEvent(ev){
     case 'question':  chat.addQuestion(ev.question, ev.options, chat.insertIntoComposer); break;
     case 'hallucination': chat.addHallucination(ev); break;
     case 'analysis':  shots.renderAnalysis(ev); break;
+    case 'plan_diff': pipeline.renderDiff(ev); break;               // V9.0 修订差异卡
+    case 'status_answer': chat.addAssistant(ev.text, null); break;  // V9.0 状态直答（无工具调用）
     case 'cancelled': chat.addSys(ev.message || '任务已取消。', false); break;
   }
 }
@@ -191,21 +298,27 @@ async function newTask(){
     chat.addError('启动新任务失败：' + (json.error || ('HTTP ' + status)) + '，当前会话保持不变。');
     return;
   }
+  /* 旧会话就地归档（对话与成品留在历史列表），后端会话上下文也保留，可随时切回 */
   sessionId = _newSessionId();
   localStorage.setItem('st_session', sessionId);
   turnCount = 0;
   localStorage.setItem('st_turns_' + sessionId, '0');
-  chat.clearChat();
-  chat.addSys(WELCOME, false);
+
+  /* 成品区全清：播放器 / 审阅报告 / 胶片条 / 导出链接 / 验证徽标不再残留上一次的成品 */
+  lastDone = null; lastExecPlan = null; lastMath = null; lastVerify = null;
+  saveState();
+  result.resetResult();
   pipeline.resetPipeline();
   pipeline.renderPlan(null);
-  lastExecPlan = null;
   $('#replanBtn').disabled = true;
-  $('#cardResult').hidden = true;
-  $('#player').removeAttribute('src');
+  shots.hideAnalysis();
   materials.clearSelected();
-  materials.loadInputs();
+  materials.loadInputs();          // reset 已清掉网页上传的素材，重拉列表
+
+  chat.setTranscript([{ k: 'sys', t: WELCOME }]);   // 触发 onChange → 空会话不落盘
+  sess.pruneEmpty();                // 顺手清掉没有内容的历史会话
   refreshPlaceholder();
+  paintSessionSelect();
   const ta = $('#task');
   ta.value = '';
   ta.dispatchEvent(new Event('input'));
@@ -219,10 +332,18 @@ async function boot(){
   initCull();
   materials.initUploads();
   materials.loadInputs();
-  pipeline.loadOutputs();
   pipeline.resetPipeline();
+
+  chat.setOnChange(saveChat);
+  sess.pruneEmpty();                // 治历史遗留的「未命名任务」堆积
+  restoreState(sessionId);          // 刷新页面恢复上次成品与计划卡（先于对话恢复，快照参与判空）
+  let entries = [];
+  try { entries = JSON.parse(localStorage.getItem('st_chat_' + sessionId) || '[]'); } catch {}
+  if (entries.length) chat.setTranscript(entries);   // 刷新页面恢复对话
+  else chat.setTranscript([{ k: 'sys', t: WELCOME }]);
+  pipeline.loadOutputs();
+  paintSessionSelect();
   refreshPlaceholder();
-  chat.addSys(WELCOME, false);
 
   $('#send').onclick = () => {
     const v = $('#task').value.trim();

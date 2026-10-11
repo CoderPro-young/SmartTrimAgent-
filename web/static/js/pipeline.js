@@ -50,6 +50,8 @@ export function renderPlan(plan, { editable: canEdit = false } = {}){
   const ov = (workPlan.overlays || []).length;
   $('#planMeta').textContent = `${clips} 素材 · ${ov} 叠加` + (editable ? ' · 可直接改' : '');
 
+  if (lastDiff) mountDiff();                 // V9.0：重渲染计划卡时 diff 卡保持在顶部
+
   /* 原始 JSON 折叠进「高级」 */
   const jsonDetails = $('#planJson');
   jsonDetails.replaceChildren(jsonBlock(plan));
@@ -263,10 +265,45 @@ export function renderCommands(cmds){
 let logRows = null;
 export function resetPipeline(){
   logRows = null;
+  lastDiff = null;                                   // V9.0：上一轮 diff 卡不再复活
   $('#mathBody').replaceChildren(el('span', 'empty', '编译后显示片段时长 / 起点 / 总时长'));
   $('#cmdBody').replaceChildren(el('span', 'empty', '等待编译器生成命令…'));
   $('#logBody').replaceChildren(el('span', 'empty', '尚未执行'));
   $('#verifyBox').textContent = '';
+}
+
+/* ---------- V9.0 修订 diff 卡（plan_diff 事件） ---------- */
+let lastDiff = null;
+
+export function renderDiff(ev){
+  lastDiff = ev || null;
+  mountDiff();
+}
+
+function mountDiff(){
+  if (!lastDiff) return;
+  const box = $('#planCards');
+  const d = el('div', 'pclip diff');
+  const head = el('div', 'head');
+  const n = (lastDiff.touched || []).length;
+  const scopeText = lastDiff.scope === 'global'
+    ? `影响：全部时间线（${lastDiff.total_clips} 片段/全局）`
+    : `影响：仅 ${n}/${lastDiff.total_clips} 片段`;
+  head.append(el('span', 'src', '本次修订差异'),
+              el('span', 'pill ' + (lastDiff.scope === 'global' ? 'bad' : 'ok'), scopeText));
+  d.append(head);
+  const list = el('div', 'dlist');
+  const KIND = { remove_clip: '删除', add_clip: '新增', modify_clip: '修改',
+                 reorder: '排序', audio_block: '音频', output: '输出', top_level: '全局' };
+  for (const c of (lastDiff.changes || [])){
+    const row = el('div', 'drow');
+    row.append(el('span', 'dk', KIND[c.kind] || c.kind), el('span', null, c.detail || ''));
+    list.append(row);
+    if (c.side_effect) list.append(el('div', 'drow dwarn', '⚠ ' + c.side_effect));
+  }
+  if (!(lastDiff.changes || []).length) list.append(el('div', 'drow', '（与上一版无差异）'));
+  d.append(list);
+  box.prepend(d);
 }
 export function appendLog(ok, desc, detail){
   if (!logRows){ logRows = el('div', 'log'); $('#logBody').replaceChildren(logRows); }

@@ -56,7 +56,10 @@ sys.path.insert(0, os.path.join(PROJECT_ROOT, "video_editing"))
 import content_analysis  # noqa: E402
 import culling  # noqa: E402
 import ffmpeg_exec  # noqa: E402
+import intent as intent_mod  # noqa: E402   V9.0 P3 意图分类车道
 import plan_compiler  # noqa: E402
+import plan_diff  # noqa: E402             V9.0 P1 计划差异 + 作用域闸门
+import plan_ops  # noqa: E402              V9.0 P2 修订即操作
 import plan_schema  # noqa: E402
 import timeline_export  # noqa: E402
 from langchain_core.messages import AIMessage  # noqa: E402
@@ -98,11 +101,69 @@ _ANALYZE_SEM = threading.Semaphore(2)   # 允许 2 路并发分析（多素材�
 _ANALYZING: set[str] = set()             # 排队/进行中的素材绝对路径
 _ANALYZE_FAILED: dict[str, float] = {}   # path -> 失败时刻（5 分钟内不重试）
 
-# 多轮会话（v3.1 P0）：单用户本地工具，进程内 dict 足够；
-# 「启动新任务」= 前端换新 session_id，旧会话惰性 GC，无需删除接口。
+# 多轮会话（v3.1 P0）+ 磁盘持久化（V9.0 P0）：
+# 「启动新任务」= 前端换新 session_id + 清网页上传素材；旧会话留在 SESSIONS
+# 供历史列表切回，由 _get_session 的 20 个惰性上限 GC，无需删除接口。
+# 落盘动机（2026-10-11 事故）：SESSIONS 只存进程内存，改代码重启即清空，
+# 修订轮 brief 拿不到 last_plan，agent「失忆」并从零重排（图片悄悄消失）。
+# web/.sessions/<sid>.json 原子写（tmp + os.replace），_get_session 内存
+# 未命中先读盘；expansions 一并落盘，宏采用率事后可审计。
 SESSIONS: dict[str, dict] = {}
 SESSION_MAX_TURNS = 5        # 每会话最多保留几轮历史（控制 token）
 _SESSION_LOCK = threading.Lock()
+SESSIONS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".sessions")
+SESSIONS_MAX_FILES = 200     # 盘上会话文件惰性上限（最旧的先清）
+_SESSION_FIELDS = ("task", "turn", "last_plan", "last_output", "last_verify",
+                   "pending_question", "last_expansions",
+                   "history", "preview")   # pending_plan 是进程内暂存（CompiledPlan 对象），不落盘
+
+
+def _session_path(session_id: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", session_id)[:80]
+    return os.path.join(SESSIONS_DIR, safe + ".json")
+
+
+def _save_session(session_id: str | None) -> None:
+    """会话落盘（字段白名单 + 原子写）。失败静默：落盘是加固，不是主路径。"""
+    if not session_id:
+        return
+    try:
+        with _SESSION_LOCK:
+            session = SESSIONS.get(session_id)
+            if session is None:
+                return
+            data = {k: session.get(k) for k in _SESSION_FIELDS
+                    if k in session and _jsonable(session.get(k))}
+        os.makedirs(SESSIONS_DIR, exist_ok=True)
+        tmp = _session_path(session_id) + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
+        os.replace(tmp, _session_path(session_id))
+        _gc_session_files()
+    except (OSError, TypeError, ValueError):
+        pass
+
+
+def _jsonable(v) -> bool:
+    """粗粒度可序列化判定（避免 pending_plan 里带不可序列化对象时整份丢写）。"""
+    try:
+        json.dumps(v, ensure_ascii=False, default=str)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+def _gc_session_files() -> None:
+    try:
+        files = [os.path.join(SESSIONS_DIR, n) for n in os.listdir(SESSIONS_DIR)
+                 if n.endswith(".json")]
+        if len(files) <= SESSIONS_MAX_FILES:
+            return
+        files.sort(key=lambda p: os.path.getmtime(p))
+        for p in files[:-SESSIONS_MAX_FILES]:
+            os.remove(p)
+    except OSError:
+        pass
 
 # 上传白名单。视频/图片可作 clip；纯音频只能作 BGM（顶层 audio.source），
 # 不能进 clips —— plan_schema 会拦下没有视频轨的 clip。
@@ -447,9 +508,11 @@ def _stream_agent(agent, messages: list, emit, seen: set | None = None,
 # ------------------------------------------------------- 多轮会话 / 闸门 ---- #
 
 def _get_session(session_id: str | None, task: str) -> tuple[dict, bool]:
-    """取会话；不存在则新建（无状态兜底：未知 id 当第一轮）。
+    """取会话；不存在则新建。返回 (session, restored)。
 
-    返回 (session, created)。不带 session_id 的请求每次都拿到独立临时会话
+    V9.0 P0：内存未命中先读 web/.sessions/<sid>.json（跨重启恢复），
+    盘上也没有才新建（restored=False，调用方可据此提示「新会话」，
+    不再静默当第一轮）。不带 session_id 的请求每次都拿到独立临时会话
     （等价于旧行为：无修订上下文）。
     """
     if not session_id:
@@ -457,14 +520,32 @@ def _get_session(session_id: str | None, task: str) -> tuple[dict, bool]:
                  "last_verify": None, "pending_question": None, "history": []}, True)
     with _SESSION_LOCK:
         session = SESSIONS.get(session_id)
+        if session is not None:
+            return session, True
+        # 内存没有 → 读盘（服务重启后这里把 last_plan/turn/pending 找回来）
+        try:
+            with open(_session_path(session_id), encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                session = {"task": task, "turn": 0, "last_plan": None,
+                           "last_output": None, "last_verify": None,
+                           "pending_question": None, "history": [],
+                           **{k: v for k, v in data.items()
+                              if k in _SESSION_FIELDS}}
+                session["_from_disk"] = True   # 一次性标记：调用方据此提示「已恢复」
+        except (OSError, json.JSONDecodeError):
+            session = None
         if session is None:
             session = {"task": task, "turn": 0, "last_plan": None, "last_output": None,
                        "last_verify": None, "pending_question": None, "history": []}
             SESSIONS[session_id] = session
             while len(SESSIONS) > 20:      # 惰性上限，防内存膨胀
                 SESSIONS.pop(next(iter(SESSIONS)), None)
-            return session, True
-        return session, False
+            return session, False
+        SESSIONS[session_id] = session
+        while len(SESSIONS) > 20:
+            SESSIONS.pop(next(iter(SESSIONS)), None)
+        return session, True
 
 
 _GATE_CHITCHAT = {
@@ -557,7 +638,11 @@ def _run_pipeline(task: str, emit, session_id: str | None = None,
         return
     emit({"type": "materials", "names": materials})
 
-    session, _created = _get_session(session_id, task)
+    session, _restored = _get_session(session_id, task)
+    if session.pop("_from_disk", False):
+        emit({"type": "status",
+              "text": f"已从磁盘恢复会话（第 {session.get('turn') or 0} 轮，"
+                      f"上一版成片 {session.get('last_output') or '无'}）。"})
     session["preview"] = bool(preview)   # 预览档位入会话，多轮对话沿用
 
     # 规则闸门（零成本拦「一眼没意图」；question 也是 pending_question）
@@ -566,6 +651,33 @@ def _run_pipeline(task: str, emit, session_id: str | None = None,
         emit(gate)
         session["pending_question"] = gate
         return
+
+    # ---- V9.0 P3：意图分类车道（仅对已有上下文的会话生效；首轮直通）----
+    has_ctx = bool(session.get("last_plan") or session.get("pending_question")
+                   or (session.get("turn") or 0) > 0)
+    if has_ctx:
+        label, _basis = intent_mod.classify(task, has_session=True)
+        if label == "status_question":
+            emit({"type": "status_answer",
+                  "text": intent_mod.build_status_answer(session)})
+            return
+        if label == "ambiguous":
+            q = {"type": "question", "kind": "intent_ambiguous",
+                 "question": "这条消息我分不清是新的剪辑要求，还是在问之前的结果。"
+                             "你是想——",
+                 "options": ["提出/修改剪辑需求", "了解上一版成片的情况"]}
+            emit(q)
+            session["pending_question"] = q
+            return
+
+    # ---- V9.0 P1：闸门拦截后的放行分支（用户确认 → 执行暂存计划）----
+    pending_plan = session.pop("pending_plan", None)
+    if pending_plan is not None:
+        if intent_mod.is_confirm(task):
+            _commit_compiled(session, task, pending_plan)
+            _execute_compiled(pending_plan, emit, session)
+            return
+        # 不是确认 ⇒ 用户否了全局方案；回答作为新修订要求走下面的正常路径
 
     # 消息构造三优先级（纯文本，遵守「不重放消息历史」约束）
     pending = session.get("pending_question")
@@ -606,6 +718,7 @@ def _run_pipeline(task: str, emit, session_id: str | None = None,
 
     # 重试闭环（含 Preflight 三分流）已下沉到 video_agent.plan_with_retry，
     # CLI 与 Web 共用同一套语义；这里只负责把事件转成 NDJSON。
+    # V9.0 P2：修订轮传 base_plan + apply_ops_fn，agent 走 edit_plan(ops)。
     compiled, _result = plan_with_retry(
         task,
         PROJECT_ROOT,
@@ -617,6 +730,8 @@ def _run_pipeline(task: str, emit, session_id: str | None = None,
         output_suffix=suffix if base_output else None,
         probe_fn=probe_fn,
         quality="preview" if session.get("preview") else "final",
+        base_plan=base_plan,
+        apply_ops_fn=plan_ops.apply_ops if base_plan is not None else None,
     )
     if compiled is None:
         # question / 放弃类返回：事件已 emit，last_plan 不动；
@@ -625,16 +740,52 @@ def _run_pipeline(task: str, emit, session_id: str | None = None,
             session["pending_question"] = question_holder["q"]
         return
 
-    # 成功提交新计划 → 更新会话（问答接续完成，pending_question 清除）
+    # ---- V9.0 P1：修订轮 diff 卡 + 作用域闸门（编译成功、渲染之前）----
+    if base_plan is not None:
+        diff = plan_diff.plan_diff(base_plan, compiled.plan)
+        emit({"type": "plan_diff", **diff})
+        gate_q = plan_diff.check_scope(
+            task, diff, materials=["INPUT/" + m for m in materials],
+            scene_vocab=_scene_vocab(materials))
+        if gate_q:
+            emit(gate_q)
+            session["pending_plan"] = compiled     # 暂存：用户确认即执行
+            session["pending_question"] = gate_q
+            return
+
+    _commit_compiled(session, task, compiled)
+    _execute_compiled(compiled, tracking_emit, session)
+
+
+def _commit_compiled(session: dict, task: str, compiled) -> None:
+    """成功提交新计划 → 更新会话（成功路径与闸门放行路径共用）。"""
     session["last_plan"] = compiled.plan      # 展开后的可执行计划（replan 卡片编辑用）
     session["last_output"] = compiled.plan["output"]["filename"]
     session["pending_question"] = None
+    session["pending_plan"] = None
+    session["last_expansions"] = getattr(compiled, "expansions", None) or {}
     session["turn"] = (session.get("turn") or 0) + 1
     history = session.setdefault("history", [])
     history.append({"task": task, "output": session["last_output"]})
     del history[:-SESSION_MAX_TURNS]
 
-    _execute_compiled(compiled, tracking_emit, session)
+
+def _scene_vocab(materials: list[str]) -> set[str]:
+    """内容卡片里的语义标签集合（作用域闸门的指代映射词表）。失败即空集。"""
+    vocab: set[str] = set()
+    for name in materials:
+        card = content_analysis.load_cached_card(PROJECT_ROOT, "INPUT/" + name)
+        if not card or not isinstance(card.get("shots"), list):
+            continue
+        for sh in card["shots"]:
+            lab = sh.get("label") or {}
+            for key in ("scene", "activity", "tags"):
+                v = lab.get(key)
+                if isinstance(v, str):
+                    vocab.add(v.lower())
+                elif isinstance(v, list):
+                    vocab.update(str(t).lower() for t in v)
+    return vocab
 
 def _build_report(compiled) -> dict:
     """T18 审阅报告：这次实际做了什么（供成品卡摘要展示）。"""
@@ -761,6 +912,7 @@ def _safe_run(task: str, emit, session_id: str | None = None,
         emit({"type": "traceback", "text": traceback.format_exc()[-2000:]})
     finally:
         content_analysis.set_progress_hook(None)   # 感知层钩子不跨请求泄漏
+        _save_session(session_id)                  # V9.0 P0：请求结束统一落盘
         RUN_LOCK.release()
         emit(None)  # 结束哨兵
 
@@ -798,10 +950,7 @@ def _run_replan(plan: dict, emit, session_id: str | None,
               "evidence": w.message})
 
     emit({"type": "plan", "plan": plan})
-    session["last_plan"] = compiled.plan
-    session["last_output"] = compiled.plan["output"]["filename"]
-    session["pending_question"] = None
-    session["turn"] = (session.get("turn") or 0) + 1
+    _commit_compiled(session, "(卡片回改)", compiled)
     _execute_compiled(compiled, emit, session)
 
 
@@ -820,6 +969,7 @@ def _safe_replan(plan: dict, emit, session_id: str | None = None,
         emit({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
         emit({"type": "traceback", "text": traceback.format_exc()[-2000:]})
     finally:
+        _save_session(session_id)                  # V9.0 P0：请求结束统一落盘
         RUN_LOCK.release()
         emit(None)
 
@@ -1018,13 +1168,15 @@ class Handler(BaseHTTPRequestHandler):
         })
 
     def _handle_session_reset(self, payload: dict) -> None:
-        """「启动新任务」：清掉全部网页上传的素材，然后废弃会话。
+        """「启动新任务」：清掉全部网页上传的素材；旧会话保留在 SESSIONS。
 
-        归属不按会话记账：登记只存进程内存（SESSIONS）的话，服务一重启就丢，
-        旧任务的素材便永远清不掉——而 INPUT/ 对 agent 是全局可见的，必须清得掉。
-        因此以 TMP/uploads.json 白名单为准，一次清空其中全部文件；
-        手动放进 INPUT/ 的文件与示例素材不在白名单内，不受影响。
-        单个素材清不掉（被锁等）不阻断其余，errors 里逐条说明。
+        会话不弹掉：前端历史列表可以切回旧会话继续聊（后端仍有 last_plan /
+        多轮上下文），内存由 _get_session 的 20 个惰性上限自然 GC。
+        素材清理的归属不按会话记账：登记只存进程内存（SESSIONS）的话，
+        服务一重启就丢，旧任务的素材便永远清不掉——而 INPUT/ 对 agent 是
+        全局可见的，必须清得掉。因此以 TMP/uploads.json 白名单为准，一次
+        清空其中全部文件；手动放进 INPUT/ 的文件与示例素材不在白名单内，
+        不受影响。单个素材清不掉（被锁等）不阻断其余，errors 里逐条说明。
         """
         sid = (payload.get("session_id") or "").strip()
         if not sid:
@@ -1033,8 +1185,6 @@ class Handler(BaseHTTPRequestHandler):
         if RUN_LOCK.locked():
             self._fail(409, "有任务正在运行，等它结束再启动新任务。")
             return
-        with _SESSION_LOCK:
-            SESSIONS.pop(sid, None)
         cleared: list[str] = []
         errors: list[str] = []
         for name in _load_ledger():

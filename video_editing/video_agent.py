@@ -224,6 +224,12 @@ with the `submit_plan` tool.
 
 Call `ask_user` INSTEAD of `submit_plan` when ANY of these holds:
 - The message contains no actionable editing operation (e.g. "haha", "test").
+- The message asks ABOUT previous work or the conversation itself rather than
+  requesting a NEW edit (e.g. "did you re-edit it?", "why did you keep that
+  shot?", "how long is the result?"). It may mention editing words, but it
+  wants information, not execution. Do NOT run it as a modification request:
+  call `ask_user`, report the facts you were given (previous plan, output
+  file, clip count, duration), and ask whether any change is wanted.
 - The target material is ambiguous ("that video" while INPUT/ holds several).
 - The request needs a capability that is not in the effect list — say so
   honestly and offer the closest available alternative.
@@ -415,10 +421,13 @@ def submit_plan(plan: dict) -> str:
 
 @tool
 def ask_user(question: str, options: list[str] | None = None) -> str:
-    """Ask the user to clarify an ambiguous, unsupported, or infeasible request.
+    """Ask the user a question — to clarify, or to answer a status question.
 
     Use this INSTEAD of submit_plan when: the request contains no actionable
-    editing operation; the target material is ambiguous; the request needs a
+    editing operation; the message asks about previous work / status instead
+    of requesting an edit (then report the known facts in `question` —
+    previous output, clip count, duration — and ask if any change is wanted);
+    the target material is ambiguous; the request needs a
     capability that is not available; or probe_media shows the request exceeds
     what the material can actually do.
 
@@ -427,6 +436,23 @@ def ask_user(question: str, options: list[str] | None = None) -> str:
         options: Optional short candidate answers the user can pick from.
     """
     return "问题已提交给用户，等待答复。"
+
+
+@tool
+def edit_plan(ops: list) -> str:
+    """Apply edit operations to the PREVIOUS plan (revision turns only).
+
+    This is the ONLY way to modify an existing edit in a revision turn —
+    never rewrite the whole plan. Each op is a small object; untouched
+    fields are preserved verbatim by the host. If what the user wants
+    cannot be expressed with the ops vocabulary, call `ask_user` instead
+    of improvising.
+
+    Args:
+        ops: Ordered list of operation objects (vocabulary is documented
+            in the revision brief you received).
+    """
+    return "操作已接收，宿主将对上一版计划应用这些操作并编译。"
 
 
 @tool
@@ -541,7 +567,7 @@ def build_video_agent_v2() -> CompiledStateGraph:
         model=model,
         system_prompt=V2_SYSTEM_PROMPT,
         tools=[probe_media, analyze_media, list_shots, list_music,
-               submit_plan, ask_user],
+               submit_plan, ask_user, edit_plan],
         backend=backend,
         name="video-editing-planner-v2",
     )
@@ -561,6 +587,19 @@ def extract_plan(result: dict) -> dict | None:
                 if isinstance(args, dict) and "plan" in args and isinstance(args["plan"], dict):
                     return args["plan"]
                 return args if isinstance(args, dict) else None
+    return None
+
+
+def extract_ops(result: dict) -> list | None:
+    """从 agent 结果里提取 edit_plan 调用的 ops 列表（无则 None）。"""
+    for msg in result.get("messages", []):
+        for tc in (getattr(msg, "tool_calls", None) or []):
+            if tc.get("name") == "edit_plan":
+                args = tc.get("args") or {}
+                ops = args.get("ops")
+                if isinstance(ops, list):
+                    return ops
+                return None
     return None
 
 
@@ -593,7 +632,7 @@ MAX_PLAN_RETRIES = 2
 
 
 def _retry_feedback(task: str, plan: dict | None, errors: list[str],
-                    preamble: list | None = None) -> list:
+                    preamble: list | None = None, ops_mode: bool = False) -> list:
     """构造「回传重出」的消息列表。
 
     刻意**不重放原始消息历史**，用纯文本重建「原任务 + 上次计划 + 错误 + 要求」。
@@ -605,11 +644,22 @@ def _retry_feedback(task: str, plan: dict | None, errors: list[str],
 
     preamble：首轮上下文的纯文本消息（修订 brief / 问答接续 brief）；
     提供时用它替换默认的「原任务」单条消息，保证重试不会丢掉修订语义。
+    ops_mode：修订轮 ops 失败时，要求模型修正 ops 重新调用 edit_plan，
+    而不是退回重写整份计划（V9 P2）。
     """
     if plan is None:
-        body = ("上一次尝试没有产生可编译的计划。请重新完成这个任务，并调用 submit_plan "
-                "提交完整的编辑计划（若上次是调用出错，忽略它重新尝试即可）。\n\n"
-                "失败详情：\n- " + "\n- ".join(errors))
+        if ops_mode:
+            body = ("上一次的 edit_plan 操作没有通过校验。请修正 ops 后重新调用 "
+                    "edit_plan（只改有问题的操作，其余保留；不要退回重写整份计划，"
+                    "也不要改用 submit_plan）。\n\n"
+                    "失败详情：\n- " + "\n- ".join(errors))
+        else:
+            body = ("上一次尝试没有产生可编译的计划。请重新完成这个任务：如果用户的消息"
+                    "是剪辑/修改要求，调用 submit_plan 提交完整的编辑计划；"
+                    "如果你其实想向用户提问或汇报情况（比如这条消息并不是修改要求，"
+                    "而是在询问上一轮做了什么），就调用 ask_user——两种都算完成任务"
+                    "（若上次是调用出错，忽略它重新尝试即可）。\n\n"
+                    "失败详情：\n- " + "\n- ".join(errors))
     else:
         body = (
             "你上一次提交的计划（JSON）如下：\n"
@@ -629,19 +679,46 @@ def _retry_feedback(task: str, plan: dict | None, errors: list[str],
 
 def build_revision_brief(task: str, base_plan: dict, base_output: str,
                          materials: list[str], new_task: str) -> list:
-    """修订轮上下文：最初需求 + 上一版计划/产物 + 当前素材 + 本次修改要求。"""
+    """修订轮上下文（V9 ops 模式）：片段表 + ops 词汇表 + 本次要求。
+
+    修订轮不再让模型重写整份计划 JSON——只允许 edit_plan(ops)。
+    片段表给到 id/素材/裁剪/转场/效果，足够下 ops；完整 JSON 不再
+    重放（压缩上下文，也杜绝「顺手改了没让改的字段」）。
+    """
+    import plan_ops
     listing = "、".join(materials) if materials else "（INPUT/ 为空）"
+    trans = {t.get("clip"): t.get("transition")
+             for t in base_plan.get("timeline") or []}
+    rows = []
+    for c in base_plan.get("clips") or []:
+        ts = c.get("trim_start") or 0
+        te = c.get("trim_end")
+        te_s = f"{te:g}" if isinstance(te, (int, float)) else "末尾"
+        tr = trans.get(c.get("id"))
+        tr_s = "硬切" if not tr else f"{tr.get('type')} {tr.get('duration')}s"
+        eff = ",".join(e.get("name", "?") if isinstance(e, dict) else str(e)
+                       for e in (c.get("effects") or [])) or "-"
+        mute = " [已静音]" if (c.get("audio") or {}).get("mute") else ""
+        rows.append(f"  {c.get('id')}  {str(c.get('source')).rsplit('/', 1)[-1]}"
+                    f"  {ts:g}-{te_s}s  转场:{tr_s}  效果:{eff}{mute}")
+    audio = base_plan.get("audio")
+    audio_s = json.dumps(audio, ensure_ascii=False) if audio else "（无全局 BGM，原声直通）"
     body = (
         "用户在上一版成片的基础上提出了新的要求。\n\n"
         f"最初的需求：{task}\n"
         f"上一版已产出的成片：{base_output}\n"
-        "上一版提交的计划（JSON）：\n"
-        + json.dumps(base_plan, ensure_ascii=False, indent=2)
-        + f"\n\n当前 INPUT/ 里实际可用的素材：{listing}\n\n"
+        "上一版计划的片段表（id 可直接用于 ops）：\n" + "\n".join(rows)
+        + f"\n顶层音频块（BGM）：{audio_s}\n"
+        f"当前 INPUT/ 里实际可用的素材：{listing}\n\n"
         f"用户这次的修改要求：{new_task}\n\n"
-        "要求：在上一版计划的基础上做最小必要修改，只改用户要求的部分，"
-        "其余字段原样保留。输出完整的新计划（不是补丁），并重新调用 submit_plan。"
-        "如果你不确定用户指的是哪一处，先调用 ask_user 确认，不要猜。"
+        + plan_ops.OPS_DOC + "\n\n"
+        "提交方式：调用 edit_plan(ops) 工具提交操作列表——这是修订轮唯一合法的"
+        "执行出口；ops 表达不了就不要硬凑，改用 ask_user 说明。\n"
+        "动手前先判断消息性质：如果它不是修改要求，而是在询问/确认上一轮的情况"
+        "（「你重新剪了吗」「成片多长」），调用 ask_user 如实汇报，不要执行。\n"
+        "如果用户提到了具体对象（某个片段/素材/场景），只对那些片段下 ops；"
+        "不确定指代（比如「背景音乐」指全局 BGM 还是某视频自带的声音）就先 "
+        "ask_user 确认，不要猜。"
     )
     return [{"role": "user", "content": body}]
 
@@ -654,7 +731,9 @@ def build_answer_brief(pending: dict, answer: str) -> list:
         f"用户的回答是：{answer}\n\n"
         "请据此继续：如果这是素材不匹配的确认（用户从选项里选了处理方式），"
         "按用户的选择修正计划并重新调用 submit_plan；"
-        "如果用户的回答与问题无关，就把它当作一条新的要求来处理。"
+        "如果用户的回答与问题无关，先判断它是新的剪辑要求还是仅仅在询问情况——"
+        "是要求就按修订处理并重新调用 submit_plan；只是询问（如「剪好了吗」）"
+        "就调用 ask_user 如实汇报，不要提交新计划。"
     )
     return [{"role": "user", "content": body}]
 
@@ -684,7 +763,9 @@ def plan_with_retry(task: str, project_root: str, invoke, emit,
                     base_output: str | None = None,
                     output_suffix: str | None = None,
                     probe_fn=None,
-                    quality: str = "final"):
+                    quality: str = "final",
+                    base_plan: dict | None = None,
+                    apply_ops_fn=None):
     """出计划 → Preflight 匹配校验 → 编译；失败按「谁能修」三分流。
 
     invoke(messages) -> result_state   调用方决定「怎么跑 agent」（打印 / 流式上报）
@@ -699,22 +780,38 @@ def plan_with_retry(task: str, project_root: str, invoke, emit,
       messages       预构造的首轮上下文（修订 brief / 问答接续 brief）；None = task 单条
       base_output    上一版产物路径；output_suffix 提供时，新计划同名会自动改名（D4 防覆盖）
       probe_fn       服务端缓存的真实探针（src->probe dict）；None = 现场 ffprobe
+      base_plan      上一版计划；与 apply_ops_fn 同给时，修订轮走 edit_plan(ops) 路径
+      apply_ops_fn   plan_ops.apply_ops；agent 调了 edit_plan 就由宿主确定性施加
     """
     first_messages: list = list(messages) if messages else [{"role": "user", "content": task}]
     messages = first_messages
     result: dict = {}
     last_errors: list[str] | None = None
+    ops_mode = base_plan is not None and apply_ops_fn is not None
 
     for attempt in range(max_retries + 1):
         emit({"type": "attempt", "n": attempt + 1, "max": max_retries + 1})
 
         # ① 调模型（异常也转入统一的失败处理）
         plan: dict | None = None
+        errors: list[str] | None = None
         try:
             result = invoke(messages)
-            plan = extract_plan(result)
-            errors: list[str] | None = None
+            ops = extract_ops(result) if ops_mode else None
+            if ops is not None:
+                # V9 P2：修订轮 edit_plan(ops) → 宿主确定性施加（不重写整份计划）
+                plan, applied, op_errors = apply_ops_fn(base_plan, ops)
+                if op_errors:
+                    plan = None
+                    errors = op_errors
+                    emit({"type": "compile_error", "errors": errors})
+                else:
+                    summary = "；".join(a["detail"] for a in applied[:8])
+                    emit({"type": "status", "text": f"已应用 {len(applied)} 个编辑操作：{summary}"})
+            else:
+                plan = extract_plan(result)
         except Exception as exc:
+            plan = None
             errors = [f"调用模型失败（{type(exc).__name__}）：{str(exc)[:300]}"]
             emit({"type": "error", "message": errors[0]})
 
@@ -796,7 +893,8 @@ def plan_with_retry(task: str, project_root: str, invoke, emit,
             "type": "status",
             "text": f"把 {len(errors)} 条错误回传给模型重出计划（第 {attempt + 2} 次）…",
         })
-        messages = _retry_feedback(task, plan, errors, preamble=first_messages)
+        messages = _retry_feedback(task, plan, errors, preamble=first_messages,
+                                   ops_mode=ops_mode)
 
     return None, result
 
