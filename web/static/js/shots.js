@@ -55,6 +55,8 @@ function shotCard(it, shot){
 
   const foot = el('div', 'foot');
   if (shot.label) foot.append(el('span', 'qchip ' + (lab.quality || 'ok'), lab.quality || 'ok'));
+  if (typeof lab.aes_score === 'number')          // V8.3 美学分（旧卡无分不显示）
+    foot.append(el('span', 'qchip aes', '美学' + lab.aes_score.toFixed(2)));
   const sil = ((it.content || {}).signals || {}).audio;
   if (sil && sil.silence_ratio != null && sil.silence_ratio >= 0.3){
     foot.append(el('span', 'idxstate', `静音${Math.round(sil.silence_ratio * 100)}%`));

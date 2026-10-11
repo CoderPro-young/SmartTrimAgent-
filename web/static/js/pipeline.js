@@ -194,6 +194,18 @@ function globalCard(){
 
   if (workPlan.audio && workPlan.audio.source){
     fields.append(el('span', 'effchip', 'BGM ' + (workPlan.audio.source || '').split('/').pop()));
+    // V8.2 节拍卡点：参数卡可开关（改完点「按修改重新渲染」走 /api/replan 生效）
+    const snap = el('span', 'effchip snap' + (workPlan.audio.snap_beats ? ' on' : ''),
+                    workPlan.audio.snap_beats ? '🎵 卡点开' : '🎵 卡点关');
+    snap.title = '节拍卡点（V8.2）：编译器把剪辑点吸附到 BGM 节拍（单次 ≤±0.35s）；'
+               + '纯氛围乐检测不到节拍会自动跳过';
+    if (editable){
+      snap.onclick = () => {
+        workPlan.audio.snap_beats = !workPlan.audio.snap_beats;
+        renderPlan(workPlan, { editable });
+      };
+    }
+    fields.append(snap);
   }
   card.append(fields);
   return card;

@@ -257,6 +257,7 @@ button.ghost.danger{color:var(--bad)}
 .qchip.good{background:rgba(61,220,132,.14);color:var(--ok)}
 .qchip.ok{background:rgba(124,156,255,.12);color:var(--accent)}
 .qchip.poor{background:rgba(255,193,77,.14);color:var(--warn)}
+.qchip.aes{background:rgba(186,128,255,.14);color:#a875ff}   /* V8.3 美学分 */
 .anaprog{font-size:12px;color:var(--muted);margin-bottom:10px}
 .anaprog .pbar{display:inline-block;width:90px;height:6px;border-radius:3px;
   background:var(--line);vertical-align:middle;margin-left:8px;overflow:hidden}
@@ -387,6 +388,8 @@ button.ghost.danger{color:var(--bad)}
   color:var(--accent);border-radius:999px;padding:2px 6px 2px 10px;
 }
 .effchip .x{cursor:pointer;color:var(--dim);font-weight:700;padding:0 3px;border-radius:50%}
+.effchip.snap{cursor:pointer}                                  /* V8.2 卡点开关 */
+.effchip.snap.on{background:rgba(61,220,132,.16);color:var(--ok)}
 .effchip .x:hover{color:var(--bad)}
 .pactions{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;align-items:center}
 @media (max-width:940px){
