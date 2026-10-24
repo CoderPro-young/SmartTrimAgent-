@@ -132,6 +132,10 @@ def _probe_meta(full_path: str) -> dict:
         if audio is None:
             return {"ok": False, "error": "既无视频轨也无音频轨"}
         return {"ok": True, "kind": "audio"}
+    # 静图判别看 demuxer 而不是时长：ffmpeg 6 对单张图报 duration=0.04
+    # （image2 默认 1 帧@25fps），按时长会把图片误判成 0.04s 的视频
+    fmt_name = (res["data"].get("format") or {}).get("format_name") or ""
+    still_image = fmt_name in ("image2", "image2pipe") or fmt_name.endswith("_pipe")
     raw = (res["data"].get("format") or {}).get("duration") or video.get("duration")
     try:
         duration = round(float(raw), 3)
@@ -139,8 +143,8 @@ def _probe_meta(full_path: str) -> dict:
         duration = None              # 静态图片没有时长，正常
     return {
         "ok": True,
-        "kind": "image" if duration is None else "video",
-        "duration": duration,
+        "kind": "image" if still_image or duration is None else "video",
+        "duration": None if still_image else duration,
         "width": video.get("width"),
         "height": video.get("height"),
         "has_audio": audio is not None,
@@ -343,9 +347,13 @@ def downsample(items: list, budget: int) -> list:
 # ----------------------------------------------------------- ② 抽帧 ---- #
 
 def _extract_frame(run, full: str, t: float, out_jpg: str) -> bool:
-    argv = ["ffmpeg", "-nostdin", "-y", "-loglevel", "error",
-            "-ss", f"{t:.3f}", "-i", full, "-frames:v", "1",
-            "-vf", f"scale={FRAME_EDGE}:-2", "-q:v", str(JPEG_Q), out_jpg]
+    # -ss 0 放在 -i 前会在静图上把唯一一帧丢掉（ffmpeg 6.1 实测：退出码 0、
+    # "Output file is empty"），静图 t 恒为 0，此时不传 -ss 即可
+    argv = ["ffmpeg", "-nostdin", "-y", "-loglevel", "error"]
+    if t > 0:
+        argv += ["-ss", f"{t:.3f}"]
+    argv += ["-i", full, "-frames:v", "1",
+             "-vf", f"scale={FRAME_EDGE}:-2", "-q:v", str(JPEG_Q), out_jpg]
     res = run(argv, timeout=EXTRACT_TIMEOUT)
     return bool(res.get("ok")) and os.path.isfile(out_jpg) and os.path.getsize(out_jpg) > 0
 

@@ -311,6 +311,49 @@ def t19_get_vlm_model_no_key(monkey_env=None):
                 os.environ[k] = v
 
 
+def t20_probe_meta_still_image():
+    """静图判别看 format_name 而非时长（ffmpeg 6 对单张图报 duration=0.04）。"""
+    def fake_probe(payload):
+        return lambda full: {"path": full, "available": True, "data": payload}
+
+    jpg_ff6 = {                       # 真实采集：微信 jpg，ffmpeg 6.1 ffprobe
+        "streams": [{"codec_name": "mjpeg", "codec_type": "video",
+                     "width": 1206, "height": 664, "duration": "0.040000"}],
+        "format": {"duration": "0.040000", "format_name": "image2"},
+    }
+    jpg_no_dur = {                    # 旧版 ffmpeg：无任何 duration 字段
+        "streams": [{"codec_name": "mjpeg", "codec_type": "video",
+                     "width": 640, "height": 480}],
+        "format": {"format_name": "image2"},
+    }
+    mp4 = {
+        "streams": [{"codec_name": "hevc", "codec_type": "video",
+                     "width": 1920, "height": 1080, "nb_frames": "549"},
+                    {"codec_name": "aac", "codec_type": "audio"}],
+        "format": {"duration": "12.345", "format_name": "mov,mp4,m4a,3gp,3g2,mj2"},
+    }
+    audio_only = {
+        "streams": [{"codec_name": "mp3", "codec_type": "audio"}],
+        "format": {"duration": "30.0", "format_name": "mp3"},
+    }
+    real_probe = ca.ffmpeg_exec.probe
+    try:
+        ca.ffmpeg_exec.probe = fake_probe(jpg_ff6)
+        m = ca._probe_meta("x.jpg")
+        assert m["kind"] == "image", f"ffmpeg6 jpg 应判 image：{m}"
+        assert m["duration"] is None, m
+        ca.ffmpeg_exec.probe = fake_probe(jpg_no_dur)
+        m = ca._probe_meta("x.jpg")
+        assert m["kind"] == "image", m
+        ca.ffmpeg_exec.probe = fake_probe(mp4)
+        m = ca._probe_meta("x.mp4")
+        assert m["kind"] == "video" and m["duration"] == 12.345, m
+        ca.ffmpeg_exec.probe = fake_probe(audio_only)
+        assert ca._probe_meta("x.mp3")["kind"] == "audio"
+    finally:
+        ca.ffmpeg_exec.probe = real_probe
+
+
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("t") and callable(v)]
 
 

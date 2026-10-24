@@ -2,7 +2,7 @@
 import { $, el, fmtClock } from './util.js';
 import { setTimelineData } from './timeline.js';
 
-export function showResult(ev){
+export function showResult(ev, { activate = true } = {}){
   const card = $('#cardResult');
   card.hidden = false;
   const p = $('#player');
@@ -17,8 +17,27 @@ export function showResult(ev){
   $('#outMeta').textContent = ev.output;
   renderReport(ev.report, ev.preview);
   renderExports(ev.exports);
-  $('#tabResult').click();
+  if (activate) $('#tabResult').click();
   card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+/* 成品区全清：「启动新任务」/ 切到没有成品的会话时调用，
+   播放器、下载链接、预览徽标、审阅报告、导出条、胶片条一并复位，
+   不再残留上一次的成品（resetResult 前 cardResult 之外的卡片一直留着旧内容）。 */
+export function resetResult(){
+  $('#cardResult').hidden = true;
+  const p = $('#player');
+  try { p.pause(); } catch {}
+  p.removeAttribute('src');
+  try { p.load(); } catch {}               // 触发 emptied，顺带停用「播放」按钮
+  $('#dl').removeAttribute('href');
+  $('#previewBadge').hidden = true;
+  $('#exportFinalBtn').hidden = true;
+  $('#outMeta').textContent = '';
+  $('#exportBar').replaceChildren();
+  $('#reportBody').replaceChildren(
+    el('span', 'empty', '出片后显示摘要（剪除明细 / 筛选命中 / 效果清单）'));
+  setTimelineData(null, null);             // 胶片条回占位符，播放头联动一并清
 }
 
 /* V6 交付：EDL/CSV 时间线导出链接（交给剪映/Premiere/Resolve 精剪） */

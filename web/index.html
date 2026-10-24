@@ -20,7 +20,10 @@
 <main>
   <!-- ========== 左：对话 ========== -->
   <section class="col left">
-    <div class="colhead">任务对话</div>
+    <div class="colhead">任务对话<span class="grow"></span>
+      <select id="sessSel" class="sesssel" hidden
+              title="历史会话：切回之前任务的对话与成品，随时可继续聊"></select>
+    </div>
     <div class="scroll" id="chatScroll"><div id="msgs"></div></div>
     <div class="composer">
       <input type="file" id="fileInput" multiple hidden>
@@ -118,12 +121,6 @@
       </div>
 
       <div class="card">
-        <h3>本次剪辑做了什么<span class="grow"></span>
-          <span style="color:var(--dim);font-size:11px">审阅报告</span></h3>
-        <div class="body" id="reportBody"><span class="empty">出片后显示摘要（剪除明细 / 筛选命中 / 效果清单）</span></div>
-      </div>
-
-      <div class="card">
         <h3>成品时间线</h3>
         <div class="tlbar">
           <button class="ghost" id="tlPlay" disabled title="播放 / 暂停（快捷键：空格）">▶ 播放</button>
@@ -131,6 +128,12 @@
           <span class="tlhint">单击 / 拖动定位 · 双击片段回看源素材</span>
         </div>
         <div class="body" id="filmstrip"><span class="empty">出片后这里展示成片结构（片段缩略 / 转场 / 时长）</span></div>
+      </div>
+
+      <div class="card">
+        <h3>本次剪辑做了什么<span class="grow"></span>
+          <span style="color:var(--dim);font-size:11px">审阅报告</span></h3>
+        <div class="body" id="reportBody"><span class="empty">出片后显示摘要（剪除明细 / 筛选命中 / 效果清单）</span></div>
       </div>
     </div>
 

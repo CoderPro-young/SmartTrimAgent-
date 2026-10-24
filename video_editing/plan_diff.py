@@ -134,11 +134,16 @@ def plan_diff(old: dict, new: dict) -> dict:
             changes.append({"kind": "modify_clip", "clip": nc.get("id"),
                             "detail": f"{nc.get('id')}：" + "；".join(bits)})
 
-    # 顺序变化（matched 集合的相对次序改变）
-    old_order = [old_clips[i].get("id") for i, _ in pairs]
-    new_order = [new_clips[j].get("id") for _, j in pairs]
-    if old_order != new_order:
-        moved = [cid for k, cid in enumerate(new_order) if old_order.index(cid) != k]
+    # 顺序变化（matched 集合的相对次序改变）。pairs 按旧序排列；匹配对两侧
+    # id 可能不同（手写整份新计划会重新编号，如旧 c4 ↔ 新 c5），所以按
+    # 索引秩比较，不能拿新 id 去旧 id 列表里查（id 不一致会直接 ValueError）
+    new_seq = [j for _, j in pairs]
+    if new_seq != sorted(new_seq):
+        by_new = sorted(pairs, key=lambda p: p[1])
+        new_rank = {j: r for r, (_, j) in enumerate(by_new)}
+        moved = [new_clips[j].get("id")
+                 for k, (_, j) in enumerate(pairs) if new_rank[j] != k]
+        new_order = [new_clips[j].get("id") for _, j in by_new]
         touched.extend(moved)
         changes.append({"kind": "reorder", "clip": "+".join(moved),
                         "detail": "片段顺序调整：" + " → ".join(new_order)})
