@@ -208,6 +208,46 @@ def t09_compile_with_snap():
         assert abs(result.math["durations"]["c1"] - 4.15) < 1e-6
 
 
+def t09b_snap_shrinks_overlays():
+    """2026-10-24 熔断回归：snap 缩短 clip 时同步收缩越界 overlay。
+
+    事故链：snap 写回 trim_end 但不动 overlay → 存进 last_plan 的计划
+    校验自相矛盾 → 修订轮以它为 base 报 overlay 越界 → 回传与修订指令
+    冲突耗尽重试熔断。修复后 snap 后的计划必须仍通过 validate_plan。
+    """
+    shrink = {"bpm": 85.7, "offset": 0.0, "beats": [3.55], "confidence": 3.0}
+    # cut1 = 3.85（c1/c2 边界 4.0 - 转场 0.3/2）→ 最近节拍 3.55，
+    # Δ=-0.3 在 BEAT_SNAP_MAX 内：转场中点对齐节拍 ⇒ c1 缩到 3.7s
+    with tempfile.TemporaryDirectory() as tmp:
+        plan = _snap_plan(tmp)
+        plan["overlays"] = [
+            {"type": "text", "at_clip": "c1", "start_offset": 3.0,
+             "duration": 0.8, "text": "尾对齐（超界→收缩到 0.7）"},
+            {"type": "text", "at_clip": "c1", "start_offset": 3.75,
+             "duration": 0.2, "text": "整条在片段外（→移除）"},
+            {"type": "text", "at_clip": "c1", "start_offset": 0.1,
+             "duration": 1.0, "text": "不受影响"},
+        ]
+        assert plan_schema.validate_plan(plan, tmp) == []   # snap 前自洽
+        orig = beat_detect.detect_beats
+        beat_detect.detect_beats = lambda src, root, **kw: dict(shrink)
+        try:
+            rep = plan_compiler._snap_to_beats(plan, tmp)
+        finally:
+            beat_detect.detect_beats = orig
+        assert rep["snapped"] >= 1, rep
+        c1 = next(c for c in plan["clips"] if c["id"] == "c1")
+        assert c1["trim_end"] == 3.7, c1
+        ovs = [o for o in plan["overlays"] if o["at_clip"] == "c1"]
+        assert len(ovs) == 2, plan["overlays"]            # 越界外的被移除
+        by_so = {o["start_offset"]: o for o in ovs}
+        assert by_so[3.0]["duration"] == 0.7              # 尾部收缩到片段末
+        assert by_so[0.1]["duration"] == 1.0              # 未受影响
+        # 核心断言：snap 后的计划仍是校验自洽的（修复前这里报 2 处越界）
+        assert plan_schema.validate_plan(plan, tmp) == [], \
+            plan_schema.validate_plan(plan, tmp)
+
+
 # ------------------------------------------------------ ③ aes_score ---- #
 
 def t10_sanitize_aes():

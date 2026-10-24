@@ -182,6 +182,79 @@ def t05_cache_and_filename_units():
         assert plan_compiler.output_filename(plan, {}) == "OUTPUT/final.mp4"
 
 
+def t06_prepass_args_in_artifact_name():
+    """v7.7 已知边界修复：prepass 参数哈希进产物名，改打码参数不再命中旧缓存。"""
+    import re
+    def _mosaic_plan(score):
+        return {"schema_version": "2.0",
+                "output": {"filename": "OUTPUT/o.mp4",
+                           "resolution": {"width": 640, "height": 480}},
+                "clips": [{"id": "c1", "source": "INPUT/a.mp4", "kind": "video",
+                           "trim_end": 5,
+                           "probe": {"duration": 10, "width": 1280, "height": 720,
+                                     "fps": 30, "has_audio": True, "has_video": True},
+                           "effects": [{"name": "face_mosaic",
+                                        "args": {"mode": "mosaic",
+                                                 "score_threshold": score}}]}],
+                "timeline": [{"clip": "c1"}]}
+
+    def _prepass_out(result):
+        det = next(c for c in result.commands if c.stage == "detect")
+        return det.argv[det.argv.index("--output") + 1]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        _make_project(tmp)
+        r1 = plan_compiler.compile_plan(_mosaic_plan(0.4), tmp)
+        out1 = _prepass_out(r1)
+        assert re.fullmatch(r"TMP/c1_face_mosaic_[0-9a-f]{8}\.mp4", out1), out1
+        # 参数不变 → 产物名稳定（幂等，可被存在即跳过逻辑复用）
+        assert _prepass_out(plan_compiler.compile_plan(_mosaic_plan(0.4), tmp)) == out1
+        # 改打码参数 → 产物名变，且归一化输入跟着变（归一化缓存键含 src，
+        # 自动失效——旧固定名时代这里会命中旧缓存，新效果不出片）
+        r2 = plan_compiler.compile_plan(_mosaic_plan(0.6), tmp)
+        out2 = _prepass_out(r2)
+        assert out2 != out1, (out1, out2)
+        norm1 = next(c for c in r1.commands if c.stage == "normalize")
+        norm2 = next(c for c in r2.commands if c.stage == "normalize")
+        i1 = norm1.argv[norm1.argv.index("-i") + 1]
+        i2 = norm2.argv[norm2.argv.index("-i") + 1]
+        assert i1 == out1 and i2 == out2, (i1, i2)
+
+
+def t07_prepass_artifact_reuse():
+    """prepass 产物存在且非空 → 跳过全片重跑；空文件不跳过。"""
+    def _mosaic_plan():
+        return {"schema_version": "2.0",
+                "output": {"filename": "OUTPUT/o.mp4",
+                           "resolution": {"width": 640, "height": 480}},
+                "clips": [{"id": "c1", "source": "INPUT/a.mp4", "kind": "video",
+                           "trim_end": 5,
+                           "probe": {"duration": 10, "width": 1280, "height": 720,
+                                     "fps": 30, "has_audio": True, "has_video": True},
+                           "effects": [{"name": "face_mosaic",
+                                        "args": {"mode": "mosaic"}}]}],
+                "timeline": [{"clip": "c1"}]}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        _make_project(tmp)
+        r1 = plan_compiler.compile_plan(_mosaic_plan(), tmp)
+        det = next(c for c in r1.commands if c.stage == "detect")
+        out = det.argv[det.argv.index("--output") + 1]
+        # 产物非空 → replan 未改参数时不再生成 detect 命令，归一化输入不变
+        os.makedirs(os.path.join(tmp, "TMP"), exist_ok=True)
+        with open(os.path.join(tmp, out), "wb") as f:
+            f.write(b"x" * 64)
+        r2 = plan_compiler.compile_plan(_mosaic_plan(), tmp)
+        assert not [c for c in r2.commands if c.stage == "detect"]
+        norm = next(c for c in r2.commands if c.stage == "normalize")
+        assert norm.argv[norm.argv.index("-i") + 1] == out
+        # 空文件（上次失败的半成品）不视为有效缓存 → 重跑
+        with open(os.path.join(tmp, out), "wb") as f:
+            f.write(b"")
+        r3 = plan_compiler.compile_plan(_mosaic_plan(), tmp)
+        assert [c for c in r3.commands if c.stage == "detect"]
+
+
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("t") and callable(v)]
 
 

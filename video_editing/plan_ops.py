@@ -17,16 +17,20 @@ _IMAGE_EXT = {".png", ".jpg", ".jpeg", ".jfif", ".webp", ".bmp", ".gif",
               ".tif", ".tiff", ".heic", ".avif"}
 
 # 给修订 brief 用的词汇表（模型侧唯一可见的 ops 说明）
-OPS_DOC = """可用操作（ops，每个是对象，按顺序执行）：
-- {"op":"remove_clip","clip":"C11"}                      删除片段
-- {"op":"add_clip","source":"INPUT/x.mp4","trim_start":0,"trim_end":5,"after":"C3"}
+OPS_DOC = """可用操作（ops，每个是对象，按顺序执行；clip id 必须逐字引用上一版
+计划里已有的 id——大小写敏感，不要自己改写大小写或重新编号）：
+- {"op":"remove_clip","clip":"c11"}                      删除片段
+- {"op":"add_clip","source":"INPUT/x.mp4","trim_start":0,"trim_end":5,"after":"c3"}
   新增片段（after 省略 = 追加到末尾；source 必须是 INPUT/ 里存在的素材）
-- {"op":"set_clip_trim","clip":"C4","trim_start":44.1,"trim_end":54.1}   只改裁剪区间
-- {"op":"move_clip","clip":"C7","after":"C2"}             调整顺序（after 省略 = 移到最前）
-- {"op":"mute_clip","clip":"C1","on":true}                静音/取消静音某片段原声
-- {"op":"set_transition","clip":"C5","type":"fade","duration":0.4}       改转场（type="none" = 硬切）
+- {"op":"set_clip_trim","clip":"c4","trim_start":44.1,"trim_end":54.1}   只改裁剪区间
+- {"op":"move_clip","clip":"c7","after":"c2"}             调整顺序（after 省略 = 移到最前）
+- {"op":"mute_clip","clip":"c1","on":true}                静音/取消静音某片段原声
+- {"op":"set_transition","clip":"c5","type":"fade","duration":0.4}       改转场（type="none" = 硬切）
 - {"op":"set_audio","audio":null}                         删除全局 BGM（必须显式 null）
 - {"op":"set_audio","audio":{"source":"MUSIC/x.mp3","volume":0.8,"loop":true}}   设置/替换全局 BGM
+  （audio 另接受 "original":"keep"（保留原声与 BGM 混音，缺省 mute=纯 BGM）和
+   "ducking":true（有人声自动压低配乐）。「只保留某几段原声」的写法：
+   set_audio 带 original:keep，再对其余片段逐个 mute_clip）
 规则：只对用户要求的部分下 ops，其余片段一律不碰；ops 表达不了就调用 ask_user，
 不要退回重写整份计划。"""
 
@@ -39,7 +43,11 @@ def _find_clip(plan: dict, cid, errors: list, idx: int):
     for c in plan.get("clips") or []:
         if c.get("id") == cid:
             return c
-    _err(errors, f"第 {idx} 个操作：片段 {cid} 不存在（上一版计划里没有这个 id）。")
+    # 附实际 id 清单（对齐 plan_schema「素材不存在时列 INPUT/ 实际文件」的
+    # 自救模式）：2026-10-23 实测 agent 把 c9 誊成 C9，一轮重试浪费在找 id 上
+    ids = "、".join(str(c.get("id")) for c in (plan.get("clips") or [])) or "（无）"
+    _err(errors, f"第 {idx} 个操作：片段 {cid} 不存在（上一版计划里没有这个 id；"
+                 f"id 大小写敏感，须逐字引用）。可用的 id：{ids}。")
     return None
 
 

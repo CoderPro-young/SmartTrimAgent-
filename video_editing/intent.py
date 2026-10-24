@@ -25,6 +25,34 @@ _TASK_VERBS = ("删", "去掉", "加上", "添加", "换成", "调整", "剪", "
                "打码", "加字幕", "配乐", "导出", "渲染", "保留", "改成",
                "换背景", "提速", "倍速", "淡入", "淡出", "重剪")
 
+# 「先给方案再动手」类消息：祈使形态（给我/出几个，classify 判 task）但
+# 语义是咨询讨论。2026-10-15 事故：用户要替代方案，agent 直接开剪——
+# ask_user 是合法出口而非结构保证，模型瞬时误判就会执行。这里检测命中后
+# 由 server 给 agent 消息注入「本轮禁止执行」硬指令（D4：不靠模型诚实）。
+_PROPOSAL_WORDS = ("替代方案", "几个方案", "备选", "别的思路", "不同的风格",
+                   "不同风格", "几种剪法", "几种方案", "几个选择", "选项",
+                   "给个方案", "出个方案", "先给方案", "方案选", "选一个再",
+                   "对比一下", "对比一下方案")
+_BRAKE_WORDS = ("先别", "别急", "先不剪", "先不要剪", "不要马上",
+                "让我想想", "我想想", "先看看", "再决定", "先讨论", "先说思路")
+# 已选定方案的回复形态：执行授权，不是再要一轮方案
+_PICK_WORDS = ("就用", "选好", "定了", "用方案", "选方案", "按方案",
+               "方案a", "方案b", "方案c", "方案d",
+               "方案A", "方案B", "方案C", "方案D")
+
+
+def is_proposal_request(msg: str) -> bool:
+    """消息是否在「要方案/踩刹车」——命中则本轮只准 ask_user 出方案。
+
+    「用方案C剪」这类已选定回复不拦（否则用户永远无法启动执行）。
+    """
+    m = _norm(msg)
+    if not m:
+        return False
+    if any(w in m for w in _PICK_WORDS):
+        return False
+    return bool(any(w in m for w in _PROPOSAL_WORDS + _BRAKE_WORDS))
+
 
 def _norm(msg: str) -> str:
     return (msg or "").strip().translate(
@@ -47,6 +75,10 @@ def classify(msg: str, has_session: bool = False) -> tuple[str, str]:
     if question and imperative:
         return "task", "rule-imperative"      # 「帮我…好吗」是请求
     if question:
+        # 「有没有别的方案？先别动手」要的是方案选项，不是现状汇报——
+        # 放行为 task（basis=rule-proposal），server 注入点会加禁执行指令
+        if is_proposal_request(m):
+            return "task", "rule-proposal"
         return "status_question", "rule-question"
     if imperative or verb_task:
         return "task", "rule-verb"
@@ -105,6 +137,12 @@ def build_status_answer(session: dict) -> str:
     lines.append(f"当前会话已进行 {turn} 轮；上一版成片是 {out}，"
                  f"共 {len(clips)} 个片段、约 {round(dur, 1)}s，"
                  f"用了 {len(srcs)} 个素材（{('、'.join(srcs[:3]))}{'…' if len(srcs) > 3 else ''}）。")
+    audio = plan.get("audio") or {}
+    if audio.get("source"):
+        name = str(audio["source"]).rsplit("/", 1)[-1]
+        vol = audio.get("volume")
+        vol_part = f"，音量 {vol}" if vol is not None and vol != 1 else ""
+        lines.append(f"BGM 用的 {name}{vol_part}。")
     exp = session.get("last_expansions") or {}
     bits = []
     if exp.get("select"):

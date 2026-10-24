@@ -190,6 +190,27 @@ def t09_intent_confirm():
 
 
 @t
+def t15_intent_proposal_request():
+    # 2026-10-15 事故回归：要方案的消息（祈使形态）不得直接开剪。
+    # is_proposal_request 命中 → server 给 agent 消息注入「本轮禁止
+    # submit_plan」host 指令（结构保证，不靠模型自觉 ask_user）。
+    assert intent.is_proposal_request(
+        "先别急着剪，给我几个不同风格的替代方案，我选一个再动手")
+    assert intent.is_proposal_request("你重新给个替代方案看看")
+    assert intent.is_proposal_request("先别动手，我想想")
+    assert intent.is_proposal_request("把几个选项列一下")
+    # 已选定方案的回复 = 执行授权，不拦（否则用户永远无法启动执行）
+    assert not intent.is_proposal_request("用方案C剪，其他不变")
+    assert not intent.is_proposal_request("就选方案2")
+    assert not intent.is_proposal_request("帮我重新剪好吗")
+    assert not intent.is_proposal_request("删掉最后一个片段")
+    # 问句形态的方案请求放行为 task（rule-proposal），不再答非所问地汇报现状
+    assert intent.classify("有没有别的方案？先别动手") == ("task", "rule-proposal")
+    # 普通问句不受影响
+    assert intent.classify("你重新剪了嘛")[0] == "status_question"
+
+
+@t
 def t10_status_answer():
     s = {"turn": 2, "last_output": "OUTPUT/final.mp4", "last_plan": _mk_plan(3),
          "last_expansions": {"select": {"picked": [1, 2, 3]},
@@ -249,6 +270,54 @@ def t12_revision_brief_ops_mode():
 
 
 @t
+def t16_retry_feedback_ops_mode_escape():
+    # 2026-10-24 熔断回归：修订轮（ops_mode）校验失败时，回传必须给出
+    # 「ops 覆盖不到的字段允许 submit_plan」的例外出口——否则与修订 brief
+    # 的「只允许 edit_plan」矛盾，模型摆烂耗尽重试。
+    import video_agent as va
+    plan = _mk_plan(3)
+    errs = ["overlays[2] 越界：start_offset(3.9) + duration(1.1) 超出片段 c2 的长度 4.9s。"]
+    pre = [{"role": "user", "content": "修订brief…只允许 edit_plan"}]
+    msgs = va._retry_feedback("任务", plan, errs, preamble=pre, ops_mode=True)
+    assert msgs[0] is pre[0]                      # preamble 保留（修订语义不丢）
+    tail = msgs[-1]["content"]
+    assert "edit_plan" in tail and "submit_plan" in tail, tail[:200]
+    assert "例外" in tail                         # 明确的岔路指引
+    # 非 ops_mode 路径不受影响：仍是单纯的 submit_plan 指导
+    msgs2 = va._retry_feedback("任务", plan, errs)
+    assert "submit_plan" in msgs2[-1]["content"] and "例外" not in msgs2[-1]["content"]
+    # plan is None + ops_mode（agent 没产出任何工具调用）：不炸 + 三出口指引
+    msgs3 = va._retry_feedback("任务", None, ["未能提取计划"], ops_mode=True)
+    body3 = msgs3[-1]["content"]
+    for kw in ("edit_plan", "submit_plan", "ask_user"):
+        assert kw in body3, body3[:200]
+
+
+@t
+def t17_guard_overwrite_preview_suffix():
+    # 2026-10-24 回归：base_output 存实际产物名（带 _preview）后，计划原名
+    # 的同名覆盖检测失效——修订轮悄悄覆盖上一版成片（simtest4 实测）。
+    import video_agent as va
+    got = []
+    plan = {"output": {"filename": "OUTPUT/slideshow.mp4"}}
+    # preview 档：实际产物名匹配 → 改名
+    va._guard_overwrite(plan, "OUTPUT/slideshow_preview.mp4", "-r2",
+                        "preview", lambda ev: got.append(ev))
+    assert plan["output"]["filename"] == "OUTPUT/slideshow-r2.mp4", plan
+    assert got and "改名" in got[0]["text"]
+    # 原名直接匹配（final 档）→ 改名
+    p2 = {"output": {"filename": "OUTPUT/final.mp4"}}
+    va._guard_overwrite(p2, "OUTPUT/final.mp4", "-r2", "final",
+                        lambda ev: None)
+    assert p2["output"]["filename"] == "OUTPUT/final-r2.mp4"
+    # 不同名 → 不动
+    p3 = {"output": {"filename": "OUTPUT/other.mp4"}}
+    va._guard_overwrite(p3, "OUTPUT/final_preview.mp4", "-r2", "preview",
+                        lambda ev: None)
+    assert p3["output"]["filename"] == "OUTPUT/other.mp4"
+
+
+@t
 def t13_extract_ops():
     import video_agent as va
 
@@ -260,6 +329,46 @@ def t13_extract_ops():
                                      "args": {"ops": [{"op": "remove_clip", "clip": "C2"}]}}])]}
     assert va.extract_ops(result) == [{"op": "remove_clip", "clip": "C2"}]
     assert va.extract_ops({"messages": [FakeMsg([])]}) is None
+
+
+@t
+def t14_diff_reorder_renumbered_ids():
+    """事故回归（2026-10-13）：手写整份新计划会重新编号，匹配对两侧 id 不同，
+    旧实现拿新 id 去旧 id 列表 .index() 直接 ValueError 崩掉整轮修订；
+    且 id 稳定时旧比较序列恒等，reorder 从来不会被报出来。"""
+    old = {"clips": [
+        {"id": "C1", "source": "INPUT/concert.mp4", "trim_start": 0, "trim_end": 8},
+        {"id": "C2", "source": "INPUT/concert.mp4", "trim_start": 40.72, "trim_end": 44.12},
+        {"id": "C3", "source": "INPUT/concert.mp4", "trim_start": 31.8, "trim_end": 33.52},
+        {"id": "C4", "source": "INPUT/dance.mp4", "trim_start": 0, "trim_end": 5}],
+        "timeline": [{"clip": c["id"]} for c in _mk_plan(4)["clips"]],
+        "output": {"filename": "OUTPUT/final.mp4"}}
+    # 新计划：重新编号（c1..c5）+ 31.8/40.72 两段次序对调 + 新增一张图片
+    new = {"clips": [
+        {"id": "c1", "source": "INPUT/concert.mp4", "trim_start": 0, "trim_end": 8},
+        {"id": "c2", "source": "INPUT/concert.mp4", "trim_start": 31.8, "trim_end": 40.72},
+        {"id": "c3", "source": "INPUT/concert.mp4", "trim_start": 40.72, "trim_end": 54.12},
+        {"id": "c4", "source": "INPUT/dance.mp4", "trim_start": 0, "trim_end": 5},
+        {"id": "c5", "source": "INPUT/poster.jpg", "kind": "image", "duration": 4}],
+        "timeline": [{"clip": c["id"]} for c in _mk_plan(5)["clips"]],
+        "output": {"filename": "OUTPUT/final.mp4"}}
+    d = plan_diff.plan_diff(old, new)          # 旧实现在此 ValueError: 'c3' is not in list
+    kinds = [c["kind"] for c in d["changes"]]
+    assert "reorder" in kinds, d
+    ro = next(c for c in d["changes"] if c["kind"] == "reorder")
+    assert set(ro["clip"].split("+")) == {"c2", "c3"}, ro   # 对调的两段被点名
+    assert "c1" not in ro["clip"] and "c4" not in ro["clip"]
+    assert "add_clip" in kinds                                # 图片新增如实上报
+    assert all("c5" == c.get("clip") or c["kind"] != "modify_clip"
+               for c in d["changes"] if c["kind"] == "add_clip")
+
+    # id 稳定（ops move_clip 路径）：同样要能报出 reorder
+    base = _mk_plan(3)
+    moved_plan, _, errs = plan_ops.apply_ops(
+        base, [{"op": "move_clip", "clip": "C3", "after": "C1"}])
+    assert not errs, errs
+    d2 = plan_diff.plan_diff(base, moved_plan)
+    assert any(c["kind"] == "reorder" for c in d2["changes"]), d2
 
 
 def main():

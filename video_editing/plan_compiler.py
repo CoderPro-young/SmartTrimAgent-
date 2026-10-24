@@ -94,10 +94,32 @@ def _effects_to_vf(effects: list) -> str:
     return ",".join(parts)
 
 
-def _prepass_commands(cid: str, src: str, effects: list) -> tuple[list[Command], str]:
+def _prepass_cache_key(project_root: str, src: str, args: dict) -> str:
+    """prepass 产物名的参数指纹：args 规范 JSON + 输入 stat。
+
+    输入 stat 一并进键：原素材同名替换后产物名跟着变，不会拿旧打码结果
+    归一化新素材。
+    """
+    import hashlib
+    try:
+        st = os.stat(os.path.join(project_root, src))
+        stat_part = f"{st.st_size}|{int(st.st_mtime)}"
+    except OSError:
+        stat_part = "0|0"
+    payload = json.dumps(args, sort_keys=True, ensure_ascii=False) + "|" + stat_part
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:8]
+
+
+def _prepass_commands(cid: str, src: str, effects: list,
+                      project_root: str = ".") -> tuple[list[Command], str]:
     """执行 PREPASS 类技能（如人脸打码），返回 (命令列表, 替换后的输入路径)。
 
-    产出 TMP/{cid}_<skill>.mp4，供后续归一化作为输入。多个 prepass 顺序串联。
+    产出 TMP/{cid}_<skill>_<args指纹>.mp4，供后续归一化作为输入。多个 prepass
+    顺序串联（第二个 prepass 的输入指纹含第一个的产物路径）。
+    参数进产物名是 v7.7 已知边界的修复：固定名时代改打码参数后归一化缓存键
+    （含 src 路径与原素材 stat，不含 prepass args）完全不变，直接命中旧缓存，
+    新打码效果不出片。现在参数变 → 产物路径变 → 归一化键自动失效。
+    产物已存在且非空则跳过执行（prepass 是全片渲染，replan 未改参数时复用）。
     """
     commands: list[Command] = []
     for eff in effects:
@@ -105,8 +127,13 @@ def _prepass_commands(cid: str, src: str, effects: list) -> tuple[list[Command],
         skill = get_skill(name)
         if skill is None or skill.prepass is None:
             continue
-        out = f"TMP/{cid}_{name}.mp4"
-        argv = skill.prepass(src, out, eff.get("args") or {})
+        args = eff.get("args") or {}
+        out = f"TMP/{cid}_{name}_{_prepass_cache_key(project_root, src, args)}.mp4"
+        if os.path.isfile(os.path.join(project_root, out)) and \
+                os.path.getsize(os.path.join(project_root, out)) > 0:
+            src = out
+            continue
+        argv = skill.prepass(src, out, args)
         commands.append(Command("detect", f"{name} 前置处理 {cid} ({src})", argv))
         src = out
     return commands, src
@@ -391,7 +418,7 @@ def _normalize_commands(plan: dict, math: dict,
         effects = c.get("effects") or []
         ca = c.get("audio") or {}            # V7.7 逐段控声
         # PREPASS 类技能（face_mosaic 等）：先插入前置命令，归一化输入改为其中间产物
-        prepass_cmds, src = _prepass_commands(cid, src, effects)
+        prepass_cmds, src = _prepass_commands(cid, src, effects, project_root)
         commands.extend(prepass_cmds)
         filter_effects = [e for e in effects if is_vf(e.get("name"))]
         kind = c["kind"]
@@ -1162,6 +1189,29 @@ def _num(x) -> bool:
     return isinstance(x, (int, float)) and not isinstance(x, bool)
 
 
+def _shrink_overlays_after_snap(plan: dict, cid: str, new_d: float) -> None:
+    """snap 缩短 clip 后同步收缩/移除其越界 overlay（保持计划校验自洽）。
+
+    snap 直接写回 trim_end，而 overlay 是按旧 trim 写的：尾部超界的 overlay
+    若不处理，存进 last_plan 的计划通不过下一轮校验——2026-10-24 实测熔断
+    案例：修订轮以污染的 last_plan 为 base，报 4 处 overlay 越界，叠加回传
+    指令冲突（修订 brief 教 edit_plan vs 回传要求 submit_plan）耗尽重试。
+    起点已在片段外的 overlay 整条移除（duration 必须为正，压 0 不合法）；
+    snap 延长方向不调用本函数（overlay 保持原样即可）。
+    """
+    kept = []
+    for ov in plan.get("overlays") or []:
+        if ov.get("at_clip") == cid:
+            so = float(ov.get("start_offset") or 0)
+            dur = float(ov.get("duration") or 0)
+            if so >= new_d:
+                continue                      # 整条落在片段外 → 移除
+            if so + dur > new_d + 1e-6:
+                ov["duration"] = _round2(new_d - so)
+        kept.append(ov)
+    plan["overlays"] = kept
+
+
 def _snap_to_beats(plan: dict, project_root: str) -> dict:
     """把相邻 clip 的剪辑点吸附到 BGM 节拍（借鉴 FireRed plan_timeline 的
     use_beats；本项目在 trim 层面实现——调整入画片段的 trim_end，下游
@@ -1235,6 +1285,8 @@ def _snap_to_beats(plan: dict, project_root: str) -> dict:
         else:
             clips[i]["trim_end"] = _round2(
                 (clips[i].get("trim_start") or 0) + new_d)
+        if new_d < d:
+            _shrink_overlays_after_snap(plan, clips[i]["id"], new_d)
         snapped += 1
         max_shift = max(max_shift, abs(new_d - d))
         cursor = cursor + new_d - trans[i]
@@ -1647,13 +1699,23 @@ def execute(result: CompileResult, project_root: str, should_stop=None) -> Compi
             raise Cancelled(f"已取消：未执行「{c.description}」")
         return {"description": c.description, **ffmpeg_exec.run(c.argv, cwd=project_root)}
 
-    parallel = [c for c in result.commands if c.stage in ("detect", "normalize")]
+    # 分两批并行：normalize 的输入可能是 detect（prepass）的产物
+    # （TMP/{cid}_<skill>_*.mp4），两者有数据依赖，不能同池——2026-10-24
+    # simtest5 实测：face_mosaic 渲染 87s 素材耗时数分钟，同池的归一化
+    # 启动即读半成品 rc=-2（exec 事件按完成序发还掩盖了真实时序）。
+    # detect 批内可并行（多 prepass 相互独立），跑完再并行 normalize。
+    detects = [c for c in result.commands if c.stage == "detect"]
+    norms = [c for c in result.commands if c.stage == "normalize"]
     renders = [c for c in result.commands if c.stage not in ("detect", "normalize")]
 
     done: dict[int, dict] = {}
-    if parallel:
-        with ThreadPoolExecutor(max_workers=min(2, len(parallel))) as ex:
-            futures = {ex.submit(run_one, c): i for i, c in enumerate(parallel)}
+
+    def run_batch(batch: list[Command], offset: int) -> None:
+        if not batch:
+            return
+        with ThreadPoolExecutor(max_workers=min(2, len(batch))) as ex:
+            futures = {ex.submit(run_one, c): offset + i
+                       for i, c in enumerate(batch)}
             cancelled: Cancelled | None = None
             for fut in as_completed(futures):
                 i = futures[fut]
@@ -1665,8 +1727,11 @@ def execute(result: CompileResult, project_root: str, should_stop=None) -> Compi
                 # 已完成的照常入账，再统一抛取消
                 result.executes = [done[i] for i in sorted(done)]
                 raise cancelled
+
+    run_batch(detects, 0)
+    run_batch(norms, len(detects))
     for i, c in enumerate(renders):
-        done[len(parallel) + i] = run_one(c)
+        done[len(detects) + len(norms) + i] = run_one(c)
     result.executes = [done[i] for i in sorted(done)]
     return result
 

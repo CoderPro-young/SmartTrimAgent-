@@ -674,10 +674,18 @@ def _run_pipeline(task: str, emit, session_id: str | None = None,
     pending_plan = session.pop("pending_plan", None)
     if pending_plan is not None:
         if intent_mod.is_confirm(task):
-            _commit_compiled(session, task, pending_plan)
-            _execute_compiled(pending_plan, emit, session)
+            if _execute_compiled(pending_plan, emit, session):
+                _commit_compiled(session, task, pending_plan)
             return
         # 不是确认 ⇒ 用户否了全局方案；回答作为新修订要求走下面的正常路径
+
+    # ---- 结构保证（2026-10-15 事故）：「先给方案/先别动手」类消息本轮禁止执行 ----
+    # ask_user 是合法出口而非硬保证，模型瞬时误判会直接开剪；命中即给 agent
+    # 的任务文本追加 host 指令（只影响本轮发送，不写进 session["task"]）。
+    if intent_mod.is_proposal_request(task):
+        task = (task + "\n\n[host 指令] 用户要求先看方案：本轮禁止 submit_plan，"
+                "禁止渲染。用 ask_user 给出 2~4 个可选方案（结构/节奏/BGM 方向、"
+                "与上一版的差异），等用户下一轮选定后再执行。")
 
     # 消息构造三优先级（纯文本，遵守「不重放消息历史」约束）
     pending = session.get("pending_question")
@@ -753,14 +761,19 @@ def _run_pipeline(task: str, emit, session_id: str | None = None,
             session["pending_question"] = gate_q
             return
 
-    _commit_compiled(session, task, compiled)
-    _execute_compiled(compiled, tracking_emit, session)
+    # 先执行后提交：渲染失败的计划不占「上一版」位（不回滚会让下一轮修订
+    # brief 引用不存在的成片，agent 拿错误事实判断——2026-10-24 simtest5 实测）
+    if _execute_compiled(compiled, tracking_emit, session):
+        _commit_compiled(session, task, compiled)
 
 
 def _commit_compiled(session: dict, task: str, compiled) -> None:
     """成功提交新计划 → 更新会话（成功路径与闸门放行路径共用）。"""
     session["last_plan"] = compiled.plan      # 展开后的可执行计划（replan 卡片编辑用）
-    session["last_output"] = compiled.plan["output"]["filename"]
+    # 实际产物名（preview 档带 _preview 后缀）——存 plan 原名会让
+    # status_answer 汇报一个磁盘上不存在的文件（2026-10-24 实测发现）
+    session["last_output"] = plan_compiler.output_filename(
+        compiled.plan, compiled.math)
     session["pending_question"] = None
     session["pending_plan"] = None
     session["last_expansions"] = getattr(compiled, "expansions", None) or {}
@@ -820,10 +833,13 @@ def _build_report(compiled) -> dict:
     return rep
 
 
-def _execute_compiled(compiled, emit, session: dict | None) -> None:
+def _execute_compiled(compiled, emit, session: dict | None) -> bool:
     """编译产物 → 执行 → 回验 → done。/api/run 与 /api/replan 的公共尾巴。
 
-    done 事件带 T18 审阅报告（剪除明细/筛选命中/效果清单），前端渲染成摘要卡。
+    返回是否成功出片。done 事件带 T18 审阅报告（剪除明细/筛选命中/效果
+    清单），前端渲染成摘要卡。命令级失败时发 error（顺带触发 run_errors.log
+    落盘）并以 done(ok=false) 收尾——调用方据此**不提交**会话（渲染失败的
+    计划不占用「上一版」位，否则下一轮修订 brief 引用不存在的成片）。
     """
     # 展开后的可执行计划（select/cut_silence 已展开成真实 clips）——
     # 前端参数卡片回改（T16）编辑的是这份，而不是 LLM 提交的原始宏
@@ -851,7 +867,7 @@ def _execute_compiled(compiled, emit, session: dict | None) -> None:
         emit({"type": "error",
               "message": "dry-run 语法预检失败，已停止执行（未产生成品）：\n- "
                          + "\n- ".join(exc.errors)})
-        return
+        return False
     for ex in compiled.executes:
         ok = bool(ex.get("ok"))
         emit({
@@ -866,7 +882,16 @@ def _execute_compiled(compiled, emit, session: dict | None) -> None:
     if cancelled or (CANCEL.is_set() and not all(e.get("ok") for e in compiled.executes)):
         if not cancelled:
             emit({"type": "cancelled", "message": "已取消：ffmpeg 进程被终止。"})
-        return
+        return False
+    failed = [e for e in compiled.executes if not e.get("ok")]
+    if failed and not cancelled:
+        # 命令级失败（2026-10-24 simtest5 实测：归一化失败后曾照发 done 且
+        # 无 error 事件——run_errors.log 不落、用户端只看到失败结果无因）
+        emit({"type": "error",
+              "message": "执行失败（" + "；".join(
+                  f"{e.get('description')} rc={e.get('returncode')}"
+                  for e in failed[:3]) + "）：\n"
+              + ((failed[0].get("stderr") or "")[-600:])})
 
     plan_compiler.verify(compiled, PROJECT_ROOT)
     if session is not None:
@@ -885,20 +910,50 @@ def _execute_compiled(compiled, emit, session: dict | None) -> None:
                                 "url": "/media/" + rel.replace("\\", "/")})
         except Exception as exc:  # noqa: BLE001 —— 导出失败不该影响成片交付
             sys.stderr.write(f"[timeline-export] {type(exc).__name__}: {exc}\n")
+    ok = bool((compiled.verify or {}).get("ok")) and not failed
     emit({
         "type": "done",
         "output": out,
         "url": "/media/" + out.replace("\\", "/"),
         "preview": is_preview,
-        "ok": bool((compiled.verify or {}).get("ok")),
+        "ok": ok,
         "report": _build_report(compiled),
         "exports": exports,
     })
+    return ok
+
+
+# 运行期错误落盘（TMP/run_errors.log）：error/compile_error/traceback 事件原本
+# 只推给浏览器，服务端零痕迹（2026-10-15 事故：失败轮只能靠重放破案）。
+# 这里在 NDJSON 最外层同步留一份证据，每行一个 JSON（换行已转义）。
+_ERROR_EVENT_TYPES = ("error", "compile_error", "traceback")
+
+
+def _log_run_error(kind: str, ev: dict, **ctx) -> None:
+    rec = {"ts": time.strftime("%Y-%m-%d %H:%M:%S"), "kind": kind, **ctx,
+           "event": ev}
+    try:
+        with open(os.path.join(PROJECT_ROOT, "TMP", "run_errors.log"),
+                  "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
+    except OSError:
+        pass                    # 日志写失败不能影响主流程
+
+
+def _watch_emit(emit, kind: str, **ctx):
+    """emit 透传包装：错误类事件顺手落盘（上下文 task/session 由此注入）。"""
+    def wrapped(ev):
+        if isinstance(ev, dict) and ev.get("type") in _ERROR_EVENT_TYPES:
+            _log_run_error(kind, ev, **ctx)
+        return emit(ev)
+    return wrapped
 
 
 def _safe_run(task: str, emit, session_id: str | None = None,
               preview: bool = False) -> None:
     """包一层异常兜底：任何未预期异常都要作为事件上报，不能让前端空等。"""
+    emit = _watch_emit(emit, "run", task=(task or "")[:200],
+                       session=session_id, preview=preview)
     CANCEL.clear()                       # 新任务从干净状态开始
     acquired = RUN_LOCK.acquire(timeout=1)
     if not acquired:
@@ -950,13 +1005,17 @@ def _run_replan(plan: dict, emit, session_id: str | None,
               "evidence": w.message})
 
     emit({"type": "plan", "plan": plan})
-    _commit_compiled(session, "(卡片回改)", compiled)
-    _execute_compiled(compiled, emit, session)
+    if _execute_compiled(compiled, emit, session):
+        _commit_compiled(session, "(卡片回改)", compiled)
 
 
 def _safe_replan(plan: dict, emit, session_id: str | None = None,
                  preview: bool = False) -> None:
     """_run_replan 的异常兜底（与 _safe_run 同款）。"""
+    emit = _watch_emit(emit, "replan",
+                       output=str((plan.get("output") or {})
+                                  .get("filename") or "?"),
+                       session=session_id, preview=preview)
     CANCEL.clear()
     acquired = RUN_LOCK.acquire(timeout=1)
     if not acquired:
@@ -1532,8 +1591,9 @@ class Handler(BaseHTTPRequestHandler):
         raw = self.rfile.read(length) if length else b""
         try:
             payload = json.loads(raw or b"{}")
-        except json.JSONDecodeError:
-            self._send_json({"error": "请求体不是合法 JSON"}, 400)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            # 非 UTF-8 / 坏 JSON：回 400，不让 handler 线程直接抛栈断连
+            self._send_json({"error": "请求体不是合法 UTF-8 JSON"}, 400)
             return
 
         if path == "/api/delete":

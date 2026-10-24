@@ -349,6 +349,41 @@ def t13_captions_validation():
         assert plan_schema.validate_plan(plan, tmp) == []
 
 
+def t15_detect_before_normalize_dependency():
+    """2026-10-24 回归：normalize 输入可能是 detect（prepass）产物，
+    两者有数据依赖——V7 同池并行时代归一化启动即读半成品 rc=-2。
+    修复后必须整批 detect 完成后 normalize 才开始。"""
+    import time
+    import plan_compiler as pc
+    events = []          # (stage, kind, ts)
+    def fake_run(argv, timeout=600, cwd=None):
+        stage = "detect" if "face_mosaic" in " ".join(argv) else "normalize"
+        events.append((stage, "start", time.monotonic()))
+        time.sleep(0.15 if stage == "detect" else 0.02)
+        events.append((stage, "end", time.monotonic()))
+        return {"ok": True, "returncode": 0, "stdout": "", "stderr": ""}
+    orig_run, orig_precheck = pc.ffmpeg_exec.run, pc.precheck
+    pc.ffmpeg_exec.run = fake_run
+    pc.precheck = lambda *a, **k: None
+    try:
+        result = pc.CompileResult(plan={"output": {"filename": "OUTPUT/x.mp4"}})
+        result.commands = [
+            pc.Command("detect", "face_mosaic 前置处理 c1",
+                       ["python", "face_mosaic.py", "--input", "INPUT/a.mp4"]),
+            pc.Command("normalize", "归一化 c1", ["ffmpeg", "-i", "TMP/c1_x.mp4"]),
+            pc.Command("normalize", "归一化 c2", ["ffmpeg", "-i", "INPUT/b.mp4"]),
+        ]
+        pc.execute(result, ".")
+    finally:
+        pc.ffmpeg_exec.run = orig_run
+        pc.precheck = orig_precheck
+    det_end = max(t for s, k, t in events if s == "detect" and k == "end")
+    norm_start = min(t for s, k, t in events if s == "normalize" and k == "start")
+    assert norm_start >= det_end, f"normalize 先于 detect 完成：{events}"
+    # normalize 两条仍并行（批内并行保留）
+    n_starts = sorted(t for s, k, t in events if s == "normalize" and k == "start")
+    assert n_starts[1] - n_starts[0] < 0.1, "批内并行应保留"
+
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("t") and callable(v)]
 
 
@@ -371,3 +406,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
