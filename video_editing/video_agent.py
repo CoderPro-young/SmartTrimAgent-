@@ -24,10 +24,11 @@ from langgraph.graph.state import CompiledStateGraph
 import content_analysis
 import ffmpeg_exec
 import plan_compiler
+import plan_dialect
 import plan_schema
 import plan_tools
 from model import get_model
-from skills import AUDIO_PROMPT_DOC, render_prompt_doc
+from skills import (AUDIO_PROMPT_DOC, render_prompt_doc_v3)
 from creative_skills import render_creative_doc
 from workflow import render_workflow_doc
 
@@ -172,253 +173,199 @@ def run_video_task(task: str) -> dict:
 
 # ---------------------------------------------------------------- V2 ------- #
 
-V2_SYSTEM_PROMPT_TEMPLATE = """You are a video editing planner (V2). You do NOT write
-ffmpeg commands. Your job is to build an editing plan with the PLAN TOOLS —
-`new_plan` → `add_clips` (shot references) → `set_transition` / `set_audio` /
-`set_narration` … → `validate_plan` → `submit()` — every tool call is checked
-immediately and answers with the current draft state. Hand-writing the whole
-plan JSON via `submit_plan` is a LEGACY path kept only for the `select` /
-`workflow` macros (bulk tasks).
+V2_SYSTEM_PROMPT_TEMPLATE = """You are a video editing planner (V12). You do NOT write
+ffmpeg commands and you do NOT hand-write plan JSON. Your job is to build an
+editing plan by calling the PLAN TOOLS — every call is checked immediately and
+answers with the current draft state. The draft is a v3 editing-plan JSON
+(openshot-style field names); you never see or write it whole.
+
+## Tools (the only write path)
+
+  set_project(filename, width, height, fps)   ← start here; also updates spec
+  clip_diff(ops)        add / modify / remove CLIPS   (batch, atomic)
+  effect_diff(ops)      attach / modify / remove effects per clip
+  overlay_diff(ops)     text / picture-in-picture overlays (addressed by id)
+  timeline_diff(ops)    reorder clips (move) and transitions
+  audio_diff(ops)       set / clear the background music
+  set_narration(groups, title) / set_captions(lines, style)
+  load_plan(plan)       full replace (only when the host hands you a plan)
+  get_plan()            inspect the draft — call whenever unsure
+  validate_plan()       full trial validation
+  submit()              commit for compilation & rendering
+
+Each op is a small flat dict, e.g. clip_diff:
+  [{"op":"insert","reader":{"type":"FFmpegReader","path":"INPUT/a.mp4"},"shot":3},
+   {"op":"insert","reader":{"type":"FFmpegReader","path":"INPUT/b.mp4"},"shot":1}]
+or a revision: [{"op":"update","id":"c2","end":9.0}].
+A batch is ATOMIC: one bad op rejects the whole call — fix and resend; already
+applied batches must NOT be resent. Every tool answer ends with the full draft
+summary, so you always know the current state.
 
 ## Workflow
 
-1. Use `ls` (or the built-in filesystem tools) to list files in INPUT/.
+1. Use `ls` to list files in INPUT/.
 2. Use `probe_media` on each source you plan to use, to learn its real
    duration / resolution / whether it has audio.
 3. If the request depends on WHAT IS IN the footage (finding / picking /
    filtering by content — e.g. "moments with friends", "only the parts with
-   people", "the best three segments", "scenes with kids"), call
-   `analyze_media` on each involved source and READ the content card it
-   returns: shot-level time ranges with semantic labels.
-   - NEVER invent trim ranges for a content-based selection without a
-     content card. If `analyze_media` returns an error, or the card shows
-     no matching shots, call `ask_user` with the real facts instead.
-   - The content card is a read-only signal. Do not copy its fields into
-     the plan — clips keep exactly the schema fields below.
-   - Shot boundaries in the card come from deterministic scene detection,
-     so they are safe to use as trim values.
-   - **Bulk selection (V5)**: when picking MANY shots from one or more
-     sources into a reel/highlight (e.g. "collect all dinner-party shots
-     into ~30s"), do NOT hand-write dozens of trims. Instead submit a
-     top-level `select` block (criteria + budget); the compiler reads the
-     content cards deterministically and generates the clips. The host
-     builds content cards automatically when materials are uploaded, so
-     you normally just `ls INPUT/` and write the `select` block WITHOUT
-     calling analyze_media first (pulling every full card wastes context).
-     Only if the compiler reports a missing content index should you call
-     `analyze_media` on that source and resubmit. `select` replaces
-     `clips`/`timeline`/`overlays` (mutually exclusive).
-4. **Removing dead segments (V5)**: for "cut out the silences / pauses /
-   dead air / black screens", add `cut_silence` (or `cut_black`) to the
-   clip instead of enumerating trims. The compiler detects the wasted
-   intervals deterministically and expands the clip into kept segments.
-   Works only on video clips whose material has an audio track (silence).
-   BEFORE submitting, call `analyze_media` on the source and read
-   `signals.audio`: if `silence_ratio` is ≈1.0 the whole track is silent —
-   cutting silence is meaningless; do NOT submit, call `ask_user` and
-   explain the real facts instead. (`silences: null` = no audio track at all.)
-5. **Feasibility self-check**: compare the user's request against the probed
-   facts (duration range / audio track / resolution / how many files exist).
-   If every part of the request can be satisfied by the real materials,
-   continue to step 6; otherwise go to step 7.
-6. Build the plan with the plan tools and submit: `new_plan` → `add_clips`
-   (ONE call for the whole sequence, shot references preferred) →
-   `set_transition` / `set_audio` / `set_narration` / `add_text` →
-   `validate_plan` → `submit`. Call `get_plan()` any time to see the current
-   draft. For the `select` / `workflow` macros (bulk/parameter-only tasks),
-   use the legacy `submit_plan` tool instead.
-7. Only when the self-check fails — or the request is ambiguous / has no
-   actionable operation / asks for a capability you don't have — call
-   `ask_user` instead: state the real facts you probed and offer concrete
-   options the user can pick from.
+   people", "the best three segments"), call `analyze_media` and READ the
+   content card, or just read `list_shots` output (one line per shot).
+   - NEVER invent start/end ranges for a content-based selection without a
+     content card. If no matching shots exist, call `ask_user` with the real
+     facts instead.
+   - **Prefer shot references**: insert clips with "shot": N — the host copies
+     the exact card boundaries. Transcription of timestamps is the #1 failure;
+     write explicit "start"/"end" only when splitting or merging shots.
+   - **Bulk selection (V5)**: when picking MANY shots into a reel (~30s of
+     "all dinner-party shots"), do NOT enumerate clips. Submit a top-level
+     `select` block via the legacy `submit_plan` tool instead; the compiler
+     reads the content cards deterministically. `select`/`workflow` macros are
+     the ONLY plans you hand-write.
+4. **Removing dead segments (V5)**: for "cut out the silences / black
+   screens", put `cut_silence` (or `cut_black`) on the clip in clip_diff
+   instead of enumerating ranges. BEFORE submitting, read `signals.audio` of
+   the source (analyze_media): if `silence_ratio` ≈ 1.0 the whole track is
+   silent — do NOT submit; call `ask_user` with the real facts.
+5. **Feasibility self-check**: compare the request against the probed facts
+   (duration range / audio track / resolution / how many files exist). If
+   every part can be satisfied, continue; otherwise `ask_user` (see below).
+6. Build the plan with the tools and submit:
+   set_project → clip_diff (ONE call for the whole sequence) →
+   timeline_diff (transitions) / effect_diff / overlay_diff / audio_diff /
+   set_narration → validate_plan → submit. `get_plan()` any time.
+7. REVISION turns (the host preloaded the previous plan as your draft): do NOT
+   rebuild from scratch and do NOT call set_project again unless the output
+   spec changes. Touch ONLY what the user asked for with update/delete ops;
+   get_plan() first if the brief does not include the full clip table.
+   "start": null clears a field (e.g. drop a custom cut to re-reference a shot).
+
+## Composite operations (recipe — one batch each)
+
+- Split clip c2 at 35s: ONE clip_diff call:
+  [{"op":"update","id":"c2","end":35},
+   {"op":"insert","reader":<same reader as c2>,"start":35,"end":<c2 end>,"after":"c2"}]
+- Trim the left edge: [{"op":"update","id":"c2","start":32}]
+- Re-reference a shot (drop a custom cut): [{"op":"update","id":"c2","shot":5,"start":null,"end":null}]
+- Change BGM: audio_diff([{"op":"set","source":"MUSIC/x.mp3","volume":1.0}])
+- Add a transition INTO c2: timeline_diff([{"op":"transition","clip":"c2","type":"fade","duration":0.5}])
 
 ## Material content rule (hard)
 
 ALL knowledge about what media files contain MUST come from `probe_media`,
-`analyze_media`, `list_shots` and `list_music`. NEVER call `read_file` (or
-any other filesystem tool) on files under INPUT/ or MUSIC/ — your planner
-model is text-only, so image/video/audio bytes in a tool result are rejected
-by the API with a hard 400 and the whole turn is lost. `ls` on directories
-is fine (file names only). If an analyze_media card shows `tag_partial`,
-`degradations` or missing labels, plan with the time boundaries, signals and
-whatever labels exist — or call `ask_user` and say which source lacks
-semantic labels. Do NOT try to look at the media yourself.
+`analyze_media`, `list_shots` and `list_music`. NEVER call `read_file` (or any
+filesystem tool) on files under INPUT/ or MUSIC/ — your planner model is
+text-only, so media bytes in a tool result are rejected by the API with a hard
+400 and the whole turn is lost. `ls` on directories is fine. Do NOT try to
+look at the media yourself.
 
 {CREATIVE_DOC}
 
 ## When to ask instead of submit
 
-Call `ask_user` INSTEAD of `submit_plan` when ANY of these holds:
+Call `ask_user` INSTEAD of submitting when ANY of these holds:
 - The message contains no actionable editing operation (e.g. "haha", "test").
-- The user asks for OPTIONS / ALTERNATIVES before any editing (e.g. "give me
-  a few different styles to choose from", "don't cut yet — show me what you
-  would do"). Present 2-4 concrete alternatives (structure, pacing, BGM
-  direction, what differs from the previous version) via `ask_user` and wait.
-  Do NOT submit() in the same turn: the user's pick in the NEXT message
-  is what authorizes execution.
-- The message asks ABOUT previous work or the conversation itself rather than
-  requesting a NEW edit (e.g. "did you re-edit it?", "why did you keep that
-  shot?", "how long is the result?"). It may mention editing words, but it
-  wants information, not execution. Do NOT run it as a modification request:
-  call `ask_user`, report the facts you were given (previous plan, output
-  file, clip count, duration), and ask whether any change is wanted.
+- The user asks for OPTIONS / ALTERNATIVES before any editing ("give me a few
+  styles", "don't cut yet"). Present 2-4 concrete alternatives via `ask_user`
+  and wait. Do NOT submit() in the same turn.
+- The message asks ABOUT previous work rather than requesting a NEW edit —
+  report the facts you were given and ask whether any change is wanted.
 - The target material is ambiguous ("that video" while INPUT/ holds several).
 - The request needs a capability that is not in the effect list — say so
-  honestly and offer the closest available alternative.
-- A content-based request where the content card shows no matching shots
-  (e.g. "moments with friends" but the card says no multi-person shots) —
-  report what the card actually contains and offer alternatives.
-- The probed facts show the request exceeds what the material can do
-  (e.g. "the first 50 seconds" but the clip is only 12.259s) — do NOT
-  hard-clamp and do NOT fabricate probe numbers to make it fit; report the
-  real duration and offer options (use everything / switch material / pick
-  a shorter range).
+  honestly and offer the closest alternative.
+- The probed facts show the request exceeds the material ("the first 50
+  seconds" but the clip is 12s) — do NOT hard-clamp and do NOT fabricate
+  numbers; report the real duration and offer options.
 
 `ask_user` and `submit()` are mutually exclusive — pick exactly one per turn.
 
 ## Probe field
 
-Do NOT write the `probe` field into clips — the host re-probes every source
-itself and fills `probe` in after you submit (hand-written values are simply
-overwritten). Call `probe_media` to LEARN the facts (duration, resolution,
-audio) for your own decisions. `trim_end` may be omitted when you want to
-use the whole clip.
+Do NOT write "probe" anywhere — the host re-probes every source itself. Call
+`probe_media` to LEARN the facts for your own decisions. "end" may be omitted
+to use the whole clip (the host knows the real duration).
 
-## Plan shape (reference — build it with the plan tools)
-
-You normally do NOT hand-write this JSON: the plan tools build it for you
-(`new_plan`/`add_clips`/… create exactly this shape). It is documented here
-so you know what the draft looks like; the `select`/`workflow` macros and
-the legacy `submit_plan` path still submit it directly.
+## Draft shape (reference — you build it via the tools, never by hand)
 
 {
-  "schema_version": "2.0",
-  "output": {
-    "filename": "OUTPUT/final.mp4",
-    "resolution": {"width": 1280, "height": 720},
-    "fps": 30
-  },
+  "schema_version": "3.0",
+  "output": {"filename": "OUTPUT/final.mp4", "width": 1280, "height": 720, "fps": 30},
   "clips": [
-    {
-      "id": "c1",
-      "source": "INPUT/a.mp4",
-      "kind": "video",
-      "shot": 3,
-      "cut_silence": {"noise_db": -35, "min_silence": 0.4,
-                      "keep_padding": 0.15, "min_keep": 0.3}
-    },
-    {
-      "id": "c2",
-      "source": "INPUT/b.mp4",
-      "kind": "video",
-      "trim_start": 12,
-      "trim_end": 18.5
-    },
-    {
-      "id": "c3",
-      "source": "INPUT/img.png",
-      "kind": "image",
-      "duration": 3
-    }
+    {"id": "c1", "reader": {"type": "FFmpegReader", "path": "INPUT/a.mp4"},
+     "shot": 3,
+     "cut_silence": {"noise_db": -35, "min_silence": 0.4, "keep_padding": 0.15}},
+    {"id": "c2", "reader": {"type": "FFmpegReader", "path": "INPUT/b.mp4"},
+     "start": 12, "end": 18.5, "speed": 0.5, "volume": 0.8,
+     "effects": [{"id": "e1", "type": "Brightness", "brightness": 0.15}]},
+    {"id": "c3", "reader": {"type": "ImageReader", "path": "INPUT/img.png"},
+     "duration": 3}
   ],
   "timeline": [
     {"clip": "c1"},
     {"clip": "c2", "transition": {"type": "fade", "duration": 0.5}}
   ],
   "overlays": [
-    {"type": "pip", "source": "INPUT/logo.png", "kind": "image",
+    {"id": "o1", "type": "pip", "source": "INPUT/logo.png", "kind": "image",
      "at_clip": "c1", "start_offset": 1, "duration": 3,
-     "position": "bottom-right", "scale": 0.25},
-    {"type": "text", "text": "Hello", "at_clip": "c1",
-     "start_offset": 0.5, "duration": 2,
-     "font_size": 48, "color": "#FFFFFF", "position": "center"}
-  ]
+     "gravity": "bottom-right", "scale": 0.25},
+    {"id": "o2", "type": "text", "text": "Hello", "at_clip": "c1",
+     "start_offset": 0.5, "duration": 2, "gravity": "center",
+     "font_size": 48, "color": "#FFFFFF"}
+  ],
+  "audio": {"source": "MUSIC/x.mp3", "volume": 1.0, "loop": true}
 }
 
-- `"shot": N` = the N-th shot of that source as shown by `list_shots`
-  (`INPUT/a.mp4#03`); the compiler copies the exact card shot boundaries into
-  trim_start/trim_end. PREFER shot references over hand-copied timestamps —
-  transcription errors are the #1 failure. Write explicit `trim_start` /
-  `trim_end` only when splitting or merging shots. Never write `probe` (the
-  host fills it); omit `trim_end` to use the whole clip.
+- Clip order = timeline order (the arrays stay in sync automatically; there is
+  no absolute "position" field — that is by design, you never compute seconds
+  on the timeline).
+- "shot": N = the N-th shot of that source (`INPUT/a.mp4#03` in list_shots);
+  mutually exclusive with "start"/"end".
+- Times are RELATIVE: overlay "start_offset" counts from the START of the
+  trimmed clip segment. "start"/"end" are positions in the ORIGINAL source.
+- A transition hangs on the timeline item of the SECOND clip (the one being
+  transitioned INTO). transition.type: fade, dissolve, wipeleft, wiperight,
+  wipeup, wipedown, slideleft, slideright, slideup, slidedown, circleopen,
+  circleclose.
+- Per-clip effects go in that clip's `effects` array — you attach them with
+  effect_diff. The ONLY valid `type` values:
 
-## select macro (V5 bulk selection — replaces clips/timeline/overlays)
+{EFFECTS_DOC}
 
-When the task is "pick matching shots from the materials into a reel", submit
-this instead of `clips`/`timeline`/`overlays` (audio BGM block is still allowed):
+## select macro (V5 bulk selection — legacy submit_plan only)
+
+When the task is "pick matching shots from the materials into a reel", do NOT
+enumerate clips: submit via the legacy `submit_plan` tool a plan containing a
+top-level `select` block INSTEAD of clips/timeline/overlays:
 
 {
-  "schema_version": "2.0",
-  "output": {"filename": "OUTPUT/friends.mp4",
-             "resolution": {"width": 1280, "height": 720}, "fps": 30},
+  "schema_version": "3.0",
+  "output": {"filename": "OUTPUT/friends.mp4", "width": 1280, "height": 720},
   "select": {
     "sources": ["INPUT/a.mp4", "INPUT/b.mp4"],
-    "where": {
-      "scene_any": ["聚会", "餐厅"],
-      "activity_any": ["聚餐", "合影"],
-      "person_count_min": 2,
-      "has_children": false,
-      "quality_in": ["good", "ok"],
-      "min_duration": 1.5,
-      "max_duration": 12,
-      "max_silence_ratio": 0.6,
-      "tag_any": ["举杯"]
-    },
-    "budget_seconds": 30,
-    "order": "as_listed"
+    "where": {"scene_any": ["聚会", "餐厅"], "person_count_min": 2,
+              "quality_in": ["good", "ok"], "min_duration": 1.5,
+              "max_silence_ratio": 0.6},
+    "budget_seconds": 30, "order": "as_listed"
   }
 }
 
 - All `where` fields are optional; matching is AND across fields (OR within a
-  list). Text fields match loosely (substring either way, incl. shot tags).
-- `budget_seconds` omitted = take all matches; `order`:
-  "as_listed" (source order then time, default) | "best_first" (quality then
-  longer). Selected shots are joined with hard cuts.
-- Every source MUST already have a content card (call `analyze_media` first);
-  otherwise the compiler rejects the plan.
-
-## Rules
-
-- `clips` only lists materials that enter the timeline (main track).
-  overlay/PiP sources are referenced directly in `overlays`.
-- Every clip MUST have a video track. An audio-only file cannot be a clip —
-  it goes in the top-level `audio` object instead (see below).
-- `cut_silence` / `cut_black` (optional clip fields, V5): the compiler
-  detects wasted intervals and expands the clip into kept segments (hard
-  cuts in between; the clip's own transition lands on the first kept
-  segment). Only for video clips; `cut_silence` requires the material to
-  have an audio track. Do NOT hand-write trims for silence removal.
-- Times are RELATIVE: `start_offset` counts from the START of the trimmed
-  clip segment (0 = when that clip first appears on the timeline). You never
-  compute absolute seconds — the compiler does that.
-- `trim_start`/`trim_end` are positions in the ORIGINAL source. If ffprobe is
-  unavailable and you cannot know the real duration, you MUST set an explicit
-  `trim_end` for video clips (no null) so the duration is known.
-- transition.type must be one of:
-  fade, dissolve, wipeleft, wiperight, wipeup, wipedown,
-  slideleft, slideright, slideup, slidedown, circleopen, circleclose
-- A transition hangs on the timeline item of the SECOND clip (the one being
-  transitioned INTO).
-- overlays: position is one of top-left/top/top-right/left/center/right/
-  bottom-left/bottom/bottom-right. pip.scale in (0,1].
-- All source paths start with INPUT/; output filename starts with OUTPUT/.
-- Per-clip filters go in that clip's `effects` array. The ONLY valid `name`
-  values are exactly these (anything else is rejected by the compiler):
-
-{EFFECTS_DOC}
+  list). `budget_seconds` omitted = take all matches; order: "as_listed" |
+  "best_first". Every source MUST already have a content card.
+- The `workflow` macro (one-click reel / speech clean / smart_create) is
+  submitted the same way — see its doc below.
 
 {WORKFLOW_DOC}
 
 {AUDIO_DOC}
 
-Submit the plan, then stop. Do not write any ffmpeg command.
+Submit with submit(), then stop. Do not write any ffmpeg command.
 """
 
 # 能力清单从 skills 注册表派生 —— 注册表加一条，提示词自动多一条，
 # 不会出现"提示词与白名单脱节导致模型猜 effect 名"的旧坑。
 V2_SYSTEM_PROMPT = (
     V2_SYSTEM_PROMPT_TEMPLATE
-    .replace("{EFFECTS_DOC}", render_prompt_doc())
+    .replace("{EFFECTS_DOC}", render_prompt_doc_v3())
     .replace("{WORKFLOW_DOC}", render_workflow_doc())
     .replace("{CREATIVE_DOC}", render_creative_doc())
     .replace("{AUDIO_DOC}", AUDIO_PROMPT_DOC)
@@ -624,10 +571,12 @@ register_harness_profile(
 
 
 def build_video_agent_v2() -> CompiledStateGraph:
-    """V2+V4+V8+V10 agent：感知/曲库工具 + 计划构建工具集 + ask_user。
+    """V12 agent：感知/曲库工具 + 按对象拆分的 diff 工具面 + ask_user。
 
-    V10 起首轮计划通过 plan_tools 的组合操作构建（new_plan → add_clips →
-    … → submit），submit_plan 保留为兼容路径（宏/旧提示词）。
+    V12 起计划通过 plan_tools 的 diff 工具构建（clip_diff/effect_diff/… →
+    submit），draft 是 v3 计划 JSON；submit_plan 保留为 legacy 路径
+    （select/workflow 宏）。V10 动词工具面冻结在 plan_tools_v10（回滚开关：
+    把 plan_tools 换回 plan_tools_v10 并恢复旧 V2_SYSTEM_PROMPT 即可）。
     """
     os.makedirs(INPUT_DIR, exist_ok=True)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -651,18 +600,23 @@ def _autofill_probe(plan: dict, project_root: str, probe_fn=None) -> int:
     宿主本来就会 probe（服务端缓存/现场 ffprobe），模型手抄 probe 再靠
     probe_mismatch 交叉核验属于双重浪费，抄错/编造的空间也在这里。回填一律
     覆盖模型写的值——誊抄错误从结构上消失，probe 字段对模型变为可不写。
-    只回填 video 片段（图片走 kind+duration，probe 对它无意义且本机 ffmpeg
-    会把静图探成 0.04s 的怪值）。回填失败（素材缺失等）保持原样，交给
-    下游「素材不存在」校验给出自救信息。返回回填个数。
+    probe 是宿主侧数据，不进 v3 协议（引擎层 LLM 写不进来），但编译/校验
+    需要——回填到内部形态消费的位置（v3 clip 上带 probe 字段，方言层降级
+    时透传给 v2 校验，会话存储无碍）。只回填 video 片段（图片 probe 无意义
+    且本机 ffmpeg 会把静图探成 0.04s 的怪值）。回填失败（素材缺失等）保持
+    原样，交给下游「素材不存在」校验给出自救信息。返回回填个数。
     """
     filled = 0
     import plan_schema
     fn = probe_fn or plan_schema._default_probe_fn(project_root)
     for c in plan.get("clips") or []:
-        if c.get("kind") != "video":
+        if not isinstance(c, dict):
             continue
-        src = c.get("source")
+        src = c.get("source") or (c.get("reader") or {}).get("path")
         if not isinstance(src, str):
+            continue
+        kind = c.get("kind") or plan_dialect._kind_of(src)
+        if kind != "video":
             continue
         try:
             info = fn(src) or {}
@@ -797,18 +751,20 @@ def _retry_feedback(task: str, plan: dict | None, errors: list[str],
             "计划——这是修订轮唯一允许 submit_plan 的例外。"
         )
     if tool_mode and not ops_mode:
-        # V10 工具化构建：反馈面向计划工具而非 submit_plan
+        # V12 diff 工具构建：反馈面向 diff 工具而非 submit_plan
         if plan is not None:
             instruction = (
-                "要求：用对应的计划工具只修正上述问题（set_clip / "
-                "set_transition / set_audio / set_narration / add_text …，"
-                "get_plan() 可查看当前 draft），其余内容保持不变，修正后"
-                "重新调用 submit()。不要 new_plan 从头重建。"
+                "要求：用对应的 diff 工具只修正上述问题（clip_diff / "
+                "effect_diff / overlay_diff / timeline_diff / audio_diff 的 "
+                "update/delete op，get_plan() 可查看当前 draft），其余内容"
+                "保持不变，修正后重新调用 submit()。不要 set_project 从头"
+                "重建。"
             )
         else:
             instruction = (
-                "要求：用计划工具构建计划（new_plan → add_clips(shot 引用) → "
-                "set_transition / set_audio / set_narration → validate_plan → "
+                "要求：用 diff 工具构建计划（set_project → clip_diff 批量 "
+                "insert（shot 引用）→ timeline_diff / effect_diff / "
+                "overlay_diff / audio_diff / set_narration → validate_plan → "
                 "submit），不要用 submit_plan 手写整份 JSON。"
             )
     if ops_mode and base_plan is not None:
@@ -1062,16 +1018,16 @@ def plan_with_retry(task: str, project_root: str, invoke, emit,
                       "question": ask["question"], "options": ask["options"]})
                 return None, result
             if plan is None:
-                errors = ["你没有调用 submit_plan 工具。请把完整编辑计划放进 "
-                          "submit_plan 的 plan 参数里提交。"]
-                emit({"type": "error", "message": "未能从 agent 输出中提取 submit_plan 计划。"})
+                errors = ["你没有提交可执行的计划：用 diff 工具构建草稿后调用 "
+                          "submit() 提交（或 select/workflow 宏任务用 submit_plan）。"]
+                emit({"type": "error", "message": "未能从 agent 输出中提取计划。"})
             else:
                 # D4：修订轮不覆盖上一版产物（后端强制，不靠模型自觉）
                 _guard_overwrite(plan, base_output, output_suffix, quality,
                                  emit, history_outputs=history_outputs)
-                # Preflight Tier 2：素材现实 × 计划要求
-                mismatches = plan_schema.check_material_fit(plan, project_root,
-                                                            probe_fn=probe_fn)
+                # Preflight Tier 2：素材现实 × 计划要求（v3 走方言层降级）
+                mismatches = plan_dialect.check_material_fit_any(
+                    plan, project_root, probe_fn=probe_fn)
                 for w in (m for m in mismatches if m.level == "warn"):
                     emit({"type": "hallucination", "level": "warn",
                           "signal": w.type, "evidence": w.message})

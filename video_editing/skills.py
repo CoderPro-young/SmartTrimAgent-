@@ -197,13 +197,13 @@ SKILL_DELOGO = Skill(
     validate=_val_delogo,
     build=_build_delogo,
     prompt_doc=(
-        "  Required `args.region` = [x, y, w, h] in ORIGINAL source pixels\n"
+        "  Required `region` = [x, y, w, h] in ORIGINAL source pixels\n"
         "  (the area runs on the untrimmed, unscaled frame).\n"
         "  The area must NOT touch the frame edge — leave at least 1px margin,\n"
         "  because delogo needs surrounding pixels to interpolate.\n"
         "  This is a cover/blend, NOT AI inpainting: it hides the logo area but\n"
         "  cannot reconstruct what was behind it.\n"
-        "  Example: {\"name\":\"delogo\",\"args\":{\"region\":[20,20,220,90]}}"
+        "  Example: {\"type\":\"delogo\",\"region\":[20,20,220,90]}"
     ),
 )
 
@@ -257,13 +257,13 @@ SKILL_FACE_MOSAIC = Skill(
     validate=_val_face_mosaic,
     prepass=_prepass_face_mosaic,
     prompt_doc=(
-        "  Optional `args`: `mode` (\"mosaic\" pixelate, default | \"blur\"),\n"
+        "  Flat args: `mode` (\"mosaic\" pixelate, default | \"blur\"),\n"
         "  `block_size` (2..64, default 20), `score_threshold` (0.3..0.99, default 0.7),\n"
         "  `target` (\"all\" faces, default | \"largest\" face only).\n"
         "  Detected automatically over the whole clip — no coordinates needed.\n"
         "  If faces are small / far away, LOWER `score_threshold` to 0.3~0.5,\n"
         "  otherwise most faces are missed.\n"
-        "  Example: {\"name\":\"face_mosaic\",\"args\":{\"mode\":\"mosaic\",\"score_threshold\":0.4}}"
+        "  Example: {\"type\":\"face_mosaic\",\"mode\":\"mosaic\",\"score_threshold\":0.4}"
     ),
 )
 
@@ -561,3 +561,31 @@ def render_prompt_doc() -> str:
 def effects_menu() -> list[str]:
     """合法 effects 名列表（校验错误信息里用）。"""
     return sorted(SKILLS)
+
+
+def render_prompt_doc_v3() -> str:
+    """v3 形态的能力清单：effects[].type 语义名 + 参数平铺（无 args 嵌套）。
+
+    与 render_prompt_doc（v2 遗留）同源派生：注册表加一条，两边自动同步。
+    """
+    lines: list[str] = []
+    for s in SKILLS.values():
+        if s.name == "speed":
+            continue            # v3：变速是 clip 平级 speed 标量，不是效果
+        if s.name == "eq":
+            lines.append("- `Brightness`: adjust brightness / contrast.")
+            lines.append("  Flat args: `brightness` (-1..1, default 0), "
+                         "`contrast` (-1000..1000, default 1).")
+            lines.append('  Example: {"op":"insert","clip":"c2",'
+                         '"type":"Brightness","brightness":0.1}')
+            lines.append("- `Saturation`: adjust color intensity "
+                         "(0 = black & white).")
+            lines.append("  Flat args: `saturation` (0..3, default 1).")
+            lines.append('  Example: {"op":"insert","clip":"c2",'
+                         '"type":"Saturation","saturation":1.2}')
+            continue
+        kind = " (runs as an automatic pre-pass)" if s.pipeline == PREPASS else ""
+        lines.append(f"- `{s.name}`: {s.summary}{kind}")
+        if s.prompt_doc:
+            lines.append(s.prompt_doc)
+    return "\n".join(lines)

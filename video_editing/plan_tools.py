@@ -1,31 +1,35 @@
-"""计划构建工具集（V10）：LLM 通过工具组合构建/更新剪辑计划 draft。
+"""计划构建工具集（V12）：按对象拆分的 diff 工具面，协议见 docs/v12-protocol.md。
 
-设计契约（docs/dev-notes-2026-10-28.md）：
-- 首轮生成从「一次性 submit_plan 手写整份 JSON」改为工具逐步构建——
-  每次操作的参数极少且就地校验，错误单步返回（反馈回路最短）；
-- 单步校验（引用存在/编号范围/类型）就地做；全量校验（转场<片段、
-  overlay 越界等跨片段规则）在 validate_plan()/submit() 做——片段没加完
-  时全量规则会误报；
-- shot 引用 + probe 宿主回填（「引用代替誊抄」）：add_clips 的参数里
-  不出现时间戳誊抄与 probe 抄写这两个最大错误源；
-- submit() 后的编译/校验/dry-run/渲染/回验链零改动（draft 就是原来的
-  计划 JSON，shot 引用由编译器 _resolve_shot_refs 展开）。
+设计契约：
+- LLM 看到的是 8 个写入口（5 个 diff + 3 个设置类）+ 4 个生命周期工具；
+  每个工具内部把扁平 op 组装成 action 信封，经 plan_actions.apply_actions
+  引擎施加——信封语义全系统只有一份实现；
+- 单步轻校验（引用存在/白名单/类型）就地做，错误单步返回 + 全量 draft 摘要
+  （反馈回路最短，V10 实测有效的模式原样继承）；跨片段全量规则在
+  validate_plan()/submit() 做；
+- 批内原子：一次调用里的 ops 要么全成要么全拒（引擎保证）；
+- shot 引用 + probe 宿主回填（「引用代替誊抄」）原样继承；
+- draft 是 v3.0 计划 JSON（openshot 命名）；submit() 后宿主经方言层降级编译。
 
-draft 状态挂宿主侧（模块级）：RUN_LOCK 串行 + CLI 单发，同一时刻只有
-一个 run 在构建；重试不重置 draft——模型只需修正出问题的部分再 submit。
+旧 V10 动词工具面冻结在 plan_tools_v10.py（回滚开关：video_agent 装配处切换）。
+draft 状态挂宿主侧（模块级）：RUN_LOCK 串行保证同时只有一个 run 在构建。
 """
 
 from __future__ import annotations
 
+import copy
 import os
 
 from langchain_core.tools import tool
 
 import content_analysis
+import plan_actions
+import plan_dialect
 import plan_schema
-from skills import SKILLS, check_args_keys, effects_menu, validate_audio
+from skills import validate_audio, v3_effects_menu
 
 PROJECT_ROOT = "."          # 由 video_agent 装配时注入（测试可覆写）
+PROBE_FN = None             # 服务端缓存探针（src->probe dict）；None=现场 ffprobe
 
 # 模块级 draft 状态：{"plan": dict|None, "submitted": bool, "validated": str|None}
 _STATE: dict = {"plan": None, "submitted": False, "validated": None}
@@ -34,8 +38,9 @@ _STATE: dict = {"plan": None, "submitted": False, "validated": None}
 # ------------------------------------------------------------------ 宿主 API -- #
 
 def reset_draft(plan: dict | None = None) -> None:
-    """新 run 开始时初始化（修订轮将来可传 last_plan 作初态）。"""
-    _STATE.update(plan=plan, submitted=False, validated=None)
+    """新 run 初始化；修订轮传 last_plan（v3）作初态——模型在上一版上改。"""
+    _STATE.update(plan=plan_dialect.normalize(plan) if plan else None,
+                  submitted=False, validated=None)
 
 
 def take_submitted() -> dict | None:
@@ -57,20 +62,28 @@ def _draft() -> dict | None:
     return _STATE["plan"]
 
 
-def _need_draft() -> dict | None:
-    if _STATE["plan"] is None:
-        return None
-    return _STATE["plan"]
+def _bump() -> None:
+    _STATE["validated"] = None
 
 
-def _next_id(plan: dict) -> str:
-    import re
-    mx = 0
-    for c in plan.get("clips") or []:
-        m = re.match(r"^[Cc](\d+)$", str(c.get("id") or ""))
-        if m:
-            mx = max(mx, int(m.group(1)))
-    return f"c{mx + 1}"
+def _apply(builder) -> str:
+    """diff 工具共用入口：builder 组装信封 → 引擎施加 → 结果文本 + 摘要。"""
+    plan = _draft()
+    if plan is None:
+        return "✗ 还没有 draft——先调用 set_project 初始化。"
+    actions, pre_errs = builder(plan)
+    if pre_errs:
+        return "✗ " + "；".join(pre_errs)
+    new_plan, applied, errors = plan_actions.apply_actions(plan, actions)
+    if errors:
+        return "✗ 整批未应用（批内原子），逐条错误：\n- " + "\n- ".join(errors) \
+            + "\n修正后重新调用本工具（已成功的部分不需要重做）。"
+    _STATE["plan"] = new_plan
+    _bump()
+    head = "；".join(a["detail"] for a in applied[:8])
+    if len(applied) > 8:
+        head += f"（等共 {len(applied)} 条）"
+    return f"✓ {head}\n" + _summary(new_plan)
 
 
 def _shot_span(src: str, shot: int) -> tuple[float, float] | None:
@@ -86,64 +99,80 @@ def _shot_span(src: str, shot: int) -> tuple[float, float] | None:
         return None
 
 
+def _probe_filled_copy(plan: dict) -> dict:
+    """全量校验用副本：shot 解析成卡上边界 + 真实探针回填（draft 本体不动）。
+
+    shot 边界来自确定性场景切分，安全；probe 让「整段使用（不写 end）」的
+    片段能确定时长——宿主本来就掌握这些事实，模型不必誊抄。
+    """
+    snap = copy.deepcopy(plan)
+    import plan_schema as ps
+    fn = PROBE_FN or ps._default_probe_fn(PROJECT_ROOT)
+    for c in snap.get("clips") or []:
+        if not isinstance(c, dict):
+            continue
+        shot = c.get("shot")
+        if shot is not None:
+            span = _shot_span(str((c.get("reader") or {}).get("path") or ""), shot)
+            if span:
+                c["start"], c["end"] = round(span[0], 3), round(span[1], 3)
+            c.pop("shot", None)        # 校验副本里 shot 与 start/end 互斥
+        reader = c.get("reader") or {}
+        src = reader.get("path")
+        if isinstance(src, str) and plan_dialect._kind_of(src) == "video" \
+                and "end" not in c and not isinstance(c.get("probe"), dict):
+            try:
+                info = fn(src) or {}
+            except Exception:          # noqa: BLE001 —— 探测失败交给下游校验
+                continue
+            if isinstance(info, dict) and info.get("ok") and info.get("duration"):
+                c["probe"] = {k: info[k] for k in
+                              ("duration", "width", "height", "fps",
+                               "has_audio", "has_video") if info.get(k) is not None}
+    return snap
+
+
 def _clip_dur_display(c: dict) -> str:
     """摘要用时长（shot 引用从卡上取边界；与编译展开同源）。"""
-    ts, te = c.get("trim_start"), c.get("trim_end")
-    if isinstance(ts, (int, float)) and isinstance(te, (int, float)):
-        return f"{te - ts:g}s"
-    span = _shot_span(c.get("source") or "", c.get("shot") or 0) \
-        if c.get("shot") else None
+    s, e = c.get("start"), c.get("end")
+    if isinstance(s, (int, float)) and isinstance(e, (int, float)):
+        return f"{e - s:g}s"
+    span = _shot_span(str((c.get("reader") or {}).get("path") or ""),
+                      c.get("shot") or 0) if c.get("shot") else None
     if span:
         return f"{span[1] - span[0]:g}s"
-    if c.get("kind") == "image" and isinstance(c.get("duration"), (int, float)):
+    if plan_dialect._kind_of(str((c.get("reader") or {}).get("path") or "")) == "image" \
+            and isinstance(c.get("duration"), (int, float)):
         return f"{c['duration']:g}s"
     return "?"
 
 
-def _validate_clip_item(item: dict, project_root: str) -> list[str]:
-    """add_clips 单项校验：复用 plan_schema 全部单片段规则（含 shot 引用、
-    未知字段、素材存在性）——用合成单片段计划跑一遍，零规则重复。"""
-    probe = {"duration": 10.0, "width": 1920, "height": 1080, "fps": 30,
-             "has_audio": True, "has_video": True}
-    synthetic = {
-        "schema_version": "2.0",
-        "output": {"filename": "OUTPUT/_draft_check.mp4",
-                   "resolution": {"width": 640, "height": 360}},
-        "clips": [dict(item, id="cX", probe=item.get("probe") or probe)],
-        "timeline": [{"clip": "cX"}],
-    }
-    errs = plan_schema.validate_plan(synthetic, project_root)
+def _validate_clip_item_v3(item: dict) -> list[str]:
+    """insert 单片段就地校验（V10 模式继承）：合成单片段计划跑一遍
+    plan_schema 全部单片段规则（素材存在性/shot 引用/trim 互斥/效果参数），
+    零规则重复。probe 用占位值（真实探针在 validate/submit 回填）。"""
+    synthetic = {"schema_version": "3.0",
+                 "output": {"filename": "OUTPUT/_draft_check.mp4",
+                            "width": 640, "height": 360},
+                 "clips": [dict(copy.deepcopy(item), id="cX")],
+                 "timeline": [{"clip": "cX"}]}
+    for c in synthetic["clips"]:
+        if plan_dialect._kind_of(
+                str((c.get("reader") or {}).get("path") or "")) == "video":
+            c.setdefault("probe",
+                         {"duration": 10.0, "width": 1920, "height": 1080,
+                          "fps": 30, "has_audio": True, "has_video": True})
+    errs = plan_dialect.validate_any(synthetic, PROJECT_ROOT)
     # 剔除与上下文相关的误报：合成计划里没有转场/时长推导问题
     return [e for e in errs if "cX" in e or "clips[0]" in e]
-
-
-def _resolved_copy(plan: dict) -> dict:
-    """shot 引用解析成卡上边界的校验副本（不动 draft 本体）。
-
-    plan_schema 的跨片段规则（转场 < 片段时长、overlay 越界）依赖
-    clip_duration，而 shot 引用未展开时取不到时长 → 全量校验会漏放。
-    validate/submit 用这份副本跑规则；draft 本体保持 shot 形态，
-    展开仍由编译器 _resolve_shot_tags 完成（单一展开点）。
-    """
-    import copy
-    snap = copy.deepcopy(plan)
-    for c in snap.get("clips") or []:
-        shot = c.get("shot")
-        if shot is None:
-            continue
-        span = _shot_span(c.get("source") or "", shot)
-        if span:
-            c["trim_start"], c["trim_end"] = round(span[0], 3), round(span[1], 3)
-        c.pop("shot", None)          # 校验副本里 trim/shot 互斥，解析后须移除
-    return snap
 
 
 def _summary(plan: dict) -> str:
     """draft 紧凑状态摘要（get_plan/各工具返回值共用）。"""
     out = plan.get("output") or {}
     lines = [f"draft「{out.get('filename', '?')}」"
-             f" {out.get('resolution', {}).get('width')}x"
-             f"{out.get('resolution', {}).get('height')}"]
+             f" {out.get('width', '?')}x{out.get('height', '?')}"
+             f" @{out.get('fps', 30)}"]
     trans = {t.get("clip"): t.get("transition")
              for t in plan.get("timeline") or []}
     total = 0.0
@@ -157,20 +186,20 @@ def _summary(plan: dict) -> str:
             pass
         tr_dur = (tr or {}).get("duration") or 0
         total -= tr_dur if isinstance(tr_dur, (int, float)) else 0
-        src_s = str(c.get("source", "")).rsplit("/", 1)[-1]
-        if c.get("shot"):
-            ref = f"#{c['shot']}"
-        else:
-            ts_v = c.get("trim_start")
-            te_v = c.get("trim_end")
-            ts_s = f"{ts_v:g}" if isinstance(ts_v, (int, float)) else "0"
-            te_s = f"{te_v:g}" if isinstance(te_v, (int, float)) else "?"
-            ref = f"{ts_s}-{te_s}s"
-        eff = ",".join(e.get("name", "?") if isinstance(e, dict) else str(e)
-                       for e in (c.get("effects") or [])) or "-"
+        src_s = str((c.get("reader") or {}).get("path", "")).rsplit("/", 1)[-1]
+        ref = f"#{c['shot']}" if c.get("shot") else (
+            f"{c['start']:g}-{c['end']:g}s"
+            if isinstance(c.get("start"), (int, float))
+            and isinstance(c.get("end"), (int, float)) else "整段")
+        eff = ",".join(
+            (e.get("type", "?") + (f"({e['id']})" if e.get("id") else ""))
+            if isinstance(e, dict) else str(e)
+            for e in (c.get("effects") or [])) or "-"
+        speed = f" speed={c['speed']:g}" if c.get("speed") is not None else ""
+        vol = f" vol={c['volume']:g}" if c.get("volume") is not None else ""
         mute = " [静音]" if (c.get("audio") or {}).get("mute") else ""
         lines.append(f"  {c.get('id')}  {src_s} {ref}  {dur}  转场:{tr_s}"
-                     f"  效果:{eff}{mute}")
+                     f"  效果:{eff}{speed}{vol}{mute}")
     n_trans = sum(1 for t in (plan.get("timeline") or [])
                   if t.get("transition"))
     lines.append(f"共 {len(plan.get('clips') or [])} 片段 / 约 {round(total, 1)}s"
@@ -185,8 +214,8 @@ def _summary(plan: dict) -> str:
     ovs = plan.get("overlays") or []
     if ovs:
         lines.append(f"文字/画中画 {len(ovs)} 条：" + "、".join(
-            f"[{i}]{str(o.get('text') or o.get('source') or '')[:12]}"
-            for i, o in enumerate(ovs)))
+            f"[{o.get('id')}] {str(o.get('text') or o.get('source') or '')[:12]}"
+            for o in ovs))
     narr = plan.get("_narration")
     if narr:
         lines.append(f"旁白 {len(narr)} 组（title={plan.get('_title') or '无'}）")
@@ -201,326 +230,256 @@ def _summary(plan: dict) -> str:
 # ------------------------------------------------------------------- 工具 -- #
 
 @tool
-def new_plan(filename: str, width: int, height: int, fps: int = 30) -> str:
-    """Initialize a new editing-plan draft (call this FIRST, before any clip
-    tools). Returns a confirmation plus next-step hints.
+def set_project(filename: str, width: int, height: int, fps: int = 30) -> str:
+    """Initialize (or update) the draft's output spec. Call this FIRST on a new
+    task. If a draft already exists (revision turn), only the given fields
+    change — everything else is preserved.
 
     Args:
         filename: output file name, e.g. "OUTPUT/my_video.mp4" (OUTPUT/ prefix).
-        width: canvas width in px (positive even number, e.g. 1280; 720 for vertical use 720).
-        height: canvas height in px (positive even number, e.g. 720; vertical use 1280).
+        width: canvas width px (positive even number; vertical video use 720).
+        height: canvas height px (positive even number; vertical video use 1280).
         fps: output fps, default 30.
     """
-    if not (isinstance(width, int) and width > 0 and width % 2 == 0
-            and isinstance(height, int) and height > 0 and height % 2 == 0):
-        return f"✗ width/height 必须是正偶数（收到 {width}x{height}）。"
-    fn = filename if filename.startswith("OUTPUT/") else f"OUTPUT/{filename}"
-    _STATE.update(
-        plan={"schema_version": "2.0",
-              "output": {"filename": fn,
-                         "resolution": {"width": width, "height": height},
-                         "fps": fps},
-              "clips": [], "timeline": [], "overlays": []},
-        submitted=False, validated=None)
-    return ("✓ draft 已初始化。下一步：add_clips 添加片段（优先用 shot 编号"
-            "引用 list_shots 的镜头），然后 set_transition / set_audio / "
-            "set_narration，最后 validate_plan → submit。\n" + _summary(_draft()))
+    plan = _draft()
+    if plan is None:
+        if not (isinstance(width, int) and width > 0 and width % 2 == 0
+                and isinstance(height, int) and height > 0 and height % 2 == 0):
+            return f"✗ width/height 必须是正偶数（收到 {width}x{height}）。"
+        fn = filename if filename.startswith("OUTPUT/") else f"OUTPUT/{filename}"
+        _STATE.update(
+            plan={"schema_version": "3.0",
+                  "output": {"filename": fn, "width": width, "height": height,
+                             "fps": fps},
+                  "clips": [], "timeline": [], "overlays": []},
+            submitted=False, validated=None)
+        return ("✓ draft 已初始化。下一步：clip_diff 批量 insert 片段（优先用 "
+                "shot 编号引用 list_shots 的镜头），然后 timeline_diff / "
+                "audio_diff / set_narration，最后 validate_plan → submit。\n"
+                + _summary(_draft()))
+    return _apply(lambda _p: ([{"key": ["output"], "type": "update",
+                               "value": {"filename": filename, "width": width,
+                                         "height": height, "fps": fps}}], []))
 
 
 @tool
-def add_clips(clips: list, after: str | None = None) -> str:
-    """Append clips to the draft (batch, one call for 1..N clips — PREFER one
-    call for the whole sequence). Each clip item is a dict:
-      {"source": "INPUT/a.mp4", "shot": 3}            ← PREFERRED: reference
-        the N-th shot from list_shots (INPUT/a.mp4#03); exact card boundaries
-        are filled by the host — no timestamp copying, no probe writing.
-      {"source": "INPUT/a.mp4", "trim_start": 12, "trim_end": 18.5}   ← only
-        when splitting/merging shots
-      {"source": "INPUT/img.jpg", "kind": "image", "duration": 3}     ← stills
-    Do NOT write "probe" — the host fills it. kind is auto-detected for videos.
-    Args:
-        after: insert position AFTER this clip id (omit = append at end).
+def clip_diff(ops: list) -> str:
+    """Add / modify / remove CLIPS on the draft (batch: one call for 1..N ops,
+    atomic — one bad op rejects the whole batch). Each op is a flat dict:
+
+      {"op": "insert", "reader": {"type": "FFmpegReader", "path": "INPUT/a.mp4"},
+       "shot": 3, "after": "c2"}          ← PREFERRED: reference the N-th shot
+        from list_shots; exact boundaries are filled by the host — no timestamp
+        copying. "after" omitted = append at end.
+      {"op": "insert", "reader": {"type": "ImageReader", "path": "INPUT/img.jpg"},
+       "duration": 3}                     ← still image, show for 3s
+      {"op": "insert", "reader": {...}, "start": 12, "end": 18.5}  ← custom cut
+        (only when splitting/merging shots; mutually exclusive with "shot")
+      {"op": "update", "id": "c2", "end": 9.0}          ← partial: only listed
+        fields change; "shot": 5 re-references a shot; "start": null clears it
+      {"op": "delete", "id": "c3"}       ← also removes overlays attached to c3
+
+    Optional per-clip fields: "speed" (0.25..4), "volume" (0..1], "audio":
+    {"mute": true} or {"source": "INPUT/…", "fade_in": …, "loop": …},
+    "effects": [{"type": "Brightness", "brightness": 0.2}, …], "cut_silence".
+    Do NOT write "probe" — the host fills it. kind is auto-detected from the
+    file extension.
     """
-    plan = _draft()
-    if plan is None:
-        return "✗ 还没有 draft——先调用 new_plan 初始化。"
-    if not isinstance(clips, list) or not clips:
-        return "✗ clips 必须是非空数组，每项 {source, shot?/trim?, duration?}。"
-    idx = None
-    if after is not None:
-        tl_ids = [t.get("clip") for t in plan["timeline"]]
-        if after not in tl_ids:
-            return f"✗ after={after} 不在当前时间轴里（有 {tl_ids}）。"
-        idx = tl_ids.index(after) + 1
-    results, added = [], 0
-    for i, item in enumerate(clips):
-        if not isinstance(item, dict):
-            results.append(f"  [{i}] ✗ 必须是对象")
-            continue
-        item = dict(item)
-        item.pop("probe", None)                    # probe 一律宿主回填
-        if "kind" not in item:
-            ext = os.path.splitext(str(item.get("source") or ""))[1].lower()
-            item["kind"] = "image" if ext in (".jpg", ".jpeg", ".png",
-                                              ".bmp", ".webp", ".gif") else "video"
-        errs = _validate_clip_item(item, PROJECT_ROOT)
-        if errs:
-            results.append(f"  [{i}] ✗ " + "；".join(errs[:2]))
-            continue
-        cid = _next_id(plan)
-        item["id"] = cid
-        plan["clips"].append(item)
-        plan["timeline"].insert(len(plan["timeline"]) if idx is None
-                                else idx + added, {"clip": cid})
-        span_s = f" #{item['shot']}" if item.get("shot") else ""
-        results.append(f"  [{i}] ✓ {cid} = {str(item['source']).rsplit('/', 1)[-1]}"
-                       f"{span_s}（{_clip_dur_display(item)}）")
-        added += 1
-    _STATE["validated"] = None
-    head = f"添加 {added}/{len(clips)} 个片段：\n" + "\n".join(results)
-    return head + "\n" + _summary(plan)
+    def builder(plan: dict):
+        actions = []
+        pre_errs = []
+        for i, op in enumerate(ops if isinstance(ops, list) else [], 1):
+            if not isinstance(op, dict):
+                return None, ["clip_diff 的每个 op 必须是对象。"]
+            kind = op.get("op")
+            if kind == "insert":
+                value = {k: v for k, v in op.items() if k != "op"}
+                errs = _validate_clip_item_v3(
+                    {k: v for k, v in value.items() if k != "after"})
+                if errs:
+                    pre_errs.append(f"clip_diff 第 {i} 个 op："
+                                    + "；".join(errs[:2]))
+                    continue
+                actions.append({"key": ["clips"], "type": "insert",
+                                "value": value})
+            elif kind in ("update", "delete"):
+                cid = op.get("id")
+                if cid is None:
+                    return None, [f"clip_diff {kind} 缺少 id。"]
+                value = {k: v for k, v in op.items()
+                         if k not in ("op", "id")}
+                actions.append({"key": ["clips", {"id": cid}], "type": kind,
+                                "value": value or None})
+            else:
+                return None, [f"clip_diff 不支持 op={kind!r}"
+                              f"（insert/update/delete）。"]
+        return actions, pre_errs
+    return _apply(builder)
 
 
 @tool
-def set_clip(clip: str, trim_start: float | None = None,
-             trim_end: float | None = None, shot: int | None = None,
-             mute: bool | None = None, volume: float | None = None) -> str:
-    """Modify ONE existing clip in the draft (only the fields you pass change).
-    Use shot=N to re-reference a shot, or trim_start/trim_end for custom cuts.
-    Args:
-        clip: clip id, e.g. "c2" (verbatim from the draft — case sensitive).
-        mute: True mutes this clip's original sound; False unmutes.
-        volume: clip-level original-sound volume (0, 1].
+def effect_diff(ops: list) -> str:
+    """Attach / modify / remove EFFECTS on clips (batch, atomic). Effect types:
+    Brightness, Saturation, hflip, vflip, transpose, delogo, face_mosaic.
+    (Speed is NOT an effect — set the clip's "speed" via clip_diff.)
+
+      {"op": "insert", "clip": "c2", "type": "Brightness",
+       "brightness": 0.15, "contrast": 1.1}
+      {"op": "insert", "clip": "c2", "type": "face_mosaic",
+       "mode": "mosaic", "score_threshold": 0.4}
+      {"op": "update", "id": "e1", "brightness": 0.25}   ← partial by effect id
+      {"op": "delete", "id": "e1"}
     """
-    plan, c = _draft(), None
-    if plan is None:
-        return "✗ 还没有 draft。"
-    c = next((x for x in plan["clips"] if x.get("id") == clip), None)
-    if c is None:
-        ids = "、".join(x.get("id", "?") for x in plan["clips"]) or "（无）"
-        return f"✗ 片段 {clip} 不存在（id 大小写敏感）。可用：{ids}。"
-    if shot is not None:
-        span = _shot_span(c.get("source") or "", shot)
-        if span is None:
-            card = content_analysis.load_cached_card(PROJECT_ROOT, c.get("source") or "")
-            n = len((card or {}).get("shots") or [])
-            return f"✗ shot={shot} 无效（该素材共 {n} 个镜头）。"
-        c.pop("trim_start", None); c.pop("trim_end", None)
-        c["shot"] = shot
-    if trim_start is not None:
-        c["trim_start"] = trim_start; c.pop("shot", None)
-    if trim_end is not None:
-        c["trim_end"] = trim_end
-    audio = c.setdefault("audio", {})
-    touched_audio = False
-    if mute is not None:
-        audio["mute"] = bool(mute); touched_audio = True
-    if volume is not None:
-        audio["volume"] = volume; touched_audio = True
-    if not touched_audio and not audio:
-        c.pop("audio", None)
-    _STATE["validated"] = None
-    return f"✓ 已更新 {clip}。\n" + _summary(plan)
+    def builder(_plan: dict):
+        actions = []
+        for op in ops if isinstance(ops, list) else []:
+            if not isinstance(op, dict):
+                return None, ["effect_diff 的每个 op 必须是对象。"]
+            kind = op.get("op")
+            if kind == "insert":
+                clip = op.get("clip")
+                if clip is None:
+                    return None, ["effect_diff insert 缺少 clip（挂在哪个片段）。"]
+                value = {k: v for k, v in op.items()
+                         if k not in ("op", "clip")}
+                actions.append({"key": ["clips", {"id": clip}, "effects"],
+                                "type": "insert", "value": value})
+            elif kind in ("update", "delete"):
+                eid = op.get("id")
+                if eid is None:
+                    return None, [f"effect_diff {kind} 缺少效果 id。"]
+                # 效果 id 全局唯一：宿主定位它挂在哪个片段
+                owner = next((c.get("id") for c in (_plan.get("clips") or [])
+                              for e in (c.get("effects") or [])
+                              if isinstance(e, dict) and e.get("id") == eid), None)
+                if owner is None and kind == "update":
+                    ids = [e.get("id") for c in (_plan.get("clips") or [])
+                           for e in (c.get("effects") or []) if isinstance(e, dict)]
+                    return None, [f"效果 {eid} 不存在（现有：{ids or '无'}）。"]
+                value = {k: v for k, v in op.items()
+                         if k not in ("op", "id", "clip")}
+                actions.append({"key": ["clips", {"id": owner or op.get("clip")},
+                                        "effects", {"id": eid}],
+                                "type": kind, "value": value or None})
+            else:
+                return None, [f"effect_diff 不支持 op={kind!r}。"]
+        return actions, []
+    return _apply(builder)
 
 
 @tool
-def set_effect(clip: str, name: str, effect_args: dict | None = None) -> str:
-    """Attach an effect to a clip, or update its arguments if already attached
-    (same name = update, e.g. re-call with different block_size).
-    Args:
-        clip: clip id (verbatim, case sensitive).
-        name: effect name from the effect menu (hflip, speed, face_mosaic, ...).
-        effect_args: effect arguments dict, e.g. {"factor": 0.6} for speed.
+def overlay_diff(ops: list) -> str:
+    """Add / modify / remove TEXT or PICTURE-IN-PICTURE overlays (batch,
+    atomic, addressed by id — no index drift).
+
+      {"op": "insert", "type": "text", "at_clip": "c1", "text": "周末骑行",
+       "duration": 2, "gravity": "top", "font_size": 48, "color": "#FFFFFF"}
+      {"op": "insert", "type": "pip", "at_clip": "c1", "source": "INPUT/b.mp4",
+       "kind": "video", "duration": 4, "gravity": "bottom-right", "scale": 0.25}
+      {"op": "update", "id": "o1", "text": "新文案", "duration": 3}
+      {"op": "delete", "id": "o1"}
+
+    start_offset (default 0) counts WITHIN the target clip (0 = when that clip
+    first appears); gravity is one of top-left/top/top-right/left/center/
+    right/bottom-left/bottom/bottom-right.
     """
-    plan = _draft()
-    if plan is None:
-        return "✗ 还没有 draft。"
-    c = next((x for x in plan["clips"] if x.get("id") == clip), None)
-    if c is None:
-        return f"✗ 片段 {clip} 不存在。"
-    skill = SKILLS.get(name)
-    if skill is None:
-        return f"✗ 效果 {name!r} 不在白名单 {effects_menu()} 内。"
-    eargs = effect_args or {}
-    errs = check_args_keys(skill, eargs, f"{clip}.{name}") \
-        + (skill.validate(eargs, f"{clip}.{name}", c) if skill.validate else [])
-    if errs:
-        return "✗ " + "；".join(errs)
-    effects = c.setdefault("effects", [])
-    effects[:] = [e for e in effects if e.get("name") != name]
-    effects.append({"name": name, **({"args": eargs} if eargs else {})})
-    _STATE["validated"] = None
-    return f"✓ {clip} 效果 {name} 已设置。\n" + _summary(plan)
+    def builder(_plan: dict):
+        actions = []
+        for op in ops if isinstance(ops, list) else []:
+            if not isinstance(op, dict):
+                return None, ["overlay_diff 的每个 op 必须是对象。"]
+            kind = op.get("op")
+            if kind == "insert":
+                value = {k: v for k, v in op.items() if k != "op"}
+                actions.append({"key": ["overlays"], "type": "insert",
+                                "value": value})
+            elif kind in ("update", "delete"):
+                oid = op.get("id")
+                if oid is None:
+                    return None, [f"overlay_diff {kind} 缺少 id。"]
+                value = {k: v for k, v in op.items() if k not in ("op", "id")}
+                actions.append({"key": ["overlays", {"id": oid}], "type": kind,
+                                "value": value or None})
+            else:
+                return None, [f"overlay_diff 不支持 op={kind!r}。"]
+        return actions, []
+    return _apply(builder)
 
 
 @tool
-def remove_effect(clip: str, name: str) -> str:
-    """Remove an effect from a clip."""
-    plan = _draft()
-    if plan is None:
-        return "✗ 还没有 draft。"
-    c = next((x for x in plan["clips"] if x.get("id") == clip), None)
-    if c is None:
-        return f"✗ 片段 {clip} 不存在。"
-    before = len(c.get("effects") or [])
-    c["effects"] = [e for e in (c.get("effects") or [])
-                    if e.get("name") != name]
-    if len(c["effects"]) == before:
-        have = [e.get("name") for e in c.get("effects") or []]
-        return f"✗ {clip} 上没有效果 {name}（现有：{have}）。"
-    _STATE["validated"] = None
-    return f"✓ 已移除 {clip} 的 {name}。"
+def timeline_diff(ops: list) -> str:
+    """Reorder clips or set transitions (batch, atomic).
 
-
-@tool
-def remove_clip(clip: str) -> str:
-    """Remove a clip (and overlays attached to it) from the draft."""
-    plan = _draft()
-    if plan is None:
-        return "✗ 还没有 draft。"
-    if not any(c.get("id") == clip for c in plan["clips"]):
-        return f"✗ 片段 {clip} 不存在。"
-    plan["clips"] = [c for c in plan["clips"] if c.get("id") != clip]
-    plan["timeline"] = [t for t in plan["timeline"] if t.get("clip") != clip]
-    n_ov = len(plan.get("overlays") or [])
-    plan["overlays"] = [o for o in (plan.get("overlays") or [])
-                        if o.get("at_clip") != clip]
-    dropped = n_ov - len(plan["overlays"])
-    _STATE["validated"] = None
-    note = f"（连带移除 {dropped} 条挂载文字）" if dropped else ""
-    return f"✓ 已删除 {clip}{note}。\n" + _summary(plan)
-
-
-@tool
-def move_clip(clip: str, after: str | None = None) -> str:
-    """Move a clip in the timeline. after omitted = move to the FRONT."""
-    plan = _draft()
-    if plan is None:
-        return "✗ 还没有 draft。"
-    tl_ids = [t.get("clip") for t in plan["timeline"]]
-    if clip not in tl_ids:
-        return f"✗ 片段 {clip} 不在时间轴里。"
-    entry = next(t for t in plan["timeline"] if t.get("clip") == clip)
-    plan["timeline"] = [t for t in plan["timeline"] if t.get("clip") != clip]
-    if after is None:
-        plan["timeline"].insert(0, entry)
-    else:
-        tl_ids = [t.get("clip") for t in plan["timeline"]]
-        if after not in tl_ids:
-            return f"✗ after={after} 不在时间轴里。"
-        plan["timeline"].insert(
-            next(i for i, t in enumerate(plan["timeline"])
-                 if t.get("clip") == after) + 1, entry)
-    _STATE["validated"] = None
-    return f"✓ {clip} 已移动。\n" + _summary(plan)
-
-
-@tool
-def set_transition(clip: str, type: str, duration: float = 0.5) -> str:
-    """Set the TRANSITION between `clip` and the clip BEFORE it (transitions
-    live on the later clip; the first timeline clip has none — that is a cut).
-    Args:
-        clip: the later clip id.
-        type: one of fade/dissolve/wipeleft/wiperight/wipeup/wipedown/
-              slideleft/slideright/slideup/slidedown/circleopen/circleclose;
-              use "none" to make it a hard cut.
-        duration: transition seconds (must be shorter than both neighbors —
-        full validation runs at validate_plan/submit).
+      {"op": "move", "clip": "c3", "after": "c1"}   ← after omitted = move to FRONT
+      {"op": "transition", "clip": "c2", "type": "fade", "duration": 0.5}
+        ← the transition INTO c2 (hangs on the later clip; first clip has none)
+        type: fade/dissolve/wipeleft/wiperight/wipeup/wipedown/slideleft/
+        slideright/slideup/slidedown/circleopen/circleclose; "none" = hard cut
+      {"op": "transition", "clip": "c2", "type": "none"}   ← back to hard cut
     """
-    plan = _draft()
-    if plan is None:
-        return "✗ 还没有 draft。"
-    tl = plan["timeline"]
-    pos = next((i for i, t in enumerate(tl) if t.get("clip") == clip), None)
-    if pos is None:
-        return f"✗ 片段 {clip} 不在时间轴里。"
-    if pos == 0:
-        return f"✗ {clip} 是首个片段，没有前置转场（首段即硬切）。"
-    if type != "none" and type not in plan_schema.TRANSITIONS:
-        return f"✗ 转场类型 {type!r} 不在白名单 {sorted(plan_schema.TRANSITIONS)}。"
-    if not (isinstance(duration, (int, float)) and 0 < duration < 5):
-        return f"✗ duration 必须在 (0, 5) 秒内。"
-    tl[pos]["transition"] = None if type == "none" else \
-        {"type": type, "duration": float(duration)}
-    _STATE["validated"] = None
-    return f"✓ {clip} 前置转场已设置。\n" + _summary(plan)
+    def builder(_plan: dict):
+        actions = []
+        for op in ops if isinstance(ops, list) else []:
+            if not isinstance(op, dict):
+                return None, ["timeline_diff 的每个 op 必须是对象。"]
+            kind = op.get("op")
+            clip = op.get("clip")
+            if clip is None:
+                return None, ["timeline_diff 的 op 缺少 clip。"]
+            if kind == "move":
+                actions.append({"key": ["timeline", {"clip": clip}],
+                                "type": "move",
+                                "value": {"after": op.get("after")}})
+            elif kind == "transition":
+                ttype = str(op.get("type") or "")
+                if ttype in ("", "none", "hard"):
+                    actions.append({"key": ["timeline", {"clip": clip},
+                                            "transition"],
+                                    "type": "delete", "value": None})
+                else:
+                    actions.append({"key": ["timeline", {"clip": clip},
+                                            "transition"],
+                                    "type": "update",
+                                    "value": {"type": ttype,
+                                              "duration": op.get("duration", 0.5)}})
+            else:
+                return None, [f"timeline_diff 不支持 op={kind!r}（move/transition）。"]
+        return actions, []
+    return _apply(builder)
 
 
 @tool
-def set_audio(source: str, volume: float = 0.3, fade_in: float = 0.5,
-              fade_out: float = 1.0, loop: bool = True,
-              original: str = "mute", ducking: bool = False,
-              snap_beats: bool = False) -> str:
-    """Set / replace the background music (tracks come from list_music).
-    original="mute" (default) replaces original sound; "keep" mixes both
-    (then ducking=True auto-dips music under speech). snap_beats=True aligns
-    cut points to the music's beats (within ±0.35s when durations allow).
+def audio_diff(ops: list) -> str:
+    """Set / replace / clear the BACKGROUND MUSIC (tracks from list_music).
+
+      {"op": "set", "source": "MUSIC/x.mp3", "volume": 1.0, "loop": true}
+      {"op": "set", "source": "MUSIC/x.mp3", "original": "keep", "ducking": true}
+      {"op": "clear"}    ← remove BGM (original sound only)
+
+    volume (0,1] default 0.3; BY DEFAULT the music REPLACES the clips' original
+    audio (original="mute") so use ~1.0. original="keep" mixes both — only then
+    may you add ducking=true. snap_beats=true aligns cut points to the beat.
     """
-    plan = _draft()
-    if plan is None:
-        return "✗ 还没有 draft。"
-    audio = {"source": source, "volume": volume, "fade_in": fade_in,
-             "fade_out": fade_out, "loop": loop, "original": original,
-             "ducking": ducking, "snap_beats": snap_beats}
-    errs = validate_audio(audio, "audio", PROJECT_ROOT)
-    if errs:
-        return "✗ " + "；".join(errs)
-    plan["audio"] = audio
-    _STATE["validated"] = None
-    return f"✓ BGM 已设置。\n" + _summary(plan)
-
-
-@tool
-def clear_audio() -> str:
-    """Remove the background music from the draft (original sound only)."""
-    plan = _draft()
-    if plan is None:
-        return "✗ 还没有 draft。"
-    plan.pop("audio", None)
-    _STATE["validated"] = None
-    return "✓ BGM 已清除。\n" + _summary(plan)
-
-
-@tool
-def add_text(text: str, at_clip: str, duration: float,
-             start_offset: float = 0, position: str = "bottom",
-             font_size: int | None = None, color: str = "#FFFFFF") -> str:
-    """Add a text overlay attached to ONE clip (title, captions...).
-    start_offset/duration are seconds WITHIN that clip; full validation
-    (offset+duration ≤ clip length) runs at validate_plan/submit.
-    position: top-left/top/top-right/left/center/right/bottom-left/bottom/
-    bottom-right.
-    """
-    plan = _draft()
-    if plan is None:
-        return "✗ 还没有 draft。"
-    if not any(c.get("id") == at_clip for c in plan["clips"]):
-        return f"✗ 片段 {at_clip} 不存在。"
-    if not (isinstance(duration, (int, float)) and duration > 0):
-        return "✗ duration 必须为正数（秒）。"
-    ov = {"type": "text", "text": text, "at_clip": at_clip,
-          "start_offset": float(start_offset), "duration": float(duration),
-          "position": position, "color": color}
-    if font_size is not None:
-        ov["font_size"] = font_size
-    plan.setdefault("overlays", []).append(ov)
-    _STATE["validated"] = None
-    return f"✓ 文字已加到 {at_clip}（overlay[{len(plan['overlays']) - 1}]）。\n" \
-        + _summary(plan)
-
-
-@tool
-def remove_overlay(index: int) -> str:
-    """Remove an overlay by its index number (see get_plan listing, 0-based)."""
-    plan = _draft()
-    if plan is None:
-        return "✗ 还没有 draft。"
-    ovs = plan.get("overlays") or []
-    if not (isinstance(index, int) and 0 <= index < len(ovs)):
-        return f"✗ index={index} 超范围（当前 {len(ovs)} 条，0~{len(ovs) - 1}）。"
-    ovs.pop(index)
-    _STATE["validated"] = None
-    return f"✓ overlay[{index}] 已移除。"
+    def builder(_plan: dict):
+        actions = []
+        for op in ops if isinstance(ops, list) else []:
+            if not isinstance(op, dict):
+                return None, ["audio_diff 的每个 op 必须是对象。"]
+            kind = op.get("op")
+            if kind == "clear":
+                actions.append({"key": ["audio"], "type": "delete", "value": None})
+            elif kind == "set":
+                value = {k: v for k, v in op.items() if k != "op"}
+                audio = {**(_plan.get("audio") or {}), **value}
+                errs = validate_audio(audio, "audio", PROJECT_ROOT)
+                if errs:
+                    return None, errs
+                actions.append({"key": ["audio"], "type": "update",
+                                "value": value})
+            else:
+                return None, [f"audio_diff 不支持 op={kind!r}（set/clear）。"]
+        return actions, []
+    return _apply(builder)
 
 
 @tool
@@ -530,55 +489,79 @@ def set_narration(groups: list, title: str | None = None) -> str:
                  "units": ["句一。", "句二。"]} — units optional (compiler
     splits text by punctuation). Subtitle timing is computed by the compiler
     from each group's time window — you never write timestamps.
+    Pass an empty groups list to remove narration.
     """
     plan = _draft()
     if plan is None:
         return "✗ 还没有 draft。"
-    ids = {c.get("id") for c in plan["clips"]}
+    ids = {c.get("id") for c in plan.get("clips") or []}
     errs = []
-    for i, g in enumerate(groups if isinstance(groups, list) else []):
-        if not isinstance(g, dict) or not g.get("clip_ids"):
-            errs.append(f"groups[{i}] 缺 clip_ids")
-            continue
-        bad = [x for x in g["clip_ids"] if x not in ids]
-        if bad:
-            errs.append(f"groups[{i}].clip_ids 引用不存在的片段 {bad}")
+    if groups:
+        for i, g in enumerate(groups if isinstance(groups, list) else []):
+            if not isinstance(g, dict) or not g.get("clip_ids"):
+                errs.append(f"groups[{i}] 缺 clip_ids")
+                continue
+            bad = [x for x in g["clip_ids"] if x not in ids]
+            if bad:
+                errs.append(f"groups[{i}].clip_ids 引用不存在的片段 {bad}")
     if errs:
         return "✗ " + "；".join(errs)
-    plan["_narration"] = groups
-    plan.pop("_captions", None); plan.pop("_caption_style", None)
+    actions = [{"key": ["_narration"], "type": "update" if groups else "delete",
+                "value": groups or None}]
     if title is not None:
-        plan["_title"] = title
-    _STATE["validated"] = None
-    return f"✓ 旁白 {len(groups)} 组已设置。\n" + _summary(plan)
+        actions.append({"key": ["_title"], "type": "update", "value": title})
+    elif groups:
+        actions.append({"key": ["_title"], "type": "delete", "value": None})
+    # 旁白与简单字幕互斥（引擎外的块级约束，就地检查）
+    if groups and plan.get("_captions"):
+        actions.append({"key": ["_captions"], "type": "delete", "value": None})
+        actions.append({"key": ["_caption_style"], "type": "delete", "value": None})
+    return _apply(lambda _p: (actions, []))
 
 
 @tool
 def set_captions(lines: list, style: str = "bottom") -> str:
     """Simple captions: one short line per clip, in timeline order.
-    style: "bottom" (subtitle bar) or "credits" (centered ending credits)."""
+    style: "bottom" (subtitle bar) or "credits" (centered ending credits).
+    Pass an empty list to remove captions."""
     plan = _draft()
     if plan is None:
         return "✗ 还没有 draft。"
-    if not (isinstance(lines, list) and lines
-            and all(isinstance(x, str) and x.strip() for x in lines)):
-        return "✗ lines 必须是非空字符串数组。"
-    plan["_captions"] = lines
-    plan["_caption_style"] = style
-    plan.pop("_narration", None); plan.pop("_title", None)
-    _STATE["validated"] = None
-    return f"✓ 字幕 {len(lines)} 句已设置。\n" + _summary(plan)
+    if not (isinstance(lines, list) and all(
+            isinstance(x, str) and x.strip() for x in lines)):
+        return "✗ lines 必须是非空字符串数组（或空数组=移除）。"
+    actions = [{"key": ["_captions"], "type": "update" if lines else "delete",
+                "value": lines or None},
+               {"key": ["_caption_style"], "type": "update", "value": style}]
+    if lines and plan.get("_narration"):
+        actions.append({"key": ["_narration"], "type": "delete", "value": None})
+        actions.append({"key": ["_title"], "type": "delete", "value": None})
+    return _apply(lambda _p: (actions, []))
+
+
+@tool
+def load_plan(plan: dict) -> str:
+    """Load a COMPLETE plan JSON as the new draft (full replace — like opening
+    a project file). Use only when the host explicitly provides a plan to
+    continue from, or the select/workflow macro result needs hand-tweaks.
+    The plan is upgraded to schema v3 automatically if needed.
+    """
+    if not isinstance(plan, dict):
+        return "✗ plan 必须是 JSON 对象。"
+    v3 = plan_dialect.normalize(plan)
+    _STATE.update(plan=v3, submitted=False, validated=None)
+    return "✓ 已载入计划（全量替换）。\n" + _summary(v3)
 
 
 @tool
 def get_plan() -> str:
     """Show the current draft: clip table (id / source / range / duration /
-    transition / effects), BGM, overlays, narration, estimated total length
-    and last validation result. Call this whenever you are unsure what the
-    draft looks like so far."""
+    transition / effects with ids), BGM, overlays with ids, narration,
+    estimated total length and last validation result. Call this whenever you
+    are unsure what the draft looks like so far."""
     plan = _draft()
     if plan is None:
-        return "还没有 draft（先 new_plan 初始化）。"
+        return "还没有 draft（先 set_project 初始化）。"
     return _summary(plan)
 
 
@@ -586,11 +569,11 @@ def get_plan() -> str:
 def validate_plan() -> str:
     """Run FULL validation on the draft (cross-clip rules: transitions vs
     clip lengths, overlay bounds, narration shapes...). Always call this
-    before submit; fix reported issues with the plan tools, then submit."""
+    before submit; fix reported issues with the diff tools, then submit."""
     plan = _draft()
     if plan is None:
         return "✗ 还没有 draft。"
-    errs = plan_schema.validate_plan(_resolved_copy(plan), PROJECT_ROOT)
+    errs = plan_dialect.validate_any(_probe_filled_copy(plan), PROJECT_ROOT)
     if errs:
         _STATE["validated"] = f"✗ {len(errs)} 处问题"
         return "试算发现以下问题（用工具修正后再 submit）：\n- " \
@@ -609,8 +592,8 @@ def submit() -> str:
     if plan is None:
         return "✗ 还没有 draft。"
     if not plan.get("clips"):
-        return "✗ draft 里还没有片段（先 add_clips）。"
-    errs = plan_schema.validate_plan(_resolved_copy(plan), PROJECT_ROOT)
+        return "✗ draft 里还没有片段（先 clip_diff insert）。"
+    errs = plan_dialect.validate_any(_probe_filled_copy(plan), PROJECT_ROOT)
     if errs:
         _STATE["validated"] = f"✗ {len(errs)} 处问题"
         return "✗ submit 被拦下（未提交），先用工具修正：\n- " \
@@ -620,7 +603,6 @@ def submit() -> str:
     return "✓ 已提交编译执行。\n" + _summary(plan)
 
 
-PLAN_TOOLS = [new_plan, add_clips, set_clip, set_effect, remove_effect,
-              remove_clip, move_clip, set_transition, set_audio, clear_audio,
-              add_text, remove_overlay, set_narration, set_captions,
-              get_plan, validate_plan, submit]
+PLAN_TOOLS = [set_project, clip_diff, effect_diff, overlay_diff,
+              timeline_diff, audio_diff, set_narration, set_captions,
+              load_plan, get_plan, validate_plan, submit]
