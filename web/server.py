@@ -788,14 +788,22 @@ def _run_pipeline(task: str, emit, session_id: str | None = None,
         diff = plan_diff.plan_diff(base_plan, getattr(compiled, "raw_plan", None)
                                    or compiled.plan)
         emit({"type": "plan_diff", **diff})
-        gate_q = plan_diff.check_scope(
-            task, diff, materials=["INPUT/" + m for m in materials],
-            scene_vocab=_scene_vocab(materials))
-        if gate_q:
-            emit(gate_q)
-            session["pending_plan"] = compiled     # 暂存：用户确认即执行
-            session["pending_question"] = gate_q
-            return
+        # 无实质变化的提交（除 D4 自动改名外与上一版相同）直接执行——
+        # 「无新改动」没有影响半径可言，闸门只会造成 global×local 死循环
+        # （2026-10-28 sim-v12-r1 实测：模型核实「已是目标状态」后原样提交）
+        substantive = [c for c in diff.get("changes") or []
+                       if c.get("kind") != "output"]
+        if not substantive:
+            emit({"type": "status", "text": "本次提交与上一版无实质变化，直接按当前计划渲染。"})
+        else:
+            gate_q = plan_diff.check_scope(
+                task, diff, materials=["INPUT/" + m for m in materials],
+                scene_vocab=_scene_vocab(materials))
+            if gate_q:
+                emit(gate_q)
+                session["pending_plan"] = compiled     # 暂存：用户确认即执行
+                session["pending_question"] = gate_q
+                return
 
     # 先执行后提交：渲染失败的计划不占「上一版」位（不回滚会让下一轮修订
     # brief 引用不存在的成片，agent 拿错误事实判断——2026-10-24 simtest5 实测）

@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sys
@@ -350,6 +351,50 @@ def t13_edit_plan_retired():
     import video_agent as va
     assert not hasattr(va, "extract_ops")
     assert not hasattr(va, "edit_plan")
+
+
+@t
+def t14b_diff_transitions_all_global():
+    # 2026-10-28 sim-v12-r1 实测回归：所有边界转场都变 ⇒ global——
+    # 「所有转场换成 X」只触碰 N-1 个片段（首片段无转场），旧口径
+    # 永远 local，与 global 消息互相顶牛造成闸门死循环。
+    import plan_diff as pdiff
+    old = {"clips": [
+        {"id": "C1", "source": "INPUT/a.mp4", "trim_start": 0, "trim_end": 8},
+        {"id": "C2", "source": "INPUT/a.mp4", "trim_start": 40, "trim_end": 44},
+        {"id": "C3", "source": "INPUT/b.mp4", "trim_start": 0, "trim_end": 5}],
+        "timeline": [{"clip": "C1"},
+                     {"clip": "C2", "transition": {"type": "fade", "duration": 0.5}},
+                     {"clip": "C3", "transition": {"type": "fade", "duration": 0.5}}]}
+    new = {"clips": old["clips"],
+           "timeline": [{"clip": "C1"},
+                        {"clip": "C2", "transition": {"type": "dissolve", "duration": 0.5}},
+                        {"clip": "C3", "transition": {"type": "dissolve", "duration": 0.5}}]}
+    d = pdiff.plan_diff(old, new)
+    assert d["scope"] == "global", d
+    assert any(c["kind"] == "transitions_all" for c in d["changes"]), d
+    # 部分转场变化不升级 global（2 处只改 1 处）
+    part = {"clips": old["clips"],
+            "timeline": [{"clip": "C1"},
+                         {"clip": "C2", "transition": {"type": "dissolve", "duration": 0.5}},
+                         {"clip": "C3", "transition": {"type": "fade", "duration": 0.5}}]}
+    assert pdiff.plan_diff(old, part)["scope"] == "local"
+
+
+@t
+def t14c_diff_no_substantive_change():
+    # 无实质变化（仅 D4 自动改名的 output 差异）→ changes 只有 output，
+    # server 侧据此跳过闸门（防「已是目标状态」的原样提交触发 global×local 死循环）
+    import plan_diff as pdiff
+    plan = {"clips": [{"id": "C1", "source": "INPUT/a.mp4",
+                       "trim_start": 0, "trim_end": 8}],
+            "timeline": [{"clip": "C1"}], "output": {"filename": "OUTPUT/a.mp4"}}
+    renamed = json.loads(json.dumps(plan))
+    renamed["output"]["filename"] = "OUTPUT/a-r2.mp4"
+    d = pdiff.plan_diff(plan, renamed)
+    kinds = [c["kind"] for c in d["changes"]]
+    assert kinds == ["output"], d
+    assert d["touched"] == []
 
 
 @t

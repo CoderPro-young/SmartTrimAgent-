@@ -156,6 +156,21 @@ def plan_diff(old: dict, new: dict) -> dict:
         changes.append({"kind": "reorder", "clip": "+".join(moved),
                         "detail": "片段顺序调整：" + " → ".join(new_order)})
 
+    # 转场全局感（2026-10-28 sim-v12-r1 实测）：「所有转场换成 dissolve」这类
+    # 合法全局意图只触碰 N-1 个片段（首片段无转场），按 touched≥total 永远判
+    # local，与 global 消息互相顶牛造成闸门死循环。全部边界转场都变 ⇒ global。
+    boundaries = changed_trans = 0
+    for i, j in pairs:
+        tr_o = _trans_of(old, old_clips[i].get("id"))
+        tr_n = _trans_of(new, new_clips[j].get("id"))
+        if tr_o or tr_n:                       # 首片段等无转场的边界不计
+            boundaries += 1
+            if (tr_o or {}) != (tr_n or {}):
+                changed_trans += 1
+    if boundaries > 1 and changed_trans == boundaries:
+        changes.append({"kind": "transitions_all",
+                        "detail": f"全部 {changed_trans} 处转场调整"})
+
     # 顶层块（全局）
     for key in _GLOBAL_KEYS:
         ov, nv = old.get(key), new.get(key)
@@ -178,7 +193,7 @@ def plan_diff(old: dict, new: dict) -> dict:
     total = max(len(new_clips), 1)
     uniq_touched = [c for c in dict.fromkeys(touched) if c]
     scope = "global" if (len([c for c in changes if c["kind"] in
-                              ("audio_block", "top_level")]) > 0
+                              ("audio_block", "top_level", "transitions_all")]) > 0
                          or len(uniq_touched) >= total) else "local"
     return {
         "scope": scope,
