@@ -451,6 +451,24 @@ def _(tmp):
     assert plan["overlays"][0]["text"] == "标题"
 
 
+@test("compile 端到端: v3 计划降级编译，raw_plan 保持 v3")
+def _(tmp):
+    import plan_compiler as pc
+    t = _Env(tmp)
+    pt.reset_draft(_draft())
+    r = pt.submit.invoke({})
+    assert r.startswith("✓ 已提交"), r
+    plan = pt.take_submitted()
+    res = pc.compile_plan(plan, tmp)
+    assert res.commands, res.commands
+    assert res.raw_plan["schema_version"] == "3.0"          # raw 回挂 v3
+    assert res.plan["clips"][0].get("trim_start") == 0      # 内部管线仍是 v2
+    # v2 legacy 输入行为不变
+    v2 = pd.to_internal(plan)
+    res2 = pc.compile_plan(v2, tmp)
+    assert res2.raw_plan["schema_version"] == "2.0"
+
+
 @test("引擎→方言闭环: 引擎产物过 validate_any（round-trip 后仍合法）")
 def _(tmp):
     plan, _, errs = pa.apply_actions(_draft(), [

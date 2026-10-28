@@ -1485,14 +1485,23 @@ def _apply_captions(plan: dict, math: dict) -> None:
 def compile_plan(plan: dict, project_root: str, quality: str = "final") -> CompileResult:
     """校验 → 展开（V5/V7）→ 推导 → 生成命令。失败抛 CompileError(errors)。
 
+    V12 双协议边界：v3（openshot 命名）计划在此降级为内部 v2 形态，现有
+    管线零改动；raw_plan 回挂「提交时原样」的 v3（修订底稿/plan_diff 的
+    R11 不变量在 v3 空间保持）。v2 输入（legacy submit_plan 宏路径）行为
+    与旧版完全一致。
+
     quality="preview"：同一条滤镜链在低分辨率/快档编码下出片（预览档），
     产物落 *_preview.* 文件；plan 本身不被修改，正式导出再以 final 重编译。
     """
+    import plan_dialect
+
+    raw_plan = copy.deepcopy(plan)       # R11：提交语义快照（存档/修订底稿）
+    if plan_dialect.is_v3(plan):
+        plan = plan_dialect.to_internal(plan)
     errors = validate_plan(plan, project_root)
     if errors:
-        raise CompileError(errors)
-
-    raw_plan = copy.deepcopy(plan)       # R11：展开前的可校验快照（存档/修订底稿）
+        raise CompileError(plan_dialect._rewrite_msgs(errors)
+                           if plan_dialect.is_v3(raw_plan) else errors)
     plan, expansions = _expand_plan(plan, project_root)
     math = _derive(plan)
     _apply_quality(math, quality)
