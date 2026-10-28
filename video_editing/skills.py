@@ -331,6 +331,47 @@ SKILLS: dict[str, Skill] = {
 }
 
 
+# --------------------------------------------------------------------------- #
+# openshot 语义名别名（V12 协议：字段参考 openshot，能力不变）
+#
+# v3 计划的 effects[].type 用 openshot 的语义名；注册表原名继续受理为别名。
+# Brightness/Saturation 都是 eq 的参数子集（eq 三参数相互独立，单滤镜合并
+# 与多滤镜级联输出等价，因此按子集拆/合往返精确还原——见 plan_dialect）。
+# --------------------------------------------------------------------------- #
+
+OPENSHOT_ALIASES: dict[str, tuple[str, tuple[str, ...]]] = {
+    "Brightness": ("eq", ("brightness", "contrast")),
+    "Saturation": ("eq", ("saturation",)),
+}
+
+
+def resolve_effect(type_name) -> tuple[str | None, tuple[str, ...]]:
+    """效果 type 名 → (skill 注册名, 该名字下允许的参数键)。
+
+    v3 语义名（Brightness/Saturation）解析到 eq 及其参数子集；注册表原名
+    （含 eq 本身）返回全部 arg_keys；未知名字返回 (None, ())——由调用方
+    给出白名单错误。
+    """
+    if not isinstance(type_name, str):
+        return None, ()
+    if type_name in OPENSHOT_ALIASES:
+        return OPENSHOT_ALIASES[type_name]
+    s = SKILLS.get(type_name)
+    if s is None:
+        return None, ()
+    return s.name, tuple(sorted(s.arg_keys))
+
+
+def v3_effects_menu() -> list[str]:
+    """v3 计划里合法的 effects[].type 列表（语义名 + 保留原名）。
+
+    speed 不在内：v3 里变速是 clip 平级的 speed 标量，不是效果。
+    """
+    names = set(SKILLS) | set(OPENSHOT_ALIASES)
+    names.discard("speed")
+    return sorted(names)
+
+
 def time_scale_of(effects: list) -> float:
     """effects 的综合时长缩放系数（1.0 = 不变）。
 
