@@ -18,6 +18,7 @@ draft 状态挂宿主侧（模块级）：RUN_LOCK 串行保证同时只有一�
 from __future__ import annotations
 
 import copy
+import json
 import os
 
 from langchain_core.tools import tool
@@ -243,6 +244,15 @@ def _summary(plan: dict) -> str:
                      f"（style={plan.get('_caption_style') or 'bottom'}）")
     if _STATE["validated"]:
         lines.append(f"上次试算：{_STATE['validated']}")
+    # 宏块可见性（2026-10-29 sim-v12-b B2 实测：宏产物会话的模型看不到自己
+    # 提交的宏参数，去翻 conversation_history 甚至派 task 子代理找参数）
+    wf = plan.get("workflow")
+    if wf:
+        lines.append(f"宏 workflow: {json.dumps(wf, ensure_ascii=False)}"
+                     f"（修订宏参数=重新提交 workflow 宏）")
+    elif plan.get("select"):
+        lines.append(f"宏 select: {json.dumps(plan['select'], ensure_ascii=False)[:140]}"
+                     f"（修订=改条件重新提交 select 宏）")
     return "\n".join(lines)
 
 

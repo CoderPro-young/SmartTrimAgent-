@@ -550,10 +550,14 @@ def list_music() -> str:
 # 工作流第 1 步在用，只返回文件名）。注册是合并语义（excluded_tools 取并集），
 # 不覆盖框架默认；即便模型幻觉出被排除工具的调用，也会在执行边界被中间件以
 # 文本拒绝，不会再把二进制塞进下一轮请求。
+# task（子代理派生）一并排除：规划器没有正当用途（2026-10-29 sim-v12-b B2
+# 实测：模型为找 workflow 参数派 general-purpose 子代理读会话记录——上下文
+# 污染且绕过工具面）；迁移清单③（subagents 拆分）若立项再放开。
 register_harness_profile(
     "openai",
     HarnessProfile(excluded_tools=frozenset({
         "read_file", "write_file", "edit_file", "glob", "grep", "execute",
+        "task",
     })),
 )
 
