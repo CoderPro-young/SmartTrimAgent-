@@ -92,7 +92,15 @@ def _fmt_trans(tr) -> str:
 
 
 def plan_diff(old: dict, new: dict) -> dict:
-    """两份（展开后的）计划 → 结构化差异。diff 卡与作用域闸门共用。"""
+    """两份（raw 未展开）计划 → 结构化差异。diff 卡与作用域闸门共用。
+
+    V12：v3 计划先降级到内部形态再比——同空间比较（R11 不变量），v3 与
+    v2 计划（旧会话/宏路径）互比也不会因字段名产生假 diff。
+    """
+    import plan_dialect
+    if plan_dialect.is_v3(old) or plan_dialect.is_v3(new):
+        old = plan_dialect.to_internal(old)
+        new = plan_dialect.to_internal(new)
     changes: list[dict] = []
     old_clips = old.get("clips") or []
     new_clips = new.get("clips") or []

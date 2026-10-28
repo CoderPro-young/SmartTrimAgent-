@@ -1,4 +1,5 @@
-"""V10 计划构建工具集离线单测：draft 状态 / 各工具正反例 / submit 端到端编译。
+"""V10 计划构建工具集离线单测（V12 起冻结在 plan_tools_v10，本文件钉住其行为）：
+draft 状态 / 各工具正反例 / submit 端到端编译。
 
 运行：.venv/Scripts/python.exe tests/test_v10_plan_tools.py
 全部离线：不触网、不跑 ffmpeg（compile_plan 只生成命令不执行）。
@@ -16,7 +17,7 @@ sys.path.insert(0, os.path.join(PROJECT_ROOT, "video_editing"))
 
 import content_analysis as ca   # noqa: E402
 import plan_compiler           # noqa: E402
-import plan_tools              # noqa: E402
+import plan_tools_v10 as plan_tools   # noqa: E402  V12 冻结版
 
 
 def _shot(s, e, scene="草地", quality="good"):

@@ -606,3 +606,29 @@ def submit() -> str:
 PLAN_TOOLS = [set_project, clip_diff, effect_diff, overlay_diff,
               timeline_diff, audio_diff, set_narration, set_captions,
               load_plan, get_plan, validate_plan, submit]
+
+# 修订轮 brief 用的词汇表（模型侧唯一的 op 语法说明；与各 diff 工具 docstring 同语义）
+ACTIONS_DOC = """修订工具与 op 语法（draft 已载入上一版计划，直接改，不要 set_project 重建）：
+五个 diff 工具，每个接受一组 op（数组、批内原子——一条错整批拒）：
+
+clip_diff(ops)   片段增删改
+- {"op":"insert","reader":{"type":"FFmpegReader","path":"INPUT/a.mp4"},"shot":3,"after":"c2"}
+  新增（after 省略=追加到末尾；shot 编号引用 list_shots 的镜头，或写 start/end 自定义裁剪，二选一）
+- {"op":"update","id":"c2","end":9.0}      只改传入字段；"start":null 表示清除该字段
+- {"op":"delete","id":"c3"}                删除（连它挂载的文字/画中画一起清）
+  片段可选字段：speed(0.25~4)/volume((0,1])/audio:{"mute":true}/cut_silence
+effect_diff(ops) 效果（Brightness/Saturation/hflip/vflip/transpose/delogo/face_mosaic）
+- {"op":"insert","clip":"c2","type":"Brightness","brightness":0.15}
+- {"op":"update","id":"e1","brightness":0.25}   / {"op":"delete","id":"e1"}
+overlay_diff(ops) 文字/画中画（按 id 寻址）
+- {"op":"insert","type":"text","at_clip":"c1","text":"标题","duration":2,"gravity":"top"}
+- {"op":"update","id":"o1","text":"新文案","duration":3}   / {"op":"delete","id":"o1"}
+timeline_diff(ops) 顺序与转场
+- {"op":"move","clip":"c3","after":"c1"}   （after 省略=移到最前）
+- {"op":"transition","clip":"c2","type":"fade","duration":0.5}   （type:"none"=硬切）
+audio_diff(ops) 全局 BGM
+- {"op":"set","source":"MUSIC/x.mp3","volume":1.0,"loop":true}   / {"op":"clear"}
+set_narration(groups, title) / set_captions(lines, style)   文案（互斥）
+
+改完 validate_plan() 试算 → submit() 提交。规则：只对用户要求的部分下 op；
+clip id / overlay id / 效果 id 一律从片段表或 get_plan() 里逐字引用。"""

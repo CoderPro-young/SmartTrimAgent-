@@ -120,9 +120,11 @@ def is_confirm(msg: str) -> bool:
 
 def build_status_answer(session: dict) -> str:
     """从会话状态生成事实汇报（status_question 车道的直答文本）。"""
+    import plan_dialect
     turn = session.get("turn") or 0
     out = session.get("last_output")
-    plan = session.get("last_plan") or {}
+    # 降到内部形态消费（v3/v2 都认）：clip_duration 等读取的是 v2 字段
+    plan = plan_dialect.to_internal(session.get("last_plan") or {})
     clips = plan.get("clips") or []
     lines: list[str] = []
     if not clips:

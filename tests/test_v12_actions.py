@@ -469,6 +469,42 @@ def _(tmp):
     assert res2.raw_plan["schema_version"] == "2.0"
 
 
+@test("R11 场景 v3 版: 旧会话升级→换 BGM→重编译，旁白字幕不受影响")
+def _(tmp):
+    import plan_compiler as pc
+    t = _Env(tmp)
+    # 旧 v2 会话（R11 形态：带 _narration，首句跨片）
+    v2 = {"schema_version": "2.0",
+          "output": {"filename": "OUTPUT/x.mp4",
+                     "resolution": {"width": 640, "height": 360}},
+          "clips": [{"id": "c1", "source": "INPUT/a.mp4", "kind": "video",
+                     "trim_start": 0, "trim_end": 2},
+                    {"id": "c2", "source": "INPUT/b.mp4", "kind": "video",
+                     "trim_start": 0, "trim_end": 8}],
+          "timeline": [{"clip": "c1"}, {"clip": "c2"}],
+          "audio": {"source": "MUSIC/m.mp3", "volume": 0.3, "original": "mute"},
+          "_narration": [{"clip_ids": ["c1", "c2"],
+                          "text": "这一句旁白很长，铺轴时必然跨越第一个剪辑点。"}]}
+    pt.reset_draft(v2)                      # 会话载入即升级（reset_draft 归一）
+    assert pt._draft()["schema_version"] == "3.0"
+    # 修订：只换 BGM（audio_diff）
+    r = pt.audio_diff.invoke({"ops": [{"op": "set", "source": "MUSIC/m.mp3",
+                                       "volume": 0.8}]})
+    assert r.startswith("✓"), r
+    r = pt.submit.invoke({})
+    assert r.startswith("✓ 已提交"), r
+    res = pc.compile_plan(pt.take_submitted(), tmp)
+    caps = [o for o in res.plan.get("overlays") or [] if o.get("_src") == "narration"]
+    assert caps and caps[0]["duration"] > 2, caps   # 首句仍合法跨片（轮 2 事故形态）
+    assert res.raw_plan["schema_version"] == "3.0"
+    # plan_diff 同空间比较：v3 raw vs v3 base 无假 diff
+    import plan_diff
+    d = plan_diff.plan_diff(v2, res.raw_plan)
+    assert any(c["kind"] == "audio_block" for c in d["changes"]), d
+    assert not any(c["kind"] == "top_level" and "_narration" in c["detail"]
+                   for c in d["changes"]), d
+
+
 @test("引擎→方言闭环: 引擎产物过 validate_any（round-trip 后仍合法）")
 def _(tmp):
     plan, _, errs = pa.apply_actions(_draft(), [

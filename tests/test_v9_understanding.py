@@ -258,38 +258,36 @@ def t11_session_persistence():
 
 # ------------------------------------------------------ 修订 brief ------- #
 @t
-def t12_revision_brief_ops_mode():
+def t12_revision_brief_diff_mode():
+    # V12：修订轮 brief 用 diff 工具词汇表（ACTIONS_DOC），draft 已由宿主
+    # 载入上一版计划——不再有 edit_plan 一次性 ops 通道。
     import video_agent as va
     old = _mk_plan(3)
     msgs = va.build_revision_brief("剪个vlog", old, "OUTPUT/final.mp4",
                                    ["INPUT/concert.mp4"], "删掉C2")
     body = msgs[0]["content"]
-    assert "edit_plan" in body and "remove_clip" in body, body[:200]
+    assert "clip_diff" in body and "validate_plan" in body and "submit()" in body, body[:300]
     assert "C1" in body and "concert.mp4" in body
-    assert "完整的新计划" not in body            # 不再要求重写整份计划
+    assert "完整的新计划" not in body            # 不要求重写整份计划
 
 
 @t
-def t16_retry_feedback_ops_mode_escape():
-    # 2026-10-24 熔断回归：修订轮（ops_mode）校验失败时，回传必须给出
-    # 「ops 覆盖不到的字段允许 submit_plan」的例外出口——否则与修订 brief
-    # 的「只允许 edit_plan」矛盾，模型摆烂耗尽重试。
+def t16_retry_feedback_diff_mode():
+    # V12：校验失败回传面向 diff 工具（update/delete op + submit()），
+    # preamble 保留（修订语义不丢），不再有 ops/submit_plan 双轨岔路。
     import video_agent as va
     plan = _mk_plan(3)
     errs = ["overlays[2] 越界：start_offset(3.9) + duration(1.1) 超出片段 c2 的长度 4.9s。"]
-    pre = [{"role": "user", "content": "修订brief…只允许 edit_plan"}]
-    msgs = va._retry_feedback("任务", plan, errs, preamble=pre, ops_mode=True)
+    pre = [{"role": "user", "content": "修订brief…"}]
+    msgs = va._retry_feedback("任务", plan, errs, preamble=pre)
     assert msgs[0] is pre[0]                      # preamble 保留（修订语义不丢）
     tail = msgs[-1]["content"]
-    assert "edit_plan" in tail and "submit_plan" in tail, tail[:200]
-    assert "例外" in tail                         # 明确的岔路指引
-    # 非 ops_mode 路径不受影响：仍是单纯的 submit_plan 指导
-    msgs2 = va._retry_feedback("任务", plan, errs)
-    assert "submit_plan" in msgs2[-1]["content"] and "例外" not in msgs2[-1]["content"]
-    # plan is None + ops_mode（agent 没产出任何工具调用）：不炸 + 三出口指引
-    msgs3 = va._retry_feedback("任务", None, ["未能提取计划"], ops_mode=True)
+    assert "diff 工具" in tail and "submit()" in tail, tail[:200]
+    assert "从头重建" in tail                     # 明确禁止重写
+    # plan is None（agent 没产出任何工具调用）：不炸 + 出口指引
+    msgs3 = va._retry_feedback("任务", None, ["未能提取计划"])
     body3 = msgs3[-1]["content"]
-    for kw in ("edit_plan", "submit_plan", "ask_user"):
+    for kw in ("submit()", "submit_plan", "ask_user"):
         assert kw in body3, body3[:200]
 
 
@@ -346,17 +344,12 @@ def t18_answer_brief_anchored():
 
 
 @t
-def t13_extract_ops():
+def t13_edit_plan_retired():
+    # V12：edit_plan 通道退役——工具不再注册、提取函数已删除；
+    # 修订语义由 reset_draft(base_plan) + diff 工具承接（见 t12/t16）。
     import video_agent as va
-
-    class FakeMsg:
-        def __init__(self, calls):
-            self.tool_calls = calls
-
-    result = {"messages": [FakeMsg([{"name": "edit_plan",
-                                     "args": {"ops": [{"op": "remove_clip", "clip": "C2"}]}}])]}
-    assert va.extract_ops(result) == [{"op": "remove_clip", "clip": "C2"}]
-    assert va.extract_ops({"messages": [FakeMsg([])]}) is None
+    assert not hasattr(va, "extract_ops")
+    assert not hasattr(va, "edit_plan")
 
 
 @t

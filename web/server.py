@@ -59,10 +59,11 @@ import ffmpeg_exec  # noqa: E402
 import intent as intent_mod  # noqa: E402   V9.0 P3 意图分类车道
 import plan_compiler  # noqa: E402
 import plan_diff  # noqa: E402             V9.0 P1 计划差异 + 作用域闸门
-import plan_ops  # noqa: E402              V9.0 P2 修订即操作
+# plan_ops（V9 修订词表）已在 V12 退役：修订轮走 plan_tools diff 工具
 import plan_schema  # noqa: E402
 import timeline_export  # noqa: E402
 from langchain_core.messages import AIMessage  # noqa: E402
+from model import add_stream_hook  # noqa: E402    L2/L3 流式首 chunk 事件
 from skills import SKILLS  # noqa: E402
 from video_agent import (  # noqa: E402
     build_answer_brief,
@@ -507,6 +508,23 @@ def _stream_agent(agent, messages: list, emit, seen: set | None = None,
 
 # ------------------------------------------------------- 多轮会话 / 闸门 ---- #
 
+def _upgrade_session_plans(session: dict) -> None:
+    """会话载入归一（V12 入口边界）：last_plan / pending_plan 一律升到 v3。
+
+    旧 v2 会话文件不手工迁移——首次载入即升级，下次落盘自然变 v3；
+    内存里的会话（服务运行期写入的）已是 v3，normalize 原样返回副本代价
+    可忽略。升级失败（坏数据）保持原样，交给下游校验报错。
+    """
+    try:
+        import plan_dialect
+        for key in ("last_plan", "pending_plan"):
+            plan = session.get(key)
+            if isinstance(plan, dict) and not plan_dialect.is_v3(plan):
+                session[key] = plan_dialect.upgrade_v2_to_v3(plan)
+    except Exception:  # noqa: BLE001 —— 迁移是尽力而为，不挡会话恢复
+        pass
+
+
 def _get_session(session_id: str | None, task: str) -> tuple[dict, bool]:
     """取会话；不存在则新建。返回 (session, restored)。
 
@@ -532,6 +550,7 @@ def _get_session(session_id: str | None, task: str) -> tuple[dict, bool]:
                            "pending_question": None, "history": [],
                            **{k: v for k, v in data.items()
                               if k in _SESSION_FIELDS}}
+                _upgrade_session_plans(session)
                 session["_from_disk"] = True   # 一次性标记：调用方据此提示「已恢复」
         except (OSError, json.JSONDecodeError):
             session = None
@@ -714,6 +733,12 @@ def _run_pipeline(task: str, emit, session_id: str | None = None,
     content_analysis.set_progress_hook(
         lambda ev: emit({"type": "analysis", **ev}))
 
+    # L2/L3：LLM 请求收到首 chunk → 前端区分「纯挂死」与「生成中」。
+    # 同上，RUN_LOCK 串行保证同一时刻只有一个 pipeline 在跑；plan_with_retry
+    # 返回后注销，素材上传期的后台分析不会误发事件。
+    unhook_first_token = add_stream_hook(
+        lambda: emit({"type": "llm_first_token"}))
+
     def on_llm(text: str, tool_calls: list) -> None:
         for sig in _l1_scan(text, tool_calls, existing):
             emit({"type": "hallucination", "level": "warn", **sig})
@@ -731,22 +756,24 @@ def _run_pipeline(task: str, emit, session_id: str | None = None,
 
     # 重试闭环（含 Preflight 三分流）已下沉到 video_agent.plan_with_retry，
     # CLI 与 Web 共用同一套语义；这里只负责把事件转成 NDJSON。
-    # V9.0 P2：修订轮传 base_plan + apply_ops_fn，agent 走 edit_plan(ops)。
-    compiled, _result = plan_with_retry(
-        task,
-        PROJECT_ROOT,
-        invoke=lambda m: _stream_agent(agent, m, tracking_emit, seen, on_llm=on_llm),
-        emit=tracking_emit,
-        max_retries=MAX_RETRIES,
-        messages=messages,
-        base_output=base_output,
-        output_suffix=suffix if base_output else None,
-        probe_fn=probe_fn,
-        quality="preview" if session.get("preview") else "final",
-        base_plan=base_plan,
-        apply_ops_fn=plan_ops.apply_ops if base_plan is not None else None,
-        history_outputs=[h.get("output") for h in session.get("history") or []],
-    )
+    try:
+        compiled, _result = plan_with_retry(
+            task,
+            PROJECT_ROOT,
+            invoke=lambda m: _stream_agent(agent, m, tracking_emit, seen,
+                                           on_llm=on_llm),
+            emit=tracking_emit,
+            max_retries=MAX_RETRIES,
+            messages=messages,
+            base_output=base_output,
+            output_suffix=suffix if base_output else None,
+            probe_fn=probe_fn,
+            quality="preview" if session.get("preview") else "final",
+            base_plan=base_plan,
+            history_outputs=[h.get("output") for h in session.get("history") or []],
+        )
+    finally:
+        unhook_first_token()
     if compiled is None:
         # question / 放弃类返回：事件已 emit，last_plan 不动；
         # 若本轮产生过 question，记为待答，等用户下一条消息接续
