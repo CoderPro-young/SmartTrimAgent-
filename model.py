@@ -28,6 +28,14 @@ load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 MODEL_TIMEOUT = float(os.environ.get("MODEL_TIMEOUT", "180"))
 MODEL_RETRIES = int(os.environ.get("MODEL_RETRIES", "2"))
 
+# 显式输出预算（max_tokens）。2026-10-26 事故：不设时 SiliconFlow 默认按模型
+# 上限（GLM-4.5V 为 65536）填充，而校验要求 prompt+max_tokens ≤ max_seq_len，
+# 输出预算占满整个窗口 → 打标请求 100% 被 400 拒绝。显式设小后 prompt 才有
+# 可用空间。打标输出只是几百 token 的 JSON，8192 富余；主模型留更大余量给
+# 长计划 + 推理。注意在 load_dotenv 之后取值。
+MODEL_MAX_TOKENS = int(os.environ.get("MODEL_MAX_TOKENS", "16384"))
+VLM_MAX_TOKENS = int(os.environ.get("VLM_MAX_TOKENS", "8192"))
+
 
 def get_model() -> BaseChatModel:
     """按优先级解析模型配置，返回可直接传给 create_deep_agent 的模型实例。"""
@@ -53,6 +61,12 @@ def get_model() -> BaseChatModel:
             temperature=0,
             timeout=MODEL_TIMEOUT,
             max_retries=MODEL_RETRIES,
+            # 注意：ChatOpenAI 的 max_tokens 参数（含 model_kwargs 里的同名键）
+            # 都会被 langchain-openai 改写成 max_completion_tokens 发出，而
+            # SiliconFlow 不认后者（静默忽略、仍按模型上限填 max_tokens → 400）。
+            # extra_body 走 openai SDK 层直接合并进请求体，绕过参数改写
+            # （2026-10-26 事故，真机验证）。
+            extra_body={"max_tokens": MODEL_MAX_TOKENS},
         )
 
     # 3) 任意 OpenAI 兼容端点（OpenAI / DeepSeek / 本地 vLLM 等）
@@ -126,6 +140,9 @@ def get_vlm_model():
         temperature=0,
         max_retries=2,
         timeout=120,
+        # 同 get_model：max_tokens 参数/model_kwargs 都会被改写成
+        # max_completion_tokens，SiliconFlow 不认；extra_body 直接进请求体。
+        extra_body={"max_tokens": VLM_MAX_TOKENS},
     )
     if base:
         kwargs["base_url"] = base

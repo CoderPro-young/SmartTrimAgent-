@@ -11,7 +11,11 @@ from __future__ import annotations
 import json
 import os
 
-from deepagents import create_deep_agent
+from deepagents import (
+    HarnessProfile,
+    create_deep_agent,
+    register_harness_profile,
+)
 from deepagents.backends.local_shell import LocalShellBackend
 from langchain_core.messages import AIMessage
 from langchain_core.tools import tool
@@ -21,6 +25,7 @@ import content_analysis
 import ffmpeg_exec
 import plan_compiler
 import plan_schema
+import plan_tools
 from model import get_model
 from skills import AUDIO_PROMPT_DOC, render_prompt_doc
 from creative_skills import render_creative_doc
@@ -168,8 +173,12 @@ def run_video_task(task: str) -> dict:
 # ---------------------------------------------------------------- V2 ------- #
 
 V2_SYSTEM_PROMPT_TEMPLATE = """You are a video editing planner (V2). You do NOT write
-ffmpeg commands. Your job is to produce an editing plan in JSON and submit it
-with the `submit_plan` tool.
+ffmpeg commands. Your job is to build an editing plan with the PLAN TOOLS —
+`new_plan` → `add_clips` (shot references) → `set_transition` / `set_audio` /
+`set_narration` … → `validate_plan` → `submit()` — every tool call is checked
+immediately and answers with the current draft state. Hand-writing the whole
+plan JSON via `submit_plan` is a LEGACY path kept only for the `select` /
+`workflow` macros (bulk tasks).
 
 ## Workflow
 
@@ -212,11 +221,28 @@ with the `submit_plan` tool.
    facts (duration range / audio track / resolution / how many files exist).
    If every part of the request can be satisfied by the real materials,
    continue to step 6; otherwise go to step 7.
-6. Call `submit_plan` with a valid plan object.
+6. Build the plan with the plan tools and submit: `new_plan` → `add_clips`
+   (ONE call for the whole sequence, shot references preferred) →
+   `set_transition` / `set_audio` / `set_narration` / `add_text` →
+   `validate_plan` → `submit`. Call `get_plan()` any time to see the current
+   draft. For the `select` / `workflow` macros (bulk/parameter-only tasks),
+   use the legacy `submit_plan` tool instead.
 7. Only when the self-check fails — or the request is ambiguous / has no
    actionable operation / asks for a capability you don't have — call
    `ask_user` instead: state the real facts you probed and offer concrete
    options the user can pick from.
+
+## Material content rule (hard)
+
+ALL knowledge about what media files contain MUST come from `probe_media`,
+`analyze_media`, `list_shots` and `list_music`. NEVER call `read_file` (or
+any other filesystem tool) on files under INPUT/ or MUSIC/ — your planner
+model is text-only, so image/video/audio bytes in a tool result are rejected
+by the API with a hard 400 and the whole turn is lost. `ls` on directories
+is fine (file names only). If an analyze_media card shows `tag_partial`,
+`degradations` or missing labels, plan with the time boundaries, signals and
+whatever labels exist — or call `ask_user` and say which source lacks
+semantic labels. Do NOT try to look at the media yourself.
 
 {CREATIVE_DOC}
 
@@ -228,7 +254,7 @@ Call `ask_user` INSTEAD of `submit_plan` when ANY of these holds:
   a few different styles to choose from", "don't cut yet — show me what you
   would do"). Present 2-4 concrete alternatives (structure, pacing, BGM
   direction, what differs from the previous version) via `ask_user` and wait.
-  Do NOT submit_plan in the same turn: the user's pick in the NEXT message
+  Do NOT submit() in the same turn: the user's pick in the NEXT message
   is what authorizes execution.
 - The message asks ABOUT previous work or the conversation itself rather than
   requesting a NEW edit (e.g. "did you re-edit it?", "why did you keep that
@@ -248,15 +274,22 @@ Call `ask_user` INSTEAD of `submit_plan` when ANY of these holds:
   real duration and offer options (use everything / switch material / pick
   a shorter range).
 
-`ask_user` and `submit_plan` are mutually exclusive — pick exactly one per turn.
+`ask_user` and `submit()` are mutually exclusive — pick exactly one per turn.
 
-## Probe truthfulness
+## Probe field
 
-The `probe` field you write into each clip must match what `probe_media`
-actually returned for that file. The host cross-checks it against its own
-re-probe of the material: fabricated probe data is rejected and sent back.
+Do NOT write the `probe` field into clips — the host re-probes every source
+itself and fills `probe` in after you submit (hand-written values are simply
+overwritten). Call `probe_media` to LEARN the facts (duration, resolution,
+audio) for your own decisions. `trim_end` may be omitted when you want to
+use the whole clip.
 
-## Plan schema (submit exactly this shape)
+## Plan shape (reference — build it with the plan tools)
+
+You normally do NOT hand-write this JSON: the plan tools build it for you
+(`new_plan`/`add_clips`/… create exactly this shape). It is documented here
+so you know what the draft looks like; the `select`/`workflow` macros and
+the legacy `submit_plan` path still submit it directly.
 
 {
   "schema_version": "2.0",
@@ -270,15 +303,19 @@ re-probe of the material: fabricated probe data is rejected and sent back.
       "id": "c1",
       "source": "INPUT/a.mp4",
       "kind": "video",
-      "trim_start": 0,
-      "trim_end": 8,
-      "probe": {"duration": 10.0, "width": 1920, "height": 1080,
-                "fps": 30, "has_audio": true, "has_video": true},
+      "shot": 3,
       "cut_silence": {"noise_db": -35, "min_silence": 0.4,
                       "keep_padding": 0.15, "min_keep": 0.3}
     },
     {
       "id": "c2",
+      "source": "INPUT/b.mp4",
+      "kind": "video",
+      "trim_start": 12,
+      "trim_end": 18.5
+    },
+    {
+      "id": "c3",
       "source": "INPUT/img.png",
       "kind": "image",
       "duration": 3
@@ -297,6 +334,13 @@ re-probe of the material: fabricated probe data is rejected and sent back.
      "font_size": 48, "color": "#FFFFFF", "position": "center"}
   ]
 }
+
+- `"shot": N` = the N-th shot of that source as shown by `list_shots`
+  (`INPUT/a.mp4#03`); the compiler copies the exact card shot boundaries into
+  trim_start/trim_end. PREFER shot references over hand-copied timestamps —
+  transcription errors are the #1 failure. Write explicit `trim_start` /
+  `trim_end` only when splitting or merging shots. Never write `probe` (the
+  host fills it); omit `trim_end` to use the whole clip.
 
 ## select macro (V5 bulk selection — replaces clips/timeline/overlays)
 
@@ -563,20 +607,74 @@ def list_music() -> str:
     return "\n".join(lines) or "没有可用配乐候选（MUSIC/ 与 INPUT/ 均无音频）。"
 
 
+# 宿主强制：媒体字节永不进 agent 消息流（v3.1 D1 铁律的兜底，不靠模型自觉）。
+# 2026-10-26 事故：VLM 打标部分失败后，agent 用内置 read_file 直接读 INPUT 下的
+# jpg，整图 base64 进入 ToolMessage，下一轮被纯文本主模型 400 拒绝、整轮作废。
+# 领域信息一律走 probe/analyze/list_shots/list_music，文件系统工具（read/write/
+# edit/glob/grep/execute）对本 agent 无正当用途，全部排除；`ls` 保留（提示词
+# 工作流第 1 步在用，只返回文件名）。注册是合并语义（excluded_tools 取并集），
+# 不覆盖框架默认；即便模型幻觉出被排除工具的调用，也会在执行边界被中间件以
+# 文本拒绝，不会再把二进制塞进下一轮请求。
+register_harness_profile(
+    "openai",
+    HarnessProfile(excluded_tools=frozenset({
+        "read_file", "write_file", "edit_file", "glob", "grep", "execute",
+    })),
+)
+
+
 def build_video_agent_v2() -> CompiledStateGraph:
-    """V2+V4+V8 agent：probe/analyze/list_shots/list_music + submit_plan + ask_user。"""
+    """V2+V4+V8+V10 agent：感知/曲库工具 + 计划构建工具集 + ask_user。
+
+    V10 起首轮计划通过 plan_tools 的组合操作构建（new_plan → add_clips →
+    … → submit），submit_plan 保留为兼容路径（宏/旧提示词）。
+    """
     os.makedirs(INPUT_DIR, exist_ok=True)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     model = get_model()
     backend = LocalShellBackend(root_dir=PROJECT_ROOT)
+    plan_tools.PROJECT_ROOT = PROJECT_ROOT
     return create_deep_agent(
         model=model,
         system_prompt=V2_SYSTEM_PROMPT,
         tools=[probe_media, analyze_media, list_shots, list_music,
-               submit_plan, ask_user, edit_plan],
+               submit_plan, ask_user, edit_plan, *plan_tools.PLAN_TOOLS],
         backend=backend,
         name="video-editing-planner-v2",
     )
+
+
+def _autofill_probe(plan: dict, project_root: str, probe_fn=None) -> int:
+    """宿主用真实探针回填 clips[].probe（「引用代替誊抄」2026-10-28）。
+
+    对应 OpenAI function-calling 指南「不要让模型填你已知的参数」：素材事实
+    宿主本来就会 probe（服务端缓存/现场 ffprobe），模型手抄 probe 再靠
+    probe_mismatch 交叉核验属于双重浪费，抄错/编造的空间也在这里。回填一律
+    覆盖模型写的值——誊抄错误从结构上消失，probe 字段对模型变为可不写。
+    只回填 video 片段（图片走 kind+duration，probe 对它无意义且本机 ffmpeg
+    会把静图探成 0.04s 的怪值）。回填失败（素材缺失等）保持原样，交给
+    下游「素材不存在」校验给出自救信息。返回回填个数。
+    """
+    filled = 0
+    import plan_schema
+    fn = probe_fn or plan_schema._default_probe_fn(project_root)
+    for c in plan.get("clips") or []:
+        if c.get("kind") != "video":
+            continue
+        src = c.get("source")
+        if not isinstance(src, str):
+            continue
+        try:
+            info = fn(src) or {}
+        except Exception:                      # noqa: BLE001 —— 探测失败交给下游校验
+            continue
+        if not (isinstance(info, dict) and info.get("ok") and info.get("duration")):
+            continue
+        c["probe"] = {k: info[k] for k in
+                      ("duration", "width", "height", "fps", "has_audio", "has_video")
+                      if info.get(k) is not None}
+        filled += 1
+    return filled
 
 
 def extract_plan(result: dict) -> dict | None:
@@ -639,7 +737,8 @@ MAX_PLAN_RETRIES = 2
 
 def _retry_feedback(task: str, plan: dict | None, errors: list[str],
                     preamble: list | None = None, ops_mode: bool = False,
-                    base_plan: dict | None = None) -> list:
+                    base_plan: dict | None = None,
+                    tool_mode: bool = False) -> list:
     """构造「回传重出」的消息列表。
 
     刻意**不重放原始消息历史**，用纯文本重建「原任务 + 上次计划 + 错误 + 要求」。
@@ -697,6 +796,21 @@ def _retry_feedback(task: str, plan: dict | None, errors: list[str],
             "文字层、效果参数），本轮改用 submit_plan 提交修正后的完整"
             "计划——这是修订轮唯一允许 submit_plan 的例外。"
         )
+    if tool_mode and not ops_mode:
+        # V10 工具化构建：反馈面向计划工具而非 submit_plan
+        if plan is not None:
+            instruction = (
+                "要求：用对应的计划工具只修正上述问题（set_clip / "
+                "set_transition / set_audio / set_narration / add_text …，"
+                "get_plan() 可查看当前 draft），其余内容保持不变，修正后"
+                "重新调用 submit()。不要 new_plan 从头重建。"
+            )
+        else:
+            instruction = (
+                "要求：用计划工具构建计划（new_plan → add_clips(shot 引用) → "
+                "set_transition / set_audio / set_narration → validate_plan → "
+                "submit），不要用 submit_plan 手写整份 JSON。"
+            )
     if ops_mode and base_plan is not None:
         # 例外出口的底稿：修订 brief 只给片段表（压缩上下文），但 submit_plan
         # 需要完整计划——没有底稿模型不敢凭空重写（2026-10-24 实测：两轮
@@ -710,16 +824,8 @@ def _retry_feedback(task: str, plan: dict | None, errors: list[str],
 
 # ---------------------------------------------------- 会话上下文（纯文本） ---- #
 
-def build_revision_brief(task: str, base_plan: dict, base_output: str,
-                         materials: list[str], new_task: str) -> list:
-    """修订轮上下文（V9 ops 模式）：片段表 + ops 词汇表 + 本次要求。
-
-    修订轮不再让模型重写整份计划 JSON——只允许 edit_plan(ops)。
-    片段表给到 id/素材/裁剪/转场/效果，足够下 ops；完整 JSON 不再
-    重放（压缩上下文，也杜绝「顺手改了没让改的字段」）。
-    """
-    import plan_ops
-    listing = "、".join(materials) if materials else "（INPUT/ 为空）"
+def _plan_table_rows(base_plan: dict) -> list[str]:
+    """计划的紧凑片段表（修订 brief / 问答接续 brief 共用的锚定渲染）。"""
     trans = {t.get("clip"): t.get("transition")
              for t in base_plan.get("timeline") or []}
     rows = []
@@ -734,6 +840,20 @@ def build_revision_brief(task: str, base_plan: dict, base_output: str,
         mute = " [已静音]" if (c.get("audio") or {}).get("mute") else ""
         rows.append(f"  {c.get('id')}  {str(c.get('source')).rsplit('/', 1)[-1]}"
                     f"  {ts:g}-{te_s}s  转场:{tr_s}  效果:{eff}{mute}")
+    return rows
+
+
+def build_revision_brief(task: str, base_plan: dict, base_output: str,
+                         materials: list[str], new_task: str) -> list:
+    """修订轮上下文（V9 ops 模式）：片段表 + ops 词汇表 + 本次要求。
+
+    修订轮不再让模型重写整份计划 JSON——只允许 edit_plan(ops)。
+    片段表给到 id/素材/裁剪/转场/效果，足够下 ops；完整 JSON 不再
+    重放（压缩上下文，也杜绝「顺手改了没让改的字段」）。
+    """
+    import plan_ops
+    listing = "、".join(materials) if materials else "（INPUT/ 为空）"
+    rows = _plan_table_rows(base_plan)
     audio = base_plan.get("audio")
     audio_s = json.dumps(audio, ensure_ascii=False) if audio else "（无全局 BGM，原声直通）"
     body = (
@@ -756,17 +876,47 @@ def build_revision_brief(task: str, base_plan: dict, base_output: str,
     return [{"role": "user", "content": body}]
 
 
-def build_answer_brief(pending: dict, answer: str) -> list:
-    """问答接续上下文：把「你问过什么 + 用户怎么答」交给模型。"""
+def build_answer_brief(pending: dict, answer: str,
+                       base_plan: dict | None = None,
+                       base_output: str | None = None,
+                       materials: list[str] | None = None,
+                       session_task: str | None = None) -> list:
+    """问答接续上下文：「你问过什么 + 用户怎么答」+ 会话基线锚定。
+
+    2026-10-28 实测（simtest10 重启后接续）：brief 只有问题+回答时，用户
+    答「重写计划补字幕」会让模型无锚可依——创作流把整个素材池当新任务，
+    换素材重建 9 片段。修复：有 last_plan 时附片段表与硬约束（只做用户
+    要求的改动、素材不得更换），「重写」以它为底稿而非从零创作。
+    """
     body = (
         "你刚才向用户提出了一个问题：\n"
         f"{pending.get('question') or ''}\n"
         f"用户的回答是：{answer}\n\n"
-        "请据此继续：如果这是素材不匹配的确认（用户从选项里选了处理方式），"
-        "按用户的选择修正计划并重新调用 submit_plan；"
+    )
+    if base_plan is not None:
+        rows = _plan_table_rows(base_plan)
+        audio = base_plan.get("audio")
+        audio_s = json.dumps(audio, ensure_ascii=False) if audio \
+            else "（无全局 BGM，原声直通）"
+        listing = "、".join(materials) if materials else "（未知）"
+        body += (
+            "当前会话基线——用户的「修正/重写」一律以此为底稿，"
+            "只做用户要求的那几处改动：\n"
+            f"最初的需求：{session_task or '（未知）'}\n"
+            f"当前版成片：{base_output or '（未知）'}\n"
+            "当前计划的片段表：\n" + "\n".join(rows) + "\n"
+            f"全局 BGM：{audio_s}\n"
+            f"可用素材：{listing}\n\n"
+            "硬约束：不得更换素材集（除非用户明确要求换素材）；"
+            "不得重建整个作品；修不了的点如实说明。\n\n"
+        )
+    body += (
+        "请据此继续：能用 edit_plan ops 表达就用 ops 修正后重新调用"
+        " edit_plan；ops 表达不了（文字标题/overlay/效果参数）时，以上面的"
+        "片段表为底稿重写完整计划并调用 submit_plan；"
         "如果用户的回答与问题无关，先判断它是新的剪辑要求还是仅仅在询问情况——"
-        "是要求就按修订处理并重新调用 submit_plan；只是询问（如「剪好了吗」）"
-        "就调用 ask_user 如实汇报，不要提交新计划；"
+        "是要求就按修订处理；只是询问（如「剪好了吗」）就调用 ask_user 如实"
+        "汇报，不要提交新计划；"
         "如果用户是要你先说明做法或替代方案而不是马上执行"
         "（如「说说你的方案」「给我一个替代方案」「先别动手」），"
         "必须调用 ask_user 把方案、改动范围和副作用讲清楚，等用户确认后再提交——"
@@ -795,23 +945,33 @@ def _mismatch_options(mtype: str) -> list[str]:
 
 
 def _guard_overwrite(plan: dict, base_output: str | None,
-                     output_suffix: str | None, quality: str, emit) -> None:
-    """D4：修订轮不覆盖上一版产物（后端强制，不靠模型自觉）。
+                     output_suffix: str | None, quality: str, emit,
+                     history_outputs: list[str] | None = None) -> None:
+    """D4：修订/重建轮不覆盖本会话任何已产出成片（后端强制，不靠模型自觉）。
 
     口径归一（2026-10-24）：base_output 是上一版**实际产物名**（preview 档
-    带 _preview 后缀），而计划里写的是原名——按本档实际产物名比较，否则
-    preview 会话的修订轮同名覆盖检测永远不命中。
+    带 _preview 后缀），而计划里写的是原名——按本档实际产物名比较。
+    历史盲区（2026-10-28 simtest9 实测）：只比「上一版」时，模型把输出名
+    改回更早的产物名（如初版名）会静默覆盖旧成片——比对范围扩到会话
+    history 里的全部产物名。
     """
     if not (base_output and output_suffix):
         return
+    taken = {base_output}
+    for h in history_outputs or []:
+        if isinstance(h, str):
+            taken.add(h)
+            stem, ext = os.path.splitext(h)
+            if ext:
+                taken.add(f"{stem}_preview{ext}")   # 档位口径归一
     fn = (plan.get("output") or {}).get("filename")
     fn_real = plan_compiler.output_filename(
         plan, {"preview": quality == "preview"})
-    if fn == base_output or fn_real == base_output:
+    if fn in taken or fn_real in taken:
         stem, ext = os.path.splitext(fn)
         plan["output"]["filename"] = f"{stem}{output_suffix}{ext}"
         emit({"type": "status",
-              "text": f"为避免覆盖上一版成片，输出已自动改名为 "
+              "text": f"为避免覆盖本会话已有成片，输出已自动改名为 "
                       f"{plan['output']['filename']}"})
 
 
@@ -823,7 +983,8 @@ def plan_with_retry(task: str, project_root: str, invoke, emit,
                     probe_fn=None,
                     quality: str = "final",
                     base_plan: dict | None = None,
-                    apply_ops_fn=None):
+                    apply_ops_fn=None,
+                    history_outputs: list[str] | None = None):
     """出计划 → Preflight 匹配校验 → 编译；失败按「谁能修」三分流。
 
     invoke(messages) -> result_state   调用方决定「怎么跑 agent」（打印 / 流式上报）
@@ -846,6 +1007,11 @@ def plan_with_retry(task: str, project_root: str, invoke, emit,
     result: dict = {}
     last_errors: list[str] | None = None
     ops_mode = base_plan is not None and apply_ops_fn is not None
+    # V10 首轮工具化构建：新 run 初始化 draft（修订轮 ops 模式不用）；
+    # 重试不重置——模型只需修正出问题的部分再 submit
+    tool_mode = not ops_mode
+    if tool_mode:
+        plan_tools.reset_draft()
 
     for attempt in range(max_retries + 1):
         emit({"type": "attempt", "n": attempt + 1, "max": max_retries + 1})
@@ -867,7 +1033,17 @@ def plan_with_retry(task: str, project_root: str, invoke, emit,
                     summary = "；".join(a["detail"] for a in applied[:8])
                     emit({"type": "status", "text": f"已应用 {len(applied)} 个编辑操作：{summary}"})
             else:
-                plan = extract_plan(result)
+                # V10：draft 工具构建优先（submit() 提交）；模型仍调
+                # submit_plan 时走 legacy 一次性路径（宏/兼容）
+                plan = plan_tools.take_submitted()
+                if plan is None:
+                    plan = extract_plan(result)
+                if plan is not None:
+                    # probe 自动回填（「引用代替誊抄」）：真实探针覆盖模型手抄值
+                    n_probe = _autofill_probe(plan, project_root, probe_fn)
+                    if n_probe:
+                        emit({"type": "status",
+                              "text": f"已用真实探针回填 {n_probe} 个片段的 probe 字段。"})
         except Exception as exc:
             plan = None
             errors = [f"调用模型失败（{type(exc).__name__}）：{str(exc)[:300]}"]
@@ -891,7 +1067,8 @@ def plan_with_retry(task: str, project_root: str, invoke, emit,
                 emit({"type": "error", "message": "未能从 agent 输出中提取 submit_plan 计划。"})
             else:
                 # D4：修订轮不覆盖上一版产物（后端强制，不靠模型自觉）
-                _guard_overwrite(plan, base_output, output_suffix, quality, emit)
+                _guard_overwrite(plan, base_output, output_suffix, quality,
+                                 emit, history_outputs=history_outputs)
                 # Preflight Tier 2：素材现实 × 计划要求
                 mismatches = plan_schema.check_material_fit(plan, project_root,
                                                             probe_fn=probe_fn)
@@ -945,7 +1122,8 @@ def plan_with_retry(task: str, project_root: str, invoke, emit,
             "text": f"把 {len(errors)} 条错误回传给模型重出计划（第 {attempt + 2} 次）…",
         })
         messages = _retry_feedback(task, plan, errors, preamble=first_messages,
-                                   ops_mode=ops_mode, base_plan=base_plan)
+                                   ops_mode=ops_mode, base_plan=base_plan,
+                                   tool_mode=tool_mode)
 
     return None, result
 

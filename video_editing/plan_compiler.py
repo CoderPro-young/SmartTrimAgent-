@@ -12,6 +12,7 @@ LLM 只产出意图（计划 JSON），本模块把意图变成确定性的命�
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
@@ -67,6 +68,10 @@ class CompileResult:
     prechecks: list[dict] = field(default_factory=list)      # dry-run 预检结果（T5）
     executes: list[dict] = field(default_factory=list)       # 执行结果
     verify: dict | None = None
+    # R11：校验通过、展开之前的计划快照（模型提交语义）。存档/修订底稿/
+    # plan_diff 基线一律用它——展开版里的旁白字幕是「合法跨片」的，回灌
+    # 校验会撞自己（2026-10-28 sim-1028-v10a 轮 2 换 BGM 熔断实测）。
+    raw_plan: dict | None = None
 
     def render_summary(self) -> str:
         """把命令序列渲染成可读文本（demo 展示用）。"""
@@ -1148,9 +1153,37 @@ def _expand_workflow(plan: dict, project_root: str) -> tuple[dict, dict]:
     return new_plan, {"name": name, **report}
 
 
+def _resolve_shot_refs(plan: dict, project_root: str) -> tuple[dict, int]:
+    """shot 引用（#N）→ 内容卡镜头边界（「引用代替誊抄」）。
+
+    validate_plan 已保证卡存在且编号在范围内（防御分支：不合法时保持原样，
+    后续 derive 会给出「无法确定时长」的显式错误）。必须在 _expand_cuts 之前
+    跑——剪静音/黑场要作用于已解析出的真实 trim。
+    """
+    import content_analysis
+    n = 0
+    for c in plan.get("clips") or []:
+        shot = c.get("shot")
+        if shot is None:
+            continue
+        c.pop("shot", None)
+        card = content_analysis.load_cached_card(project_root, c.get("source") or "")
+        shots = (card or {}).get("shots") or []
+        if not (isinstance(shot, int) and 1 <= shot <= len(shots)):
+            continue
+        sh = shots[shot - 1]
+        c["trim_start"] = round(float(sh.get("start") or 0.0), 3)
+        c["trim_end"] = round(float(sh.get("end") or 0.0), 3)
+        n += 1
+    return plan, n
+
+
 def _expand_plan(plan: dict, project_root: str, run_fn=None) -> tuple[dict, dict]:
     """V5/V7/V8 计划展开总入口：workflow 宏 → select 宏；cut 参数 → 保留子段。"""
     expansions: dict = {}
+    plan, n_shots = _resolve_shot_refs(plan, project_root)
+    if n_shots:
+        expansions["shots"] = {"resolved": n_shots}
     has_workflow = bool(plan.get("workflow"))
     if has_workflow:
         plan, report = _expand_workflow(plan, project_root)
@@ -1354,6 +1387,7 @@ def _apply_narration(plan: dict, math: dict, style: dict) -> None:
                 "font_size": fs,
                 "color": "#FFFFFF",
                 "y_margin": y_margin,
+                "_src": "narration",     # 编译器自产跨片字幕：校验豁免片段内语义
             })
 
 
@@ -1395,6 +1429,7 @@ def _apply_captions(plan: dict, math: dict) -> None:
             "scroll": "up",
             "line_spacing": style.get("line_spacing", 0),
             "stroke": style.get("stroke", 0),
+            "_src": "captions",      # 全片滚动字幕：天然超出 host 片段，校验豁免
         })
         return
     if len(captions) == len(order):
@@ -1415,6 +1450,7 @@ def _apply_captions(plan: dict, math: dict) -> None:
                 "font_size": style.get("font_size", 44),
                 "color": "#FFFFFF",
                 "y_margin": y_margin,
+                "_src": "captions",
             })
         return
     D = math["D"] or 1.0
@@ -1442,6 +1478,7 @@ def _apply_captions(plan: dict, math: dict) -> None:
             "font_size": style.get("font_size", 44),
             "color": "#FFFFFF",
             "y_margin": _round2(int(math["height"]) * (style.get("bottom_margin_ratio") or 0)),
+            "_src": "captions",
         })
 
 
@@ -1455,6 +1492,7 @@ def compile_plan(plan: dict, project_root: str, quality: str = "final") -> Compi
     if errors:
         raise CompileError(errors)
 
+    raw_plan = copy.deepcopy(plan)       # R11：展开前的可校验快照（存档/修订底稿）
     plan, expansions = _expand_plan(plan, project_root)
     math = _derive(plan)
     _apply_quality(math, quality)
@@ -1470,6 +1508,7 @@ def compile_plan(plan: dict, project_root: str, quality: str = "final") -> Compi
     sidecars = {**norm_sidecars, **render_sidecars}
     return CompileResult(
         plan=plan,
+        raw_plan=raw_plan,
         commands=norm_cmds + render_cmds,
         sidecars=sidecars,
         math=math,

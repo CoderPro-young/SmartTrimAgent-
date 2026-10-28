@@ -14,6 +14,8 @@ from __future__ import annotations
 import os
 import re
 
+from plan_schema import clip_duration
+
 _Q_END = ("？", "?", "吗", "嘛", "呢")
 _Q_WORDS = ("做了吗", "做了没", "有没有", "是不是", "为什么", "怎么样", "怎样",
             "啥情况", "完成没", "好了没", "剪好", "搞定了", "多久", "多少",
@@ -126,14 +128,9 @@ def build_status_answer(session: dict) -> str:
     if not clips:
         return "这个会话里还没有产出过计划。你可以直接把需求发给我。"
     srcs = sorted({str(c.get("source", "")).rsplit("/", 1)[-1] for c in clips})
-    dur = 0.0
-    for c in clips:
-        try:
-            ts = float(c.get("trim_start") or 0)
-            te = float(c.get("trim_end") or 0)
-            dur += (te - ts) if te > ts else 0
-        except (TypeError, ValueError):
-            pass
+    # 时长口径统一走 plan_schema.clip_duration（image=duration / video=trim）：
+    # 手工只累计 trim 会把图片片段算成 0（2026-10-28 实测 71.5s vs 成片 74.95s）
+    dur = sum(d for d in (clip_duration(c) for c in clips) if d)
     lines.append(f"当前会话已进行 {turn} 轮；上一版成片是 {out}，"
                  f"共 {len(clips)} 个片段、约 {round(dur, 1)}s，"
                  f"用了 {len(srcs)} 个素材（{('、'.join(srcs[:3]))}{'…' if len(srcs) > 3 else ''}）。")

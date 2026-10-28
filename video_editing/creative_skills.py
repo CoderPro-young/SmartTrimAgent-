@@ -55,29 +55,29 @@ timeline math and rendering stay with the deterministic compiler:
    no clichés like 治愈/岁月静好/美好时光, no addressing the label words);
    budget 3–5 characters per second of group duration. Also produce a
    short title for the whole piece.
-6. **Pick music (you pick)**: `list_music()` → write the chosen track into
-   the top-level `audio` block ({"source": ..., "volume": 1.0, "loop": true}
-   — original sound is muted by default when BGM is present). No music
-   wanted → omit the `audio` block. Music-driven pacing: add
-   `"snap_beats": true` to the audio block and the compiler will align the
-   cut points to the music's beats (within ±0.35s, durations permitting).
-7. `submit_plan` a HAND-WRITTEN complete plan: `clips` whose trim values are
-   the card shot boundaries (may split/merge shots, mind the durations),
-   `timeline` with fade transitions, plus these agent-only keys:
-   `"_title": "<piece title>"`,
-   `"_narration": [{"group_id": "g1", "clip_ids": ["c1","c2"],
-                     "text": "<the whole narration paragraph for this group>",
-                     "units": ["句一。", "句二。"]}, ...]`
-   (`text` = the group's raw narration paragraph; `units` = the same text
-   split into subtitle sentences — you may omit `units` and the compiler
-   will split `text` deterministically by punctuation). The compiler lays
-   the units onto each group's time window proportionally to character
-   count — one shot may carry several sentences, a sentence may cross a
-   cut point.
-   For simple one-line-per-shot captions use `"_captions": [...]` +
-   `"_caption_style"` ("bottom" | "credits") instead; `_narration` and
-   `_captions` are mutually exclusive. Do NOT write these keys together with
-   a `workflow` block.
+6. **Pick music (you pick)**: `list_music()` → `set_audio(source=...)`
+   (original sound is muted by default when BGM is present; `clear_audio()`
+   removes it). Music-driven pacing: pass `snap_beats=True` and the compiler
+   will align the cut points to the music's beats (within ±0.35s, durations
+   permitting).
+7. Build the plan with the TOOLS, then submit:
+   `new_plan(...)` → `add_clips([{source, "shot": N}, ...])` — ONE call for
+   the whole sequence; `"shot": N` references the N-th shot from
+   `list_shots` and the host copies the exact card boundaries (hand-copied
+   timestamps are the #1 error source; use explicit trims only when
+   splitting/merging shots, mind the durations) → `set_transition` (fade)
+   per cut → `set_audio(...)` → narration via
+   `set_narration(title="...", groups=[{"clip_ids": ["c1","c2"],
+   "text": "<the whole narration paragraph for this group>",
+   "units": ["句一。", "句二。"]}, ...])` — this writes the plan's
+   `_narration` groups (`text` = the group's raw paragraph; `units` = the
+   same text split into subtitle sentences — optional, the compiler splits
+   `text` by punctuation). The compiler lays the units onto each group's
+   time window proportionally to character count — one shot may carry
+   several sentences, a sentence may cross a cut point; you never write
+   subtitle timestamps. For simple one-line-per-shot captions use
+   `set_captions(lines, style)` instead — narration and captions are
+   mutually exclusive. Finish with `validate_plan()` → `submit()`.
 8. Simple batch/parameter-only tasks may still use the `workflow` macros
    (deterministic fallback) — see the workflow doc below."""
 

@@ -281,6 +281,104 @@ def t11_macro_junk_material_now_in_pool():
         assert report["rejected_total"] == 1
 
 
+
+# ------------------------------------------------ shot 引用 + probe 回填 -- #
+# 「引用代替誊抄」2026-10-28：clips[].shot 引用 list_shots 的镜头编号，边界
+# 由编译器从内容卡取；probe 由宿主真实探针回填覆盖（模型可不写）。
+
+def _shot_plan(tmp, **clip_over):
+    return {
+        "schema_version": "2.0",
+        "output": {"filename": "OUTPUT/s.mp4",
+                   "resolution": {"width": 640, "height": 360}},
+        "clips": [
+            {"id": "c1", "source": "INPUT/a.mp4", "kind": "video",
+             "shot": 1, **clip_over},
+            {"id": "c2", "source": "INPUT/b.mp4", "kind": "video",
+             "shot": 1},
+        ],
+        "timeline": [{"clip": "c1"}, {"clip": "c2"}],
+    }
+
+
+def t12_shot_ref_schema():
+    with tempfile.TemporaryDirectory() as tmp:
+        _make_project(tmp)
+        # 合法：a.mp4/b.mp4 均有卡，编号在范围内
+        assert plan_schema.validate_plan(_shot_plan(tmp), tmp) == []
+        # shot 与 trim 互斥
+        errs = plan_schema.validate_plan(
+            _shot_plan(tmp, trim_start=1, trim_end=5), tmp)
+        assert any("互斥" in e for e in errs), errs
+        # 编号超范围（a.mp4 只有 2 个镜头）→ 报实际数量
+        errs = plan_schema.validate_plan(_shot_plan(tmp, shot=3), tmp)
+        assert any("共 2 个镜头" in e for e in errs), errs
+        # 无卡素材（c.mp4）→ 提示先 analyze_media
+        plan = _shot_plan(tmp)
+        plan["clips"][0]["source"] = "INPUT/c.mp4"
+        errs = plan_schema.validate_plan(plan, tmp)
+        assert any("analyze_media" in e for e in errs), errs
+        # 非正整数
+        errs = plan_schema.validate_plan(_shot_plan(tmp, shot=0), tmp)
+        assert any("shot 必须是正整数" in e for e in errs), errs
+
+
+def t13_shot_ref_compile():
+    """shot → 内容卡边界展开：trim 取卡上真实值、shot 键移除、进 expansions。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        _make_project(tmp)
+        result = plan_compiler.compile_plan(_shot_plan(tmp), tmp)
+        c1 = next(c for c in result.plan["clips"] if c["id"] == "c1")
+        # a.mp4 第 1 镜 0-6s；第 2 镜（c1 改 shot=2）应是 6-12s
+        assert (c1["trim_start"], c1["trim_end"]) == (0, 6), c1
+        assert "shot" not in c1
+        c2 = next(c for c in result.plan["clips"] if c["id"] == "c2")
+        assert (c2["trim_start"], c2["trim_end"]) == (0, 10), c2
+        assert result.expansions.get("shots") == {"resolved": 2}
+        # 时间轴数学按展开后的时长推导
+        assert abs(result.math["durations"]["c1"] - 6.0) < 1e-6
+
+        plan2 = _shot_plan(tmp, shot=2)
+        r2 = plan_compiler.compile_plan(plan2, tmp)
+        c1b = next(c for c in r2.plan["clips"] if c["id"] == "c1")
+        assert (c1b["trim_start"], c1b["trim_end"]) == (6, 12), c1b
+
+
+def t14_autofill_probe():
+    """宿主真实探针覆盖模型手抄 probe；图片/坏素材不回填。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        _make_project(tmp)
+
+        def fake_probe(src):
+            if src == "INPUT/a.mp4":
+                return {"ok": True, "duration": 12.5, "width": 960,
+                        "height": 544, "has_audio": True, "has_video": True}
+            return {"ok": False}
+
+        plan = {
+            "clips": [
+                # 模型编造的 probe（duration 999）必须被真实值覆盖
+                {"id": "c1", "source": "INPUT/a.mp4", "kind": "video",
+                 "trim_start": 0, "trim_end": 6,
+                 "probe": {"duration": 999, "width": 1, "height": 1,
+                           "fps": 30, "has_audio": True, "has_video": True}},
+                # 图片不回填（无 probe 字段保持原样）
+                {"id": "c2", "source": "INPUT/a.mp4", "kind": "image",
+                 "duration": 3},
+                # 探针失败（ok=False）保持原样，交下游校验
+                {"id": "c3", "source": "INPUT/b.mp4", "kind": "video",
+                 "trim_start": 0, "trim_end": 4,
+                 "probe": {"duration": 777}},
+            ],
+        }
+        n = va._autofill_probe(plan, tmp, probe_fn=fake_probe)
+        assert n == 1, n
+        assert plan["clips"][0]["probe"]["duration"] == 12.5
+        assert plan["clips"][0]["probe"]["width"] == 960
+        assert "probe" not in plan["clips"][1]
+        assert plan["clips"][2]["probe"]["duration"] == 777   # 未被碰
+
+
 TESTS = [v for k, v in sorted(globals().items())
          if k[:1] == "t" and k[1:3].isdigit()]
 

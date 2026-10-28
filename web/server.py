@@ -692,7 +692,12 @@ def _run_pipeline(task: str, emit, session_id: str | None = None,
     base_plan = session.get("last_plan")
     base_output = session.get("last_output")
     if pending:
-        messages = build_answer_brief(pending, task)
+        messages = build_answer_brief(
+            pending, task,
+            base_plan=session.get("last_plan"),
+            base_output=session.get("last_output"),
+            materials=["INPUT/" + m for m in materials],
+            session_task=session.get("task"))
     elif base_plan is not None:
         messages = build_revision_brief(
             session["task"], base_plan, base_output,
@@ -740,6 +745,7 @@ def _run_pipeline(task: str, emit, session_id: str | None = None,
         quality="preview" if session.get("preview") else "final",
         base_plan=base_plan,
         apply_ops_fn=plan_ops.apply_ops if base_plan is not None else None,
+        history_outputs=[h.get("output") for h in session.get("history") or []],
     )
     if compiled is None:
         # question / 放弃类返回：事件已 emit，last_plan 不动；
@@ -750,7 +756,10 @@ def _run_pipeline(task: str, emit, session_id: str | None = None,
 
     # ---- V9.0 P1：修订轮 diff 卡 + 作用域闸门（编译成功、渲染之前）----
     if base_plan is not None:
-        diff = plan_diff.plan_diff(base_plan, compiled.plan)
+        # R11：同空间比较——base_plan 是 raw，新计划也取 raw（拿展开版比会
+        # 产生字幕/子段 id 的假 diff 噪声）
+        diff = plan_diff.plan_diff(base_plan, getattr(compiled, "raw_plan", None)
+                                   or compiled.plan)
         emit({"type": "plan_diff", **diff})
         gate_q = plan_diff.check_scope(
             task, diff, materials=["INPUT/" + m for m in materials],
@@ -769,7 +778,10 @@ def _run_pipeline(task: str, emit, session_id: str | None = None,
 
 def _commit_compiled(session: dict, task: str, compiled) -> None:
     """成功提交新计划 → 更新会话（成功路径与闸门放行路径共用）。"""
-    session["last_plan"] = compiled.plan      # 展开后的可执行计划（replan 卡片编辑用）
+    session["last_plan"] = getattr(compiled, "raw_plan", None) or compiled.plan
+    # R11：存模型提交语义的 raw 版（校验过的那份），不是展开版——展开版里的
+    # 旁白字幕「合法跨片」，回灌下一轮校验会撞自己（换 BGM 熔断实测）。
+    # apply_ops 底稿 / plan_diff 基线 / 片段表 / status_answer 都消费它。
     # 实际产物名（preview 档带 _preview 后缀）——存 plan 原名会让
     # status_answer 汇报一个磁盘上不存在的文件（2026-10-24 实测发现）
     session["last_output"] = plan_compiler.output_filename(

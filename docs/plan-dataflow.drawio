@@ -1,0 +1,180 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="drawio" version="26.0.0">
+  <diagram name="计划数据流">
+    <mxGraphModel dx="1400" dy="900" grid="1" gridSize="10" page="1" pageWidth="1500" pageHeight="1500" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- ============ 入口 ============ -->
+        <mxCell id="user" value="用户消息（自然语言）&#xa;&quot;把BGM换成更抒情一点的&quot;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="500" y="40" width="280" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="gate" value="server 入口分流（web/server.py）&#xa;状态问答→零LLM直答 ｜ 方案请求→禁执行 ｜ 有 last_plan→修订 ｜ 无→首轮" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="380" y="150" width="520" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- ============ 双车道 LLM ============ -->
+        <mxCell id="llmFirst" value="首轮车道（V10 工具化）&#xa;LLM + 17 个 draft 工具&#xa;new_plan / add_clips / set_audio … / submit" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="100" y="270" width="320" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="llmRev" value="修订车道（V9 ops，未升级）&#xa;LLM + 1 个 edit_plan 工具&#xa;输出 ops 清单（仅 8 种预设操作）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="860" y="270" width="320" height="90" as="geometry" />
+        </mxCell>
+
+        <!-- ============ raw 空间 ============ -->
+        <mxCell id="rawFirst" value="raw plan（模型提交版）&#xa;clips / _narration 旁白宏 / shot 引用 / audio&#xa;overlays 里【没有】字幕" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="100" y="430" width="320" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="applyOps" value="apply_ops(last_plan, ops)&#xa;宿主确定性施加在上一版计划上&#xa;→ 修改后的 raw plan（模型不碰计划本体）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="860" y="430" width="320" height="80" as="geometry" />
+        </mxCell>
+
+        <!-- ============ 校验 ============ -->
+        <mxCell id="validate" value="① validate_plan 校验（raw 空间）&#xa;键白名单 / 时间数学 / overlay 片段内语义&#xa;/ 素材存在性 —— 此刻没有字幕可查，通过" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="490" y="570" width="320" height="90" as="geometry" />
+        </mxCell>
+
+        <!-- ============ 展开容器 ============ -->
+        <mxCell id="expandBox" value="② 编译器展开 _expand_plan（进入 expanded 空间）" style="swimlane;startSize=30;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=13;fontStyle=1;horizontal=1;" vertex="1" parent="1">
+          <mxGeometry x="340" y="720" width="620" height="200" as="geometry" />
+        </mxCell>
+        <mxCell id="expShot" value="_resolve_shot_refs&#xa;shot 引用 → 内容卡精确边界" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="expandBox">
+          <mxGeometry x="20" y="45" width="280" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="expCuts" value="_expand_cuts&#xa;静音检测剪口" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="expandBox">
+          <mxGeometry x="320" y="45" width="280" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="expBeats" value="_snap_to_beats&#xa;节拍吸附（写回 trim_end）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="expandBox">
+          <mxGeometry x="20" y="115" width="280" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="expNarr" value="★ _apply_narration&#xa;旁白文字稿 → 跨片段字幕 overlay（轮2事故源）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;fontStyle=1" vertex="1" parent="expandBox">
+          <mxGeometry x="320" y="115" width="280" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- ============ CompileResult ============ -->
+        <mxCell id="compiled" value="CompileResult{ plan = 展开版 }&#xa;overlays 里现在有 10 条字幕（时长可超 host 片段）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="440" y="980" width="420" height="70" as="geometry" />
+        </mxCell>
+
+        <!-- ============ plan_diff ============ -->
+        <mxCell id="planDiff" value="plan_diff + check_scope&#xa;（渲染前闸门）&#xa;比对 base_plan 与新计划：改动范围&#xa;超预期 → 暂存 pending_plan 反问用户" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1000" y="950" width="250" height="130" as="geometry" />
+        </mxCell>
+
+        <!-- ============ 渲染 ============ -->
+        <mxCell id="render" value="③ _derive 时间轴数学 → ffmpeg 命令 → 渲染 → verify&#xa;字幕按绝对时间轴绘制，跨片段继续显示（设计特性）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="380" y="1110" width="540" height="70" as="geometry" />
+        </mxCell>
+
+        <!-- ============ 存档 ============ -->
+        <mxCell id="commit" value="④ _commit_compiled → last_plan（会话存档）&#xa;⚠ 现状存的是【展开版】—— R11 病灶&#xa;下一轮修订的底稿 / plan_diff 基线 / 片段表来源" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#b85450;fontSize=12;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="380" y="1250" width="540" height="90" as="geometry" />
+        </mxCell>
+
+        <!-- ============ 修复注记 ============ -->
+        <mxCell id="fixNote" value="修复方向（R11 双存）&#xa;CompileResult 增加 raw_plan&#xa;last_plan 改存 raw&#xa;plan_diff / apply_ops / 片段表&#xa;全部在 raw 空间运作" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="60" y="1230" width="240" height="130" as="geometry" />
+        </mxCell>
+
+        <!-- ============ 图例 ============ -->
+        <mxCell id="legend" value="图例" style="rounded=0;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#666666;verticalAlign=top;fontStyle=1;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="60" y="880" width="240" height="170" as="geometry" />
+        </mxCell>
+        <mxCell id="leg1" value="" style="rounded=0;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="legend">
+          <mxGeometry x="10" y="35" width="30" height="16" as="geometry" />
+        </mxCell>
+        <mxCell id="leg1t" value="raw 空间（校验域）" style="text;html=1;align=left;verticalAlign=middle;fontSize=11;" vertex="1" parent="legend">
+          <mxGeometry x="50" y="33" width="180" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="leg2" value="" style="rounded=0;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" vertex="1" parent="legend">
+          <mxGeometry x="10" y="65" width="30" height="16" as="geometry" />
+        </mxCell>
+        <mxCell id="leg2t" value="expanded 空间（编译产物）" style="text;html=1;align=left;verticalAlign=middle;fontSize=11;" vertex="1" parent="legend">
+          <mxGeometry x="50" y="63" width="180" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="leg3" value="" style="rounded=0;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;" vertex="1" parent="legend">
+          <mxGeometry x="10" y="95" width="30" height="16" as="geometry" />
+        </mxCell>
+        <mxCell id="leg3t" value="LLM 车道" style="text;html=1;align=left;verticalAlign=middle;fontSize=11;" vertex="1" parent="legend">
+          <mxGeometry x="50" y="93" width="180" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="leg4" value="" style="rounded=0;html=1;fillColor=#f5f5f5;strokeColor=#b85450;" vertex="1" parent="legend">
+          <mxGeometry x="10" y="125" width="30" height="16" as="geometry" />
+        </mxCell>
+        <mxCell id="leg4t" value="存档（红边=R11 病灶）" style="text;html=1;align=left;verticalAlign=middle;fontSize=11;" vertex="1" parent="legend">
+          <mxGeometry x="50" y="123" width="180" height="20" as="geometry" />
+        </mxCell>
+
+        <!-- ============ 连线 ============ -->
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="user" target="gate">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2" value="无 last_plan" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;fontSize=11;" edge="1" parent="1" source="gate" target="llmFirst">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3" value="有 last_plan" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;fontSize=11;" edge="1" parent="1" source="gate" target="llmRev">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="llmFirst" target="rawFirst">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e5" value="ops" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;fontSize=11;" edge="1" parent="1" source="llmRev" target="applyOps">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e6" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="rawFirst" target="validate">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e7" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="applyOps" target="validate">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e8" value="校验失败 → 错误回传重试&#xa;（同错 ×2 → 熔断）" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;strokeColor=#b85450;fontSize=11;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="validate" target="llmFirst">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="40" y="615" />
+              <mxPoint x="40" y="315" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e9" value="失败回传" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;strokeColor=#b85450;fontSize=11;exitX=0.75;exitY=0;exitDx=0;exitDy=0;entryX=0;entryY=0.9;entryDx=0;entryDy=0;" edge="1" parent="1" source="validate" target="llmRev">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="835" y="570" />
+              <mxPoint x="835" y="351" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e10" value="通过" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;fontSize=11;" edge="1" parent="1" source="validate" target="expandBox">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e11" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="expandBox" target="compiled">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e12" value="首轮直通" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.25;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;fontSize=11;" edge="1" parent="1" source="compiled" target="render">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e13" value="修订轮" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;fontSize=11;dashed=1;" edge="1" parent="1" source="compiled" target="planDiff">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e14" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;dashed=1;" edge="1" parent="1" source="planDiff" target="render">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e15" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="render" target="commit">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e16" value="展开版回流 = 下一轮底稿（R11 病灶）" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;strokeColor=#b85450;strokeWidth=2;fontSize=11;fontColor=#b85450;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="commit" target="applyOps">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1320" y="1295" />
+              <mxPoint x="1320" y="470" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e17" value="改存 raw_plan" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;strokeColor=#82b366;strokeWidth=2;fontSize=11;fontColor=#82b366;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="fixNote" target="commit">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

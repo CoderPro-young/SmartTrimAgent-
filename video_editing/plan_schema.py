@@ -55,14 +55,18 @@ PLAN_KEYS = {"schema_version", "output", "clips", "timeline", "overlays", "audio
 OUTPUT_KEYS = {"filename", "resolution", "fps"}
 RESOLUTION_KEYS = {"width", "height"}
 CLIP_KEYS = {"id", "source", "kind", "trim_start", "trim_end", "duration",
-             "probe", "effects", "cut_silence", "cut_black", "audio"}
+             "probe", "effects", "cut_silence", "cut_black", "audio",
+             # shot 引用（「引用代替誊抄」2026-10-28）：#N 引用 list_shots 的
+             # 镜头，边界由编译器从内容卡取——时间戳誊抄错误从结构上消失
+             "shot"}
 EFFECT_KEYS = {"name", "args"}
 TIMELINE_KEYS = {"clip", "transition"}
 TRANSITION_KEYS = {"type", "duration"}
 OVERLAY_BASE_KEYS = {"type", "at_clip", "start_offset", "duration", "position"}
 OVERLAY_PIP_KEYS = OVERLAY_BASE_KEYS | {"source", "kind", "scale"}
 # y_margin：贴边留白像素（V7.6，编译器按画布高度换算注入；手写计划也可显式给）
-OVERLAY_TEXT_KEYS = OVERLAY_BASE_KEYS | {"text", "font_size", "color", "y_margin"}
+# _src：编译器铺轴自产标记（narration/captions，模型手写不出现）——越界豁免依据
+OVERLAY_TEXT_KEYS = OVERLAY_BASE_KEYS | {"text", "font_size", "color", "y_margin", "_src"}
 
 # V5 粗剪：clip 级编译期展开参数（不是 effects skill——它们改变片段结构，
 # 一个 clip 展开为 N 个保留子段，由编译器在 _derive 之前处理）
@@ -366,6 +370,33 @@ def clip_duration(clip: dict) -> float | None:
     return round(te - ts, 3)
 
 
+def _validate_shot_ref(c: dict, tag: str, src: str, project_root: str) -> list[str]:
+    """shot 引用合法性：正整数、与 trim 互斥、内容卡存在且编号在范围内。
+
+    对应 OpenAI function-calling 指南「不要让模型填你已知的参数」：镜头边界
+    代码已知（内容卡），模型引用编号而非誊抄时间戳。边界数值本身不校验——
+    展开（plan_compiler._resolve_shot_refs）取的就是卡上的真实值。
+    """
+    errors: list[str] = []
+    shot = c.get("shot")
+    if not isinstance(shot, int) or isinstance(shot, bool) or shot < 1:
+        errors.append(f"{tag}.shot 必须是正整数（list_shots 输出的 #01 起编号）。")
+        return errors
+    if c.get("trim_start") is not None or c.get("trim_end") is not None:
+        errors.append(f"{tag} 的 shot 与 trim_start/trim_end 互斥：引用镜头就写 "
+                      f"shot，自定义裁剪就写 trim，二选一。")
+    import content_analysis
+    card = content_analysis.load_cached_card(project_root, src) if src else None
+    shots = (card or {}).get("shots") or []
+    if not shots:
+        errors.append(f"{tag}.shot={shot}：素材 {src} 还没有内容索引（先对它调用 "
+                      f"analyze_media）；或不用引用、直接写 trim_start/trim_end。")
+    elif shot > len(shots):
+        errors.append(f"{tag}.shot={shot} 超出范围：{src} 共 {len(shots)} 个镜头"
+                      f"（list_shots 输出的 #01~#{len(shots):02d}）。")
+    return errors
+
+
 def validate_plan(plan: dict, project_root: str) -> list[str]:
     """校验计划，返回错误列表（空列表 = 通过）。"""
     errors: list[str] = []
@@ -452,15 +483,19 @@ def validate_plan(plan: dict, project_root: str) -> list[str]:
                 errors.append(f"{tag} 是图片，必须给正数 duration（展示秒数）。")
         else:
             ts, te = c.get("trim_start"), c.get("trim_end")
-            if ts is not None and (not _num(ts) or ts < 0):
-                errors.append(f"{tag}.trim_start 必须是非负数。")
-            if te is not None and (not _num(te) or (ts is not None and te <= ts)):
-                errors.append(f"{tag}.trim_end 必须大于 trim_start。")
-            if clip_duration(c) is None:
-                errors.append(
-                    f"{tag} 无法确定片段时长：ffprobe 不可用时，video 素材必须显式给出 "
-                    f"trim_end（probe.duration 未知不能为 null）。"
-                )
+            if c.get("shot") is not None:
+                # shot 引用：互斥/编号/卡存在性；trim 检查跳过（边界由编译器填）
+                errors.extend(_validate_shot_ref(c, tag, src, project_root))
+            else:
+                if ts is not None and (not _num(ts) or ts < 0):
+                    errors.append(f"{tag}.trim_start 必须是非负数。")
+                if te is not None and (not _num(te) or (ts is not None and te <= ts)):
+                    errors.append(f"{tag}.trim_end 必须大于 trim_start。")
+                if clip_duration(c) is None:
+                    errors.append(
+                        f"{tag} 无法确定片段时长：ffprobe 不可用时，video 素材必须显式给出 "
+                        f"trim_end（probe.duration 未知不能为 null）。"
+                    )
             probe = c.get("probe")
             if probe is not None and not isinstance(probe, dict):
                 errors.append(f"{tag}.probe 必须是对象。")
@@ -579,7 +614,11 @@ def validate_plan(plan: dict, project_root: str) -> list[str]:
             continue
         clip = next(c for c in clips if c.get("id") == at)
         d = clip_duration(clip)
-        if d is not None and so + dur > d + 1e-6:
+        # 编译器铺轴的旁白/文案字幕按绝对时间轴渲染，一句可跨剪辑点（设计
+        # 语义）；「片段内装得下」只约束模型手写 overlay（防时间戳誊抄错）。
+        # 不豁免的话，带字幕的展开版计划重过校验必炸（R11：换 BGM 熔断实测）。
+        if (d is not None and so + dur > d + 1e-6
+                and ov.get("_src") not in ("narration", "captions")):
             errors.append(
                 f"{tag} 越界：start_offset({so}) + duration({dur}) 超出片段 {at} 的长度 {d}s。"
             )

@@ -315,6 +315,34 @@ def t17_guard_overwrite_preview_suffix():
     va._guard_overwrite(p3, "OUTPUT/final_preview.mp4", "-r2", "preview",
                         lambda ev: None)
     assert p3["output"]["filename"] == "OUTPUT/other.mp4"
+    # 2026-10-28 盲区回归：输出名撞「更早历史产物」（非上一版）也要改名
+    p4 = {"output": {"filename": "OUTPUT/grassland_travel.mp4"}}
+    va._guard_overwrite(p4, "OUTPUT/grassland_travel-r2_preview.mp4", "-r3",
+                        "preview", lambda ev: None,
+                        history_outputs=["OUTPUT/grassland_travel.mp4"])
+    assert p4["output"]["filename"] == "OUTPUT/grassland_travel-r3.mp4", p4
+
+
+@t
+def t18_answer_brief_anchored():
+    # 2026-10-28 simtest10 事故回归：问答接续 brief 必须带会话基线锚定——
+    # 无锚时用户答「重写计划」会让模型换素材从零创作。
+    import video_agent as va
+    q = {"type": "question", "question": "加标题在 ops 里表达不了，怎么处理？",
+         "options": ["重写计划加标题", "跳过"]}
+    # 无基线：兼容旧行为（只有问题+回答，无锚定段）
+    msgs = va.build_answer_brief(q, "重写计划加标题")
+    assert "当前会话基线" not in msgs[0]["content"]
+    # 有基线：片段表 + 硬约束 + 原任务/成片名
+    msgs2 = va.build_answer_brief(
+        q, "选第二个：重写计划补上「未完待续」字幕",
+        base_plan=_mk_plan(3), base_output="OUTPUT/f.mp4",
+        materials=["INPUT/concert.mp4"], session_task="剪个vlog")
+    body = msgs2[0]["content"]
+    assert "当前会话基线" in body and "剪个vlog" in body
+    assert "concert.mp4" in body and "OUTPUT/f.mp4" in body
+    assert "不得更换素材集" in body and "不得重建整个作品" in body
+    assert "底稿" in body                     # 重写以片段表为底稿
 
 
 @t
