@@ -60,6 +60,7 @@ import intent as intent_mod  # noqa: E402   V9.0 P3 意图分类车道
 import plan_compiler  # noqa: E402
 import plan_diff  # noqa: E402             V9.0 P1 计划差异 + 作用域闸门
 # plan_ops（V9 修订词表）已在 V12 退役：修订轮走 plan_tools diff 工具
+import plan_tools  # noqa: E402          V12 diff 工具面（draft 暂存/取回）
 import plan_schema  # noqa: E402
 import timeline_export  # noqa: E402
 from langchain_core.messages import AIMessage  # noqa: E402
@@ -116,7 +117,7 @@ SESSIONS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".sessio
 SESSIONS_MAX_FILES = 200     # 盘上会话文件惰性上限（最旧的先清）
 _SESSION_FIELDS = ("task", "turn", "last_plan", "last_output", "last_verify",
                    "pending_question", "last_expansions",
-                   "history", "preview")   # pending_plan 是进程内暂存（CompiledPlan 对象），不落盘
+                   "history", "preview", "pending_draft")   # pending_plan 是进程内暂存（CompiledPlan 对象），不落盘；pending_draft 是 ask_user 暂存的 v3 半成品计划
 
 
 def _session_path(session_id: str) -> str:
@@ -710,6 +711,11 @@ def _run_pipeline(task: str, emit, session_id: str | None = None,
     pending = session.get("pending_question")
     base_plan = session.get("last_plan")
     base_output = session.get("last_output")
+    # P-b：问答接续轮优先续接上一轮 ask_user 时暂存的半成品草稿；非接续轮
+    #（新修订/新任务）丢弃它——那是已过期的中间态
+    draft_seed = session.pop("pending_draft", None) if pending else None
+    if not pending:
+        session.pop("pending_draft", None)
     if pending:
         messages = build_answer_brief(
             pending, task,
@@ -770,6 +776,7 @@ def _run_pipeline(task: str, emit, session_id: str | None = None,
             probe_fn=probe_fn,
             quality="preview" if session.get("preview") else "final",
             base_plan=base_plan,
+            draft_seed=draft_seed if isinstance(draft_seed, dict) else None,
             history_outputs=[h.get("output") for h in session.get("history") or []],
         )
     finally:
@@ -779,6 +786,14 @@ def _run_pipeline(task: str, emit, session_id: str | None = None,
         # 若本轮产生过 question，记为待答，等用户下一条消息接续
         if question_holder:
             session["pending_question"] = question_holder["q"]
+            # P-b：ask_user 出口（无提交）时把改到一半的草稿暂存给接续轮
+            if question_holder["q"].get("kind") == "ask_user":
+                try:
+                    held = plan_tools.hold_draft()
+                except Exception:      # noqa: BLE001
+                    held = None
+                if held is not None:
+                    session["pending_draft"] = held
         return
 
     # ---- V9.0 P1：修订轮 diff 卡 + 作用域闸门（编译成功、渲染之前）----

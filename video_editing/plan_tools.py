@@ -56,6 +56,17 @@ def has_draft_activity() -> bool:
     return _STATE["plan"] is not None
 
 
+def hold_draft() -> dict | None:
+    """ask_user 出口时由 plan_with_retry 调用：改到一半、尚未提交的 draft
+    返回给会话暂存，下一轮问答接续时原样载回（P-b：2026-10-29 sim-v12-a
+    两轮实测——问答重置 draft 会把模型已完成的复合改动整个吞掉）。已提交
+    （submitted/编译路径）的 draft 不在此列：那条路要么已入库要么被闸门
+    暂存为 pending_plan，走各自语义。"""
+    if _STATE["plan"] is not None and not _STATE["submitted"]:
+        return _STATE["plan"]
+    return None
+
+
 # ------------------------------------------------------------------ 内部工具 -- #
 
 def _draft() -> dict | None:
@@ -218,7 +229,15 @@ def _summary(plan: dict) -> str:
             for o in ovs))
     narr = plan.get("_narration")
     if narr:
-        lines.append(f"旁白 {len(narr)} 组（title={plan.get('_title') or '无'}）")
+        lines.append(f"旁白 {len(narr)} 组（title={plan.get('_title') or '无'}）："
+                     f"修订引用组时需要这些内容")
+        for gi, g in enumerate(narr[:8], 1):
+            ids = ",".join(str(x) for x in (g.get("clip_ids") or []))
+            txt = str(g.get("text") or "")
+            txt = (txt[:26] + "…") if len(txt) > 26 else txt
+            lines.append(f"  g{gi}: [{ids}] {txt}")
+        if len(narr) > 8:
+            lines.append(f"  （其余 {len(narr) - 8} 组略——set_narration 可整块重写）")
     elif plan.get("_captions"):
         lines.append(f"字幕 {len(plan['_captions'])} 句"
                      f"（style={plan.get('_caption_style') or 'bottom'}）")

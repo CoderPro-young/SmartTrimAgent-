@@ -886,6 +886,7 @@ def plan_with_retry(task: str, project_root: str, invoke, emit,
                     probe_fn=None,
                     quality: str = "final",
                     base_plan: dict | None = None,
+                    draft_seed: dict | None = None,
                     history_outputs: list[str] | None = None):
     """出计划 → Preflight 匹配校验 → 编译；失败按「谁能修」三分流。
 
@@ -903,6 +904,9 @@ def plan_with_retry(task: str, project_root: str, invoke, emit,
       probe_fn       服务端缓存的真实探针（src->probe dict）；None = 现场 ffprobe
       base_plan      上一版计划（v3）：修订轮把它载入 draft 作初态——模型在同一
                      套 diff 工具上只改要求的部分（V12：edit_plan(ops) 通道退役）
+      draft_seed     问答接续轮的草稿初态（ask_user 出口时 hold_draft 暂存的
+                     半成品）；优先于 base_plan——用户的回答应该续接改到一半的
+                     草稿，而不是把它重置回已入库版本（P-b 实测修复）
 
     （V9 的 ops_mode / apply_ops_fn 已删除：修订轮与首轮共用 diff 工具路径，
     plan_ops.py 冻结保留。）
@@ -912,8 +916,9 @@ def plan_with_retry(task: str, project_root: str, invoke, emit,
     result: dict = {}
     last_errors: list[str] | None = None
     # V12 diff 工具构建：新 run 初始化 draft；修订轮传入上一版计划作初态
-    #（模型在上一版上改，不重建）；重试不重置——模型只需修正出问题的部分再 submit
-    plan_tools.reset_draft(base_plan)
+    #（模型在上一版上改，不重建）；问答接续轮优先用暂存的半成品草稿；
+    # 重试不重置——模型只需修正出问题的部分再 submit
+    plan_tools.reset_draft(draft_seed if draft_seed is not None else base_plan)
 
     for attempt in range(max_retries + 1):
         emit({"type": "attempt", "n": attempt + 1, "max": max_retries + 1})
@@ -947,7 +952,12 @@ def plan_with_retry(task: str, project_root: str, invoke, emit,
                       "signal": "both_ask_and_plan",
                       "evidence": "同一轮同时调用了 ask_user 与 submit_plan，已按 ask_user 处理。"})
             if ask is not None:
-                # 出口 ①：agent 自己反问（Tier 1 可行性自检的出口）
+                # 出口 ①：agent 自己反问（Tier 1 可行性自检的出口）。
+                # 改到一半、尚未提交的 draft 暂存给下一轮问答接续——否则
+                # 下一轮 reset_draft(base_plan) 会把它整个吞掉（P-b 实测）
+                held = plan_tools.hold_draft()
+                if held is not None:
+                    emit({"type": "draft_held"})
                 emit({"type": "question", "kind": "ask_user",
                       "question": ask["question"], "options": ask["options"]})
                 return None, result

@@ -469,6 +469,51 @@ def _(tmp):
     assert res2.raw_plan["schema_version"] == "2.0"
 
 
+@test("delete 级联清理旁白引用（P-f）：孤组移除、共组收窄")
+def _(tmp):
+    d = _draft()
+    d["_narration"] = [
+        {"clip_ids": ["c1", "c2"], "text": "跨两段的开头"},
+        {"clip_ids": ["c2"], "text": "只讲 c2"},
+    ]
+    plan, applied, errs = pa.apply_actions(d, [
+        {"key": ["clips", {"id": "c2"}], "type": "delete"}])
+    assert not errs, errs
+    # 孤组（只覆盖 c2）整个移除；共组收窄到 c1
+    assert plan["_narration"] == [{"clip_ids": ["c1"], "text": "跨两段的开头"}]
+    assert "旁白组 2→1" in applied[0]["detail"]
+    # 全部组被清 → _narration 整键移除
+    d2 = _draft()
+    d2["_narration"] = [{"clip_ids": ["c2"], "text": "只讲 c2"}]
+    plan2, _, _ = pa.apply_actions(d2, [
+        {"key": ["clips", {"id": "c2"}], "type": "delete"}])
+    assert "_narration" not in plan2
+
+
+@test("get_plan 摘要展示旁白组内容（可见性）：clip_ids + 文案头")
+def _(tmp):
+    t = _Env(tmp)
+    d = _draft()
+    d["_narration"] = [{"clip_ids": ["c1", "c2"],
+                        "text": "这一句旁白跨越两个片段，模型应当能在摘要里看到原文。"}]
+    d["_title"] = "标题甲"
+    pt.reset_draft(d)
+    r = pt.get_plan.invoke({})
+    assert "g1: [c1,c2]" in r and "这一句旁白跨越两个片段" in r, r
+    assert "标题甲" in r
+
+
+@test("hold_draft：未提交的半成品可暂存；已提交的不可")
+def _(tmp):
+    t = _Env(tmp)
+    pt.reset_draft(_draft())
+    pt.clip_diff.invoke({"ops": [{"op": "update", "id": "c1", "end": 5}]})
+    held = pt.hold_draft()
+    assert held is not None and held["clips"][0]["end"] == 5
+    pt.submit.invoke({})
+    assert pt.hold_draft() is None            # 已提交 → 走 pending_plan 语义
+
+
 @test("R11 场景 v3 版: 旧会话升级→换 BGM→重编译，旁白字幕不受影响")
 def _(tmp):
     import plan_compiler as pc

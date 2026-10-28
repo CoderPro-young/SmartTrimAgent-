@@ -236,9 +236,29 @@ def _apply_clips(work: dict, act: dict, idx: int, errors: list,
             work["overlays"] = [o for o in (work.get("overlays") or [])
                                 if o.get("at_clip") != cid]
             dropped = n_ov - len(work.get("overlays") or [])
+            # 旁白组引用级联清理（2026-10-29 sim-v12-a A3 实测：删片段后
+            # 引用它的旁白组让计划过不了校验，模型只能停下来问用户）
+            narr_note = ""
+            narr = work.get("_narration")
+            if isinstance(narr, list):
+                kept = []
+                n_groups_before = len(narr)
+                for g in narr:
+                    if isinstance(g, dict) and isinstance(g.get("clip_ids"), list):
+                        g = {**g, "clip_ids": [x for x in g["clip_ids"] if x != cid]}
+                        if not g["clip_ids"]:
+                            continue          # 只覆盖被删片段的组整个移除
+                    kept.append(g)
+                if len(kept) != n_groups_before:
+                    if kept:
+                        work["_narration"] = kept
+                    else:
+                        work.pop("_narration", None)
+                    narr_note = f"；旁白组 {n_groups_before}→{len(kept)}（移除引用 {cid} 的组）"
             applied.append({"op": "delete", "target": f"clips/{cid}",
                             "detail": f"删除 {cid}"
-                                      f"{'（连带移除挂载文字/画中画）' if dropped else ''}",
+                                      f"{'（连带移除挂载文字/画中画）' if dropped else ''}"
+                                      f"{narr_note}",
                             "old_values": {"clip": old}})
             return
         if typ != "update":
