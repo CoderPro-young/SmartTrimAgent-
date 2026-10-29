@@ -81,6 +81,25 @@ def t01_list_shots_full_pool():
         assert "穿红裙" in out and len(out.splitlines()) == 5, out   # 头1+镜头3+尾1
         assert "还没有内容索引" in out and "INPUT/c.mp4" in out
         assert "narration.mp3" not in out                            # 纯音频不进池
+        # 2026-10-29 编号体系：镜头行带素材编号前缀（文件名序，纯音频占位不计行）
+        assert "[1] INPUT/a.mp4#01" in out and "[2] INPUT/b.mp4#01" in out, out
+        assert "素材编号" in out                                     # 头部编号图例
+
+
+def t01b_list_materials_numbered():
+    """list_materials：编号清单与 UI 素材库同源（文件名序、非隐藏媒体文件，
+    纯音频也计编号——UI 素材库同样展示音频行）。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        _make_project(tmp)
+        _patch_agent_paths(tmp)
+        out = va.list_materials.func()
+        assert "[1] INPUT/a.mp4" in out, out
+        assert "[2] INPUT/b.mp4" in out and "[3] INPUT/c.mp4" in out, out
+        assert "[4] INPUT/narration.mp3" in out, out   # 纯音频是素材，占编号位
+        # 新增文件按文件名序插入，编号随之漂移（列表重渲后用户看到的就是新编号）
+        with open(os.path.join(tmp, "INPUT", "z.mp4"), "wb") as f:
+            f.write(b"x" * 8)
+        assert "[5] INPUT/z.mp4" in va.list_materials.func()
 
 
 def t02_list_shots_no_material():

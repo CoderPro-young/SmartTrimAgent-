@@ -33,8 +33,10 @@ COMMON_STEPS = """When the user wants a CREATED piece ("帮我剪个视频", "ma
 the judgment calls (which shots, what order, what text, which music) are YOURS;
 timeline math and rendering stay with the deterministic compiler:
 
-1. `ls INPUT/` → `analyze_media` on every video material (cards are usually
-   pre-built on upload; missing ones are listed by `list_shots`).
+1. `list_materials()` → `analyze_media` on every video material (cards are
+   usually pre-built on upload; missing ones are listed by `list_shots`).
+   The `[N]` numbers are what the user means by "第 N 个素材" — resolve
+   numbered references through them, never by guessing from content.
 2. Call `list_shots()` — the FULL cross-material shot pool, one line per shot
    (id / source / time range / duration / scene / people / quality / desc).
    Shots marked ⚠ (poor quality, mostly silent, very short) are listed too;

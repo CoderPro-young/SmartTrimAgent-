@@ -6,8 +6,10 @@ INPUT 下的 jpg → 整图 base64 进 ToolMessage → 纯文本主模型 400、
 
 覆盖两处修复：
 1. model.py 两个工厂显式 max_tokens（env 可调）；
-2. HarnessProfile 排除文件系统内置工具（read/write/edit/glob/grep/execute，
-   `ls` 保留）——媒体字节永不进 agent 消息流的宿主强制兜底。
+2. HarnessProfile 排除文件系统内置工具（read/write/edit/glob/grep/execute/ls）
+   ——媒体字节永不进 agent 消息流的宿主强制兜底。`ls` 原本保留给创作流
+   第 1 步，2026-10-29 起该步改用带编号的 `list_materials`（编号与 UI 同源），
+   `ls` 一并排除。
 
 运行：.venv/Scripts/python.exe tests/test_tool_exclusion.py
 """
@@ -21,7 +23,8 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "video_editing"))
 
-_EXCLUDED = {"read_file", "write_file", "edit_file", "glob", "grep", "execute"}
+_EXCLUDED = {"read_file", "write_file", "edit_file", "glob", "grep", "execute",
+             "ls"}
 
 
 def t01_max_tokens_constants():
@@ -66,7 +69,7 @@ def t03_harness_profile_excludes_fs_tools():
     prof = _harness_profile_for_model(get_model(), None)
     missing = _EXCLUDED - set(prof.excluded_tools)
     assert not missing, f"profile 未排除: {missing}"
-    assert "ls" not in prof.excluded_tools, "ls 应保留"
+    assert "list_materials" not in prof.excluded_tools, "编号工具应保留"
 
 
 def t04_agent_builds_and_domain_tools_disjoint():

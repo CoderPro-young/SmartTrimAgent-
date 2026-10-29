@@ -108,9 +108,14 @@ export function showBoundedPreview({ name, kind, start = null, end = null, note 
 function matRow(it){
   const node = el('div', 'mat');
   node.dataset.name = it.name;
-  node.title = it.path + (it.uploaded
+  node.title = `#${it.index}  ` + it.path + '（对话里说「第 ' + it.index
+    + ' 个素材」即指它）' + (it.uploaded
     ? '（网页上传，「启动新任务」时会自动清除）'
     : '（手动放入，「启动新任务」时同样会清除；也可在此移除）');
+
+  const idx = el('span', 'midx', '#' + it.index);
+  idx.title = '素材编号（文件名序，与 agent 感知一致）';
+  node.append(idx);
 
   let thumb;
   if (it.kind === 'image'){

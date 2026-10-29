@@ -37,6 +37,29 @@ SCENE_GLOSSARY = {
 
 _GLOBAL_QUANTIFIERS = ("全部", "所有", "整条", "整个", "每一", "全片", "全都", "从头到尾")
 
+_CN_DIGIT = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
+             "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+
+
+def _cn_to_int(s: str) -> int | None:
+    """「第 X 个」里的 X → int。支持阿拉伯数字与 1~99 的中文写法
+    （十 / 十五 / 二十 / 二十三 / 两）。解析不了返回 None。"""
+    s = (s or "").strip()
+    if not s:
+        return None
+    if s.isdigit():
+        return int(s)
+    total, num = 0, 0
+    for ch in s:
+        if ch in _CN_DIGIT:
+            num = _CN_DIGIT[ch]
+        elif ch == "十":
+            total += (num or 1) * 10
+            num = 0
+        else:
+            return None
+    return total + num if total + num > 0 else None
+
 
 def _r(x) -> float:
     try:
@@ -210,7 +233,11 @@ def _short_src(src) -> str:
 
 def msg_scope(msg: str, materials: list[str] | None = None,
               scene_vocab: set[str] | None = None) -> str:
-    """用户消息的指代粒度：local（提到具体对象）/ global（全称量词）/ none。"""
+    """用户消息的指代粒度：local（提到具体对象）/ global（全称量词）/ none。
+
+    materials 须按文件名序传入（与素材库 UI 同源）——「第 N 个素材」的 N
+    按位置解析（2026-10-29 编号体系）。N 超界视为没提，宁放行给闸门后面的
+    ask_user，不误拦。"""
     m = (msg or "").translate(_FULL_WIDTH).lower()
     if not m.strip():
         return "none"
@@ -230,6 +257,12 @@ def msg_scope(msg: str, materials: list[str] | None = None,
         for zh, ens in SCENE_GLOSSARY.items():
             if zh in m and any(e in vocab for e in ens):
                 local = True
+    # ④ 素材编号指代：「第 N 个（素材）」。指「第二个片段」时也判 local——
+    # 闸门只看粒度冲突，具体指代由 agent 解析
+    for tok in re.findall(r"第\s*(\d{1,3}|[零一二两三四五六七八九十]{1,4})\s*个", m):
+        n = _cn_to_int(tok)
+        if n and materials and 1 <= n <= len(materials):
+            local = True
     if local:
         return "local"
     if any(q in m for q in _GLOBAL_QUANTIFIERS):
@@ -241,7 +274,9 @@ def check_scope(msg: str, diff: dict, materials: list[str] | None = None,
                 scene_vocab: set[str] | None = None) -> dict | None:
     """作用域闸门：消息指代粒度 × diff 影响半径，冲突才拦（返回 question 载荷）。
 
-    签名无信息量（none）时放行——这是设计上接受的残留区（见设计文档 §3.3）。
+    materials 须按文件名序传入（编号 = 位置 + 1，与素材库 UI 同源），
+    「第 N 个素材」指代据此判 local。签名无信息量（none）时放行——这是
+    设计上接受的残留区（见设计文档 §3.3）。
     """
     ms = msg_scope(msg, materials, scene_vocab)
     ds = diff.get("scope")

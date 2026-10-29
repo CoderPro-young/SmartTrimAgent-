@@ -171,15 +171,39 @@ def t07_ops_add_and_transition_and_reorder():
 # ------------------------------------------------------ P3：意图分类 ---- #
 @t
 def t08_intent_rules():
-    assert intent.classify("你重新剪了嘛")[0] == "status_question"    # 事故回归
+    # 2026-10-29 改向：status_question 直答收紧为高置信（状态词 + 去词后无
+    # 任务动词）；「你重新剪了嘛」「为什么把BGM删了？」混有任务动词 → 放行
+    # task（agent 的 brief 有「询问类先 ask_user」护栏，答案也比状态模板准）
+    assert intent.classify("你重新剪了嘛")[0] == "task"
+    assert intent.classify("为什么把BGM删了？")[0] == "task"
     assert intent.classify("剪好了没？")[0] == "status_question"
-    assert intent.classify("为什么把BGM删了？")[0] == "status_question"
+    assert intent.classify("成片多长了？")[0] == "status_question"
+    assert intent.classify("可以把第二个素材加进去吗？")[0] == "task"  # 请求式疑问
     assert intent.classify("帮我重新剪好吗")[0] == "task"            # 祈使优先
     assert intent.classify("删掉最后一个片段")[0] == "task"
     assert intent.classify("重新剪一下")[0] == "task"
     assert intent.classify("把字幕调成黄色")[0] == "task"
     # classify 不再产 ambiguous（LLM 关闭时保守放行为 task）
     assert intent.classify("背景音乐")[0] == "task"
+
+
+@t
+def t08b_intent_incident_regression():
+    """2026-10-29 事故四句：一键成片后两次修改要求被 ambiguous 车道拦在门口
+    静默丢弃。验收要求：多次运行结果一致且全部进 agent（task 车道或放行）。"""
+    msgs = [
+        "我的第二个素材没有被使用到",
+        "1、不要字幕 2、第二个就是两个人在饭店里面跳舞的视频怎么没有被加入到成片里",
+    ]
+    for m in msgs:
+        for _ in range(3):                # 规则命中必须稳定（不掷骰子）
+            label, basis = intent.classify(m, has_session=True)
+            assert label == "task" and basis.startswith("rule"), (m, label, basis)
+    assert intent.classify("去掉字幕", has_session=True)[0] == "task"   # 回归：原 task 不能变差
+    assert intent.classify("成片多长了？", has_session=True)[0] == "status_question"  # 回归：仍直答
+    # 新词表覆盖：抱怨/否定式修改要求
+    for m in ("第二个素材好像漏了", "这个滤镜没用，去掉吧", "第二个素材没有被使用到"):
+        assert intent.classify(m, has_session=True)[0] == "task"
 
 
 @t
@@ -207,8 +231,8 @@ def t15_intent_proposal_request():
     assert not intent.is_proposal_request("删掉最后一个片段")
     # 问句形态的方案请求放行为 task（rule-proposal），不再答非所问地汇报现状
     assert intent.classify("有没有别的方案？先别动手") == ("task", "rule-proposal")
-    # 普通问句不受影响
-    assert intent.classify("你重新剪了嘛")[0] == "status_question"
+    # 混有任务动词的疑问放行（2026-10-29：直答收紧为高置信状态问句）
+    assert intent.classify("你重新剪了嘛") == ("task", "rule-verb")
 
 
 @t
@@ -265,11 +289,27 @@ def t12_revision_brief_diff_mode():
     import video_agent as va
     old = _mk_plan(3)
     msgs = va.build_revision_brief("剪个vlog", old, "OUTPUT/final.mp4",
-                                   ["INPUT/concert.mp4"], "删掉C2")
+                                   ["INPUT/concert.mp4", "INPUT/dance.mp4"], "删掉C2")
     body = msgs[0]["content"]
     assert "clip_diff" in body and "validate_plan" in body and "submit()" in body, body[:300]
     assert "C1" in body and "concert.mp4" in body
     assert "完整的新计划" not in body            # 不要求重写整份计划
+    # 2026-10-29 编号体系：素材清单为编号列表，「第 N 个素材」有锚点
+    assert "1. INPUT/concert.mp4" in body and "2. INPUT/dance.mp4" in body, body
+    assert "第 N 个素材" in body
+
+
+@t
+def t20_numbered_reference_scope():
+    """2026-10-29 编号体系：作用域闸门要能解析「第 N 个素材」指代。"""
+    mats = ["INPUT/aaa.mp4", "INPUT/bb.mp4", "INPUT/c.mp4"]
+    assert plan_diff.msg_scope("把第 2 个素材删掉", mats) == "local"
+    assert plan_diff.msg_scope("我的第二个素材没有被使用到", mats) == "local"
+    assert plan_diff.msg_scope("第二个就是两个人跳舞的视频怎么没加进去", mats) == "local"
+    assert plan_diff.msg_scope("第二十一个素材", mats) == "none"   # 超界宁放行
+    assert plan_diff.msg_scope("第一个", mats) == "local"
+    # 混合：编号指代 × 全局量词 → local 优先（agent 侧解析具体指代）
+    assert plan_diff.msg_scope("把第 1 个素材删掉，其他都不动", mats) == "local"
 
 
 @t

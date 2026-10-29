@@ -195,7 +195,12 @@ function handleEvent(ev){
       if (ev.max > 1) chat.addSys(`第 ${ev.n}/${ev.max} 轮：让 agent 出编辑计划…`, true);
       else chat.addSys('正在分析素材并生成编辑计划…', true);
       break;
-    case 'materials': chat.addSys('本次可用素材：' + ev.names.join('、'), false); break;
+    case 'materials':
+      /* 编号用服务端下发的（numbers），与素材库徽标/agent 感知同一来源 */
+      chat.addSys('本次可用素材：' + ev.names
+        .map(n => ev.numbers ? `#${ev.numbers[n]} ${n}` : n)
+        .join('、'), false);
+      break;
     case 'llm_first_token':                          // L2/L3：该请求首 chunk 已到（chunk 持续流动 = 慢生成，非挂死）
       llmStreaming = true; markWaiting(5); break;    // 重挂等待条，文案切「生成中」
     case 'llm':      chat.addAssistant(ev.text, ev.tool_calls); break;

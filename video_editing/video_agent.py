@@ -40,6 +40,31 @@ OUTPUT_DIR = os.path.join(PROJECT_ROOT, "OUTPUT")
 # 纯音频扩展（list_shots 跳过 / list_music 收录；与 server 的 AUDIO_EXT 同口径）
 _AUDIO_EXTS = {".mp3", ".m4a", ".wav", ".aac", ".flac", ".ogg", ".opus"}
 
+# 素材扩展（编号口径：UI / brief / list_shots / list_materials 同一套；
+# 与 server 的 ALLOWED_EXT 同口径，新增扩展名两处同步）
+_MATERIAL_EXTS = {
+    ".mp4", ".m4v", ".mov", ".mkv", ".webm", ".avi", ".flv", ".wmv",
+    ".mpg", ".mpeg", ".m2ts", ".mts", ".ts", ".3gp", ".ogv",
+    ".png", ".jpg", ".jpeg", ".jfif", ".webp", ".bmp", ".gif",
+    ".tif", ".tiff", ".heic", ".avif",
+} | _AUDIO_EXTS
+
+# 素材编号唯一来源：文件名序（sorted listdir，跳过隐藏文件与非素材文件）。
+# 与 web/server._list_materials 的顺序天然一致；编号 = 列表位置 + 1。
+# 用户在界面上说的「第 N 个素材」、brief 编号清单的 N、list_shots 的 [N]
+# 都锚定这一个函数，杜绝跨通道错位。
+def _material_list(project_root: str | None = None) -> list[str]:
+    root = project_root or PROJECT_ROOT
+    input_dir = os.path.join(root, "INPUT")
+    if not os.path.isdir(input_dir):
+        return []
+    return sorted(
+        n for n in os.listdir(input_dir)
+        if not n.startswith(".")
+        and os.path.splitext(n)[1].lower() in _MATERIAL_EXTS
+        and os.path.isfile(os.path.join(input_dir, n))
+    )
+
 # ---------------------------------------------------------------- LLM 打印 - #
 
 def _print_llm_output(msg: AIMessage) -> None:
@@ -115,8 +140,6 @@ command line, then execute it with the `run_ffmpeg` tool.
 - Input media lives in the `INPUT/` directory of this project.
 - Always write output files into the `OUTPUT/` directory with a new, clear
   filename (e.g. `OUTPUT/sample_1080p.mp4`). Never overwrite inputs.
-- List files in `INPUT/` with `ls`/`glob` before planning, so you know the
-  exact input filename.
 - The machine may NOT have ffmpeg installed. If `run_ffmpeg` reports ffmpeg
   is missing, still give the user the exact command you would run, and explain
   how to install ffmpeg.
@@ -203,7 +226,8 @@ summary, so you always know the current state.
 
 ## Workflow
 
-1. Use `ls` to list files in INPUT/.
+1. Use `list_materials` to list INPUT/ — the numbered list (`[N] INPUT/f.mp4`)
+   is what the user means by "第 N 个素材"; resolve such references through it.
 2. Use `probe_media` on each source you plan to use, to learn its real
    duration / resolution / whether it has audio.
 3. If the request depends on WHAT IS IN the footage (finding / picking /
@@ -252,11 +276,11 @@ summary, so you always know the current state.
 ## Material content rule (hard)
 
 ALL knowledge about what media files contain MUST come from `probe_media`,
-`analyze_media`, `list_shots` and `list_music`. NEVER call `read_file` (or any
-filesystem tool) on files under INPUT/ or MUSIC/ — your planner model is
-text-only, so media bytes in a tool result are rejected by the API with a hard
-400 and the whole turn is lost. `ls` on directories is fine. Do NOT try to
-look at the media yourself.
+`analyze_media`, `list_materials`, `list_shots` and `list_music`. NEVER call
+`read_file` (or any filesystem tool) on files under INPUT/ or MUSIC/ — your
+planner model is text-only, so media bytes in a tool result are rejected by the
+API with a hard 400 and the whole turn is lost. Filesystem tools are excluded
+from your toolset anyway. Do NOT try to look at the media yourself.
 
 {CREATIVE_DOC}
 
@@ -441,21 +465,42 @@ def ask_user(question: str, options: list[str] | None = None) -> str:
 
 
 @tool
+def list_materials() -> str:
+    """List every material in INPUT/ with its user-facing number.
+
+    One line per material: `[N] INPUT/<file>` — N is THE number the user
+    means when they say "第 N 个素材" (the N-th material). It matches the
+    number badge shown in the web UI's material list. Use it to resolve
+    numbered references (e.g. "把第 2 个素材删掉" → INPUT/<#2's file>),
+    then act on that exact file. Sorted by filename; hidden and non-media
+    files are not listed.
+    """
+    mats = _material_list()
+    if not mats:
+        return "INPUT/ 里没有任何素材。"
+    lines = [f"[{i}] INPUT/{name}" for i, name in enumerate(mats, 1)]
+    return ("素材编号清单（[N] = 用户说「第 N 个素材」时指的编号，"
+            "与界面素材库一致）：\n" + "\n".join(lines))
+
+
+@tool
 def list_shots() -> str:
     """List EVERY shot across ALL indexed materials as your candidate pool
     (for creative/one-click tasks; V8.0 — no culling, no pre-filtering).
 
-    One line per shot: shot_id, source, start-end, duration, scene/activity,
-    person_count, quality, silence_ratio, desc. Shots flagged ⚠ (poor quality
-    / mostly silent / very short) are shown TOO — judging them is YOUR job.
-    Time ranges are the same card boundaries analyze_media returns, safe to
-    use as trim_start/trim_end.
+    One line per shot: `[N] source#id, start-end, duration, scene/activity,
+    person_count, quality, silence_ratio, desc`, where [N] is the material's
+    user-facing number (what the user means by "第 N 个素材"). Shots flagged
+    ⚠ (poor quality / mostly silent / very short) are shown TOO — judging
+    them is YOUR job. Time ranges are the same card boundaries analyze_media
+    returns, safe to use as trim_start/trim_end.
 
     Call analyze_media first for any material listed as missing, then call
     this again. No arguments — it always covers all of INPUT/.
     """
     lines, missing = [], []
     total_shots, total_seconds = 0, 0.0
+    numbers = {name: i for i, name in enumerate(_material_list(), 1)}
     for name in sorted(os.listdir(INPUT_DIR)):
         rel = f"INPUT/{name}"
         full = os.path.join(INPUT_DIR, name)
@@ -463,9 +508,11 @@ def list_shots() -> str:
             continue
         if os.path.splitext(name)[1].lower() in _AUDIO_EXTS:
             continue                      # 纯音频走 list_music
+        num = numbers.get(name)
+        tag = f"[{num}] " if num else ""
         card = content_analysis.load_cached_card(PROJECT_ROOT, rel)
         if not card or card.get("error") or not card.get("shots"):
-            missing.append(rel)
+            missing.append(f"{tag}{rel}")
             continue
         ratio = ((card.get("signals") or {}).get("audio") or {}) \
             .get("silence_ratio")
@@ -486,7 +533,7 @@ def list_shots() -> str:
             aes = lab.get("aes_score")
             aes_s = f"  美学{aes}" if isinstance(aes, (int, float)) else ""
             lines.append(
-                f"{rel}#{i:02d}  {s:.3f}-{e if e is not None else '?'}s"
+                f"{tag}{rel}#{i:02d}  {s:.3f}-{e if e is not None else '?'}s"
                 f"  {dur}s  {lab.get('scene') or '?'}/{lab.get('activity') or '?'}"
                 f"  {lab.get('person_count', 0)}人  {lab.get('quality') or '?'}"
                 f"{aes_s}{mark}  {desc}")
@@ -494,9 +541,10 @@ def list_shots() -> str:
             total_seconds += dur or 0.0
     if not lines and not missing:
         return "INPUT/ 里没有任何视频素材。"
-    srcs = {l.split("#", 1)[0] for l in lines}
+    srcs = {l.split("#", 1)[0].split("] ", 1)[-1] for l in lines}
     head = (f"共 {total_shots} 个镜头 / 合计 {round(total_seconds, 1)}s"
-            f"（来自 {len(srcs)} 个素材）。"
+            f"（来自 {len(srcs)} 个素材）。[N] = 素材编号，"
+            "用户说「第 N 个素材」即指它。"
             if lines else "没有已建卡的镜头。")
     body = "\n".join(lines)
     tail = ""
@@ -545,11 +593,12 @@ def list_music() -> str:
 # 宿主强制：媒体字节永不进 agent 消息流（v3.1 D1 铁律的兜底，不靠模型自觉）。
 # 2026-10-26 事故：VLM 打标部分失败后，agent 用内置 read_file 直接读 INPUT 下的
 # jpg，整图 base64 进入 ToolMessage，下一轮被纯文本主模型 400 拒绝、整轮作废。
-# 领域信息一律走 probe/analyze/list_shots/list_music，文件系统工具（read/write/
-# edit/glob/grep/execute）对本 agent 无正当用途，全部排除；`ls` 保留（提示词
-# 工作流第 1 步在用，只返回文件名）。注册是合并语义（excluded_tools 取并集），
-# 不覆盖框架默认；即便模型幻觉出被排除工具的调用，也会在执行边界被中间件以
-# 文本拒绝，不会再把二进制塞进下一轮请求。
+# 领域信息一律走 probe/analyze/list_shots/list_music/list_materials，文件系统
+# 工具（read/write/edit/glob/grep/execute）对本 agent 无正当用途，全部排除；
+# `ls` 也一并排除（2026-10-29：它只返回裸文件名、无编号，创作流第 1 步改用
+# list_materials 的编号清单，与 UI 素材库同源）。注册是合并语义（excluded_tools
+# 取并集），不覆盖框架默认；即便模型幻觉出被排除工具的调用，也会在执行边界
+# 被中间件以文本拒绝，不会再把二进制塞进下一轮请求。
 # task（子代理派生）一并排除：规划器没有正当用途（2026-10-29 sim-v12-b B2
 # 实测：模型为找 workflow 参数派 general-purpose 子代理读会话记录——上下文
 # 污染且绕过工具面）；迁移清单③（subagents 拆分）若立项再放开。
@@ -557,7 +606,7 @@ register_harness_profile(
     "openai",
     HarnessProfile(excluded_tools=frozenset({
         "read_file", "write_file", "edit_file", "glob", "grep", "execute",
-        "task",
+        "task", "ls",
     })),
 )
 
@@ -578,8 +627,8 @@ def build_video_agent_v2() -> CompiledStateGraph:
     return create_deep_agent(
         model=model,
         system_prompt=V2_SYSTEM_PROMPT,
-        tools=[probe_media, analyze_media, list_shots, list_music,
-               submit_plan, ask_user, *plan_tools.PLAN_TOOLS],
+        tools=[probe_media, analyze_media, list_materials, list_shots,
+               list_music, submit_plan, ask_user, *plan_tools.PLAN_TOOLS],
         backend=backend,
         name="video-editing-planner-v2",
     )
@@ -753,6 +802,15 @@ def _plan_table_rows(base_plan: dict) -> list[str]:
     return rows
 
 
+def _numbered_materials(materials: list[str] | None) -> str:
+    """素材清单的编号渲染（brief 用）。materials 必须按文件名序传入——
+    编号 = 位置 + 1，与 UI 素材库 index / list_shots [N] / list_materials
+    同一来源；用户说「第 N 个素材」即指第 N 项。"""
+    if not materials:
+        return "（INPUT/ 为空）"
+    return "\n".join(f"{i}. {m}" for i, m in enumerate(materials, 1))
+
+
 def build_revision_brief(task: str, base_plan: dict, base_output: str,
                          materials: list[str], new_task: str) -> list:
     """修订轮上下文（V12 diff 模式）：片段表 + diff 工具词汇表 + 本次要求。
@@ -761,7 +819,7 @@ def build_revision_brief(task: str, base_plan: dict, base_output: str,
     的 reset_draft(base_plan)），模型用同一套 diff 工具只改要求的部分。
     片段表给到 id/素材/裁剪/转场/效果，足够下 op；完整 JSON 不再重放。
     """
-    listing = "、".join(materials) if materials else "（INPUT/ 为空）"
+    listing = _numbered_materials(materials)
     rows = _plan_table_rows(base_plan)
     audio = base_plan.get("audio")
     audio_s = json.dumps(audio, ensure_ascii=False) if audio else "（无全局 BGM，原声直通）"
@@ -771,15 +829,17 @@ def build_revision_brief(task: str, base_plan: dict, base_output: str,
         f"上一版已产出的成片：{base_output}\n"
         "上一版计划的片段表（id 可直接用于 ops）：\n" + "\n".join(rows)
         + f"\n顶层音频块（BGM）：{audio_s}\n"
-        f"当前 INPUT/ 里实际可用的素材：{listing}\n\n"
+        "当前 INPUT/ 里实际可用的素材（编号清单——用户说「第 N 个素材」"
+        "即指第 N 项，先按编号定位到具体文件，不要靠内容猜）：\n"
+        f"{listing}\n\n"
         f"用户这次的修改要求：{new_task}\n\n"
         + plan_tools.ACTIONS_DOC + "\n\n"
         "提交方式：改完调用 validate_plan() → submit()。这是修订轮的执行出口。\n"
         "动手前先判断消息性质：如果它不是修改要求，而是在询问/确认上一轮的情况"
         "（「你重新剪了吗」「成片多长」），调用 ask_user 如实汇报，不要执行。\n"
-        "如果用户提到了具体对象（某个片段/素材/场景），只对那些片段下 op；"
-        "不确定指代（比如「背景音乐」指全局 BGM 还是某视频自带的声音）就先 "
-        "ask_user 确认，不要猜。"
+        "如果用户提到了具体对象（某个片段/素材/场景/「第 N 个素材」），只对"
+        "那些片段下 op；不确定指代（比如「背景音乐」指全局 BGM 还是某视频自带"
+        "的声音、「第 N 个」对应哪个文件）就先 ask_user 确认，不要猜。"
     )
     return [{"role": "user", "content": body}]
 
@@ -806,7 +866,7 @@ def build_answer_brief(pending: dict, answer: str,
         audio = base_plan.get("audio")
         audio_s = json.dumps(audio, ensure_ascii=False) if audio \
             else "（无全局 BGM，原声直通）"
-        listing = "、".join(materials) if materials else "（未知）"
+        listing = _numbered_materials(materials)
         body += (
             "当前会话基线——用户的「修正/重写」一律以此为底稿，"
             "只做用户要求的那几处改动：\n"
@@ -814,7 +874,8 @@ def build_answer_brief(pending: dict, answer: str,
             f"当前版成片：{base_output or '（未知）'}\n"
             "当前计划的片段表：\n" + "\n".join(rows) + "\n"
             f"全局 BGM：{audio_s}\n"
-            f"可用素材：{listing}\n\n"
+            "可用素材（编号清单，用户说「第 N 个素材」即指第 N 项）：\n"
+            f"{listing}\n\n"
             "硬约束：不得更换素材集（除非用户明确要求换素材）；"
             "不得重建整个作品；修不了的点如实说明。\n\n"
         )

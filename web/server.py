@@ -199,13 +199,24 @@ def _guess_kind(name: str) -> str | None:
 
 
 def _list_materials() -> list[str]:
-    """INPUT/ 下可用于剪辑的素材名（跳过 .part 之类的隐藏临时文件）。"""
+    """INPUT/ 下可用于剪辑的素材名（跳过 .part 之类的隐藏临时文件）。
+
+    文件名序是全链路素材编号的唯一来源：/api/inputs 的 index、对话里的
+    「本次可用素材」、agent brief 的编号清单、list_shots 的 [N] 前缀——
+    全部按这里（与 video_agent._material_list 同口径）的顺序从 1 起数。
+    """
     if not os.path.isdir(INPUT_DIR):
         return []
     return sorted(
         n for n in os.listdir(INPUT_DIR)
         if not n.startswith(".") and _guess_kind(n) and os.path.isfile(os.path.join(INPUT_DIR, n))
     )
+
+
+def _material_numbers(materials: list[str]) -> dict[str, int]:
+    """素材名 → 用户可见编号（1 起）。编号唯一来源 = 文件名序，与前端
+    素材库列表渲染顺序同源（/api/inputs 已改为同名序输出 index）。"""
+    return {name: i for i, name in enumerate(materials, 1)}
 
 
 def _safe_name(raw: str) -> str | None:
@@ -221,10 +232,11 @@ def _safe_name(raw: str) -> str | None:
 
 
 def _load_ledger() -> list[str]:
-    """记录哪些 INPUT/ 文件是「网页上传」的——只做 UI 标记（排序靠前、
-    提示文案、粗筛报告来源），不再约束删除与 reset：删除允许任意素材，
-    「启动新任务」整区清空（白名单与磁盘失联时清不掉的教训，见
-    _handle_session_reset）。"""
+    """记录哪些 INPUT/ 文件是「网页上传」的——只做 UI 标记（提示文案、
+    粗筛报告来源），不再约束删除与 reset：删除允许任意素材，「启动新任务」
+    整区清空（白名单与磁盘失联时清不掉的教训，见 _handle_session_reset）。
+    也不再影响列表排序——素材库按文件名序展示，编号（index）才与 agent
+    感知通道一致。"""
     try:
         with open(LEDGER_PATH, encoding="utf-8") as f:
             data = json.load(f)
@@ -658,7 +670,10 @@ def _run_pipeline(task: str, emit, session_id: str | None = None,
             "message": "INPUT/ 里还没有素材。请先在左侧拖入或选择视频/图片，再提交需求。",
         })
         return
-    emit({"type": "materials", "names": materials})
+    # 编号→文件名映射：文件名序（_list_materials）= 前端素材库 index =
+    # brief 编号清单 = list_shots [N] 前缀，四方同一来源，杜绝「第 N 个」错位
+    mat_numbers = _material_numbers(materials)
+    emit({"type": "materials", "names": materials, "numbers": mat_numbers})
 
     session, _restored = _get_session(session_id, task)
     if session.pop("_from_disk", False):
@@ -675,6 +690,10 @@ def _run_pipeline(task: str, emit, session_id: str | None = None,
         return
 
     # ---- V9.0 P3：意图分类车道（仅对已有上下文的会话生效；首轮直通）----
+    # 2026-10-29 改向：ambiguous 车道撤销——它曾把修改要求（「第二个素材
+    # 没有被使用到」）拦在门口回固定话术后 return，静默丢弃。两类错误代价
+    # 不对称：闲聊误放进 agent 只多跑一轮（ask_user 出口现成），修改要求
+    # 误拦则彻底丢失。除 status_question 直答外一律放行进 agent。
     has_ctx = bool(session.get("last_plan") or session.get("pending_question")
                    or (session.get("turn") or 0) > 0)
     if has_ctx:
@@ -682,14 +701,6 @@ def _run_pipeline(task: str, emit, session_id: str | None = None,
         if label == "status_question":
             emit({"type": "status_answer",
                   "text": intent_mod.build_status_answer(session)})
-            return
-        if label == "ambiguous":
-            q = {"type": "question", "kind": "intent_ambiguous",
-                 "question": "这条消息我分不清是新的剪辑要求，还是在问之前的结果。"
-                             "你是想——",
-                 "options": ["提出/修改剪辑需求", "了解上一版成片的情况"]}
-            emit(q)
-            session["pending_question"] = q
             return
 
     # ---- V9.0 P1：闸门拦截后的放行分支（用户确认 → 执行暂存计划）----
@@ -1612,7 +1623,9 @@ class Handler(BaseHTTPRequestHandler):
                     item["analysis_state"] = (
                         _kick_analysis(name) if kind != "audio" else "unsupported")
                     items.append(item)
-            items.sort(key=lambda x: (not x["uploaded"], -x["mtime"]))
+            items.sort(key=lambda x: x["name"])   # 文件名序 = 素材编号序（唯一来源）
+            for i, it in enumerate(items, 1):
+                it["index"] = i
             self._send_json({"inputs": items})
             return
 
