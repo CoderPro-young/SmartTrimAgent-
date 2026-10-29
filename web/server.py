@@ -682,6 +682,19 @@ def _run_pipeline(task: str, emit, session_id: str | None = None,
                       f"上一版成片 {session.get('last_output') or '无'}）。"})
     session["preview"] = bool(preview)   # 预览档位入会话，多轮对话沿用
 
+    # ---- V9.0 P1：闸门拦截后的放行分支（用户确认 → 执行暂存计划）----
+    # 必须排在闲聊闸门/意图分类之前：暂存计划待确认时，下一条消息先过
+    # is_confirm——2026-10-29 实测「确认全局执行」被意图车道抢先、LLM 把
+    # 确认语判成 question 走了状态直答，暂存计划悬死；「确认」二字更会
+    # 被闲聊闸门拦下。is_confirm 不中 ⇒ 用户否了全局方案，回答作为新
+    # 修订要求走下面的正常路径
+    pending_plan = session.pop("pending_plan", None)
+    if pending_plan is not None:
+        if intent_mod.is_confirm(task):
+            if _execute_compiled(pending_plan, emit, session):
+                _commit_compiled(session, task, pending_plan)
+            return
+
     # 规则闸门（零成本拦「一眼没意图」；question 也是 pending_question）
     gate = _intent_gate(task)
     if gate:
@@ -694,23 +707,16 @@ def _run_pipeline(task: str, emit, session_id: str | None = None,
     # 没有被使用到」）拦在门口回固定话术后 return，静默丢弃。两类错误代价
     # 不对称：闲聊误放进 agent 只多跑一轮（ask_user 出口现成），修改要求
     # 误拦则彻底丢失。除 status_question 直答外一律放行进 agent。
+    # 有 pending_question 时跳过分类：此刻的消息是问答接续的「答案」，
+    # 交给 build_answer_brief 续聊——「选方案B」被状态直答 = 流程卡死
     has_ctx = bool(session.get("last_plan") or session.get("pending_question")
                    or (session.get("turn") or 0) > 0)
-    if has_ctx:
+    if has_ctx and not session.get("pending_question"):
         label, _basis = intent_mod.classify(task, has_session=True)
         if label == "status_question":
             emit({"type": "status_answer",
                   "text": intent_mod.build_status_answer(session)})
             return
-
-    # ---- V9.0 P1：闸门拦截后的放行分支（用户确认 → 执行暂存计划）----
-    pending_plan = session.pop("pending_plan", None)
-    if pending_plan is not None:
-        if intent_mod.is_confirm(task):
-            if _execute_compiled(pending_plan, emit, session):
-                _commit_compiled(session, task, pending_plan)
-            return
-        # 不是确认 ⇒ 用户否了全局方案；回答作为新修订要求走下面的正常路径
 
     # ---- 结构保证（2026-10-15 事故）：「先给方案/先别动手」类消息本轮禁止执行 ----
     # ask_user 是合法出口而非硬保证，模型瞬时误判会直接开剪；命中即给 agent
