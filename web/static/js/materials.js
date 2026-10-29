@@ -110,7 +110,7 @@ function matRow(it){
   node.dataset.name = it.name;
   node.title = it.path + (it.uploaded
     ? '（网页上传，「启动新任务」时会自动清除）'
-    : '（手动放置，不会被自动清除，可在此移除）');
+    : '（手动放入，「启动新任务」时同样会清除；也可在此移除）');
 
   let thumb;
   if (it.kind === 'image'){

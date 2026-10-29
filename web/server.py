@@ -221,8 +221,10 @@ def _safe_name(raw: str) -> str | None:
 
 
 def _load_ledger() -> list[str]:
-    """记录哪些 INPUT/ 文件是「网页上传」的——只有这些才允许在界面上删除，
-    避免误删 git 里的示例素材。"""
+    """记录哪些 INPUT/ 文件是「网页上传」的——只做 UI 标记（排序靠前、
+    提示文案、粗筛报告来源），不再约束删除与 reset：删除允许任意素材，
+    「启动新任务」整区清空（白名单与磁盘失联时清不掉的教训，见
+    _handle_session_reset）。"""
     try:
         with open(LEDGER_PATH, encoding="utf-8") as f:
             data = json.load(f)
@@ -1289,15 +1291,17 @@ class Handler(BaseHTTPRequestHandler):
         })
 
     def _handle_session_reset(self, payload: dict) -> None:
-        """「启动新任务」：清掉全部网页上传的素材；旧会话保留在 SESSIONS。
+        """「启动新任务」：清空整个素材区（INPUT/），给新任务干净的工作台。
 
         会话不弹掉：前端历史列表可以切回旧会话继续聊（后端仍有 last_plan /
         多轮上下文），内存由 _get_session 的 20 个惰性上限自然 GC。
-        素材清理的归属不按会话记账：登记只存进程内存（SESSIONS）的话，
-        服务一重启就丢，旧任务的素材便永远清不掉——而 INPUT/ 对 agent 是
-        全局可见的，必须清得掉。因此以 TMP/uploads.json 白名单为准，一次
-        清空其中全部文件；手动放进 INPUT/ 的文件与示例素材不在白名单内，
-        不受影响。单个素材清不掉（被锁等）不阻断其余，errors 里逐条说明。
+        早期只清白名单（TMP/uploads.json，网页上传过的）；但白名单与磁盘
+        会失联（旧版本服务上传、手工挪动、历史状态混乱），一失联旧素材就
+        永远清不掉——用户面对的就是「新任务里还躺着上一次的素材」。而示例
+        素材早已移出 git（INPUT/ 里没有受控文件需要保护），所以改为整区
+        清空：INPUT/ 下的素材文件一律移出，点开头隐藏文件（.gitkeep、上传
+        中的 .part 临时文件）除外。单个素材清不掉（被锁等）不阻断其余，
+        errors 里逐条说明，前端会展示。
         """
         sid = (payload.get("session_id") or "").strip()
         if not sid:
@@ -1308,16 +1312,19 @@ class Handler(BaseHTTPRequestHandler):
             return
         cleared: list[str] = []
         errors: list[str] = []
-        for name in _load_ledger():
-            full = self._resolve_under(INPUT_DIR, name)
-            if not full:
-                continue
-            try:
-                _retire(full, name)
-                cleared.append(name)
-            except Exception as exc:     # 宽捕获：一个失败不拖垮整组
-                errors.append(f"{name}: {exc}")
-            _PROBE_CACHE.pop(full, None)
+        if os.path.isdir(INPUT_DIR):
+            for name in sorted(os.listdir(INPUT_DIR)):
+                if name.startswith("."):
+                    continue              # .gitkeep / 上传中的 .part 临时文件
+                full = os.path.join(INPUT_DIR, name)
+                if not os.path.isfile(full):
+                    continue
+                try:
+                    _retire(full, name)
+                    cleared.append(name)
+                except Exception as exc:  # 宽捕获：一个失败不拖垮整组
+                    errors.append(f"{name}: {exc}")
+                _PROBE_CACHE.pop(full, None)
         if cleared:
             gone = set(cleared)
             _save_ledger([n for n in _load_ledger() if n not in gone])
@@ -1328,9 +1335,9 @@ class Handler(BaseHTTPRequestHandler):
 
         早期只允许删网页上传的（白名单），后来示例素材基本移出 git、
         且真删了也能从 git 历史恢复（git ls-files INPUT/ 仅剩 sample.mp4），
-        一刀切保护反而让手动放进来的素材在界面上清不掉。白名单只用于
-        reset 语义：不在名单里的（手动放置的）不会被「启动新任务」自动
-        清除，但仍可在这里手动删。
+        一刀切保护反而让手动放进来的素材在界面上清不掉。白名单现在只做
+        UI 标记（排序/提示/粗筛来源）；「启动新任务」也不再以它为界，
+        而是整区清空 INPUT/（见 _handle_session_reset）。
 
         真删还是移到 TMP/removed/ 由 _retire 决定，响应里的 mode 会告诉前端。
         """

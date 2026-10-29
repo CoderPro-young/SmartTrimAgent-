@@ -299,10 +299,17 @@ function initTabs(){
 /* ---------- 启动新任务 ---------- */
 async function newTask(){
   if (busy) return;
+  materials.clearSelected();       // 先停预览拉流：Windows 上被打开的文件 reset 删不掉
   const { ok, status, json } = await postJSON('/api/session/reset', { session_id: sessionId });
   if (!ok){
     chat.addError('启动新任务失败：' + (json.error || ('HTTP ' + status)) + '，当前会话保持不变。');
     return;
+  }
+  if (json.errors && json.errors.length){
+    chat.addError('部分素材没清掉（多半被播放器占用，关掉后可手动 × 移除）：\n'
+      + json.errors.join('\n'));
+  } else if (json.cleared && json.cleared.length){
+    chat.addSys(`已清掉上一次的 ${json.cleared.length} 个素材。`, false);
   }
   /* 旧会话就地归档（对话与成品留在历史列表），后端会话上下文也保留，可随时切回 */
   sessionId = _newSessionId();
@@ -318,8 +325,7 @@ async function newTask(){
   pipeline.renderPlan(null);
   $('#replanBtn').disabled = true;
   shots.hideAnalysis();
-  materials.clearSelected();
-  materials.loadInputs();          // reset 已清掉网页上传的素材，重拉列表
+  materials.loadInputs();          // reset 已清空素材区，重拉列表
 
   chat.setTranscript([{ k: 'sys', t: WELCOME }]);   // 触发 onChange → 空会话不落盘
   sess.pruneEmpty();                // 顺手清掉没有内容的历史会话
