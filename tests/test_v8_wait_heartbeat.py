@@ -105,13 +105,23 @@ def main():
     check("t4 返回 ChatOpenAI", isinstance(m, ChatOpenAI))
     check("t5 MODEL_TIMEOUT 环境变量生效", float(m.request_timeout) == 7.5,
           f"request_timeout={m.request_timeout}")
-    check("t6 max_retries 默认 2", m.max_retries == 2, f"max_retries={m.max_retries}")
+    # 2026-10-28 链测定性后收紧：SDK 静默重试 2→1（旧 180s×3=541.6s 纯等待）
+    check("t6 max_retries 默认 1", m.max_retries == 1, f"max_retries={m.max_retries}")
 
     model2 = _load("st_model_wait2", "model.py",
-                   env={"SILICONFLOW_API_KEY": "test-key"})   # 不配则用默认 180s
+                   env={"SILICONFLOW_API_KEY": "test-key"})  # 不配则流式默认 60s
     m2 = model2.get_model()
-    check("t7 默认超时 180s", float(m2.request_timeout) == 180.0,
-          f"request_timeout={m2.request_timeout}")
+    check("t7 默认超时 60s（流式语义：按 chunk 间隔计）",
+          float(m2.request_timeout) == 60.0 and m2.streaming is True,
+          f"request_timeout={m2.request_timeout} streaming={m2.streaming}")
+
+    # 回滚杆：MODEL_STREAMING=0 恢复非流式，timeout 默认值自动回 180s
+    model3 = _load("st_model_wait3", "model.py",
+                   env={"SILICONFLOW_API_KEY": "test-key", "MODEL_STREAMING": "0"})
+    m3 = model3.get_model()
+    check("t7b MODEL_STREAMING=0 回滚（180s + 非流式）",
+          float(m3.request_timeout) == 180.0 and m3.streaming is False,
+          f"request_timeout={m3.request_timeout} streaming={m3.streaming}")
 
     print(f"\n通过 {PASS} / 失败 {FAIL}")
     sys.exit(1 if FAIL else 0)

@@ -153,6 +153,7 @@ materials.setMaterialsCallback(has => {
 
 /* ---------- 等待指示（后端 heartbeat 驱动：LLM/渲染静默期可见） ---------- */
 let waitTicker = null, waitBase = { idle: 0, at: 0 };
+let llmStreaming = false;   // 后端 llm_first_token 事件置位：首 chunk 已到，是慢生成不是挂死
 
 function markWaiting(idle){
   if (!(idle >= 5)) return;                       // 短暂间隙不闪条
@@ -165,9 +166,12 @@ function paintWaiting(){
   $('#waitBar').classList.toggle('slow', s >= 60);
   $('#waitText').textContent = s >= 60
     ? `后端响应偏慢 · 已等待 ${Math.floor(s)}s（请求超时会自动重试，也可点「取消」）`
-    : `模型响应中 · 已等待 ${Math.floor(s)}s`;
+    : llmStreaming
+      ? `模型生成中 · 已等待 ${Math.floor(s)}s（token 持续到达）`
+      : `模型响应中 · 已等待 ${Math.floor(s)}s`;
 }
 function clearWaiting(){
+  llmStreaming = false;
   $('#waitBar').hidden = true;
   if (waitTicker){ clearInterval(waitTicker); waitTicker = null; }
 }
@@ -192,6 +196,8 @@ function handleEvent(ev){
       else chat.addSys('正在分析素材并生成编辑计划…', true);
       break;
     case 'materials': chat.addSys('本次可用素材：' + ev.names.join('、'), false); break;
+    case 'llm_first_token':                          // L2/L3：该请求首 chunk 已到（chunk 持续流动 = 慢生成，非挂死）
+      llmStreaming = true; markWaiting(5); break;    // 重挂等待条，文案切「生成中」
     case 'llm':      chat.addAssistant(ev.text, ev.tool_calls); break;
     case 'plan':     pipeline.renderPlan(ev.plan, { editable: false }); break;
     case 'exec_plan':
