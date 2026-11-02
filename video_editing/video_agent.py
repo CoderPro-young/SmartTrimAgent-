@@ -23,6 +23,7 @@ from langgraph.graph.state import CompiledStateGraph
 
 import content_analysis
 import ffmpeg_exec
+import perf_trace      # 仓库根埋点（本模块已依赖根目录的 model，同一寻径前提）
 import plan_compiler
 import plan_dialect
 import plan_schema
@@ -294,13 +295,23 @@ Call `ask_user` INSTEAD of submitting when ANY of these holds:
 - The message asks ABOUT previous work rather than requesting a NEW edit —
   report the facts you were given and ask whether any change is wanted.
 - The target material is ambiguous ("that video" while INPUT/ holds several).
-- The request needs a capability that is not in the effect list — say so
-  honestly and offer the closest alternative.
+- The request needs a capability that is not in the tool surface (an effect
+  that doesn't exist, or per-object behavior the ops cannot express, e.g.
+  "blur only the person in the background" / "slow down just the chorus")
+  — do NOT improvise a compromise and do NOT describe options in plain text:
+  call `ask_user` with the honest limitation plus 2-3 closest expressible
+  alternatives, and wait.
 - The probed facts show the request exceeds the material ("the first 50
   seconds" but the clip is 12s) — do NOT hard-clamp and do NOT fabricate
   numbers; report the real duration and offer options.
 
 `ask_user` and `submit()` are mutually exclusive — pick exactly one per turn.
+A question written as plain chat text is NOT a question: the UI only renders
+a choice card for an `ask_user` tool call, and a text-only turn that submits
+nothing counts as a failure (auto-retry). If you catch yourself writing a
+question, options, or "I will assume X" in your reply text — STOP and put it
+through `ask_user` instead. Never decide an ambiguous or inexpressible
+request by yourself; deciding silently is a bug, not initiative.
 
 ## Probe field
 
@@ -738,7 +749,9 @@ def _retry_feedback(task: str, plan: dict | None, errors: list[str],
                 "（select/workflow 宏任务用 submit_plan）；"
                 "如果你其实想向用户提问或汇报情况（比如这条消息并不是修改要求，"
                 "而是在询问上一轮做了什么），就调用 ask_user——两种都算完成任务"
-                "（若上次是调用出错，忽略它重新尝试即可）。\n\n"
+                "（若上次是调用出错，忽略它重新尝试即可）。"
+                "注意：上一轮如果是在普通文本里向用户提问、没有调用工具，那次提问"
+                "用户根本看不到（没有选择卡片）；这次要问就调用 ask_user 工具。\n\n"
                 "失败详情：\n- " + "\n- ".join(errors))
     else:
         body = (
@@ -889,6 +902,10 @@ def build_answer_brief(pending: dict, answer: str,
         "（如「说说你的方案」「给我一个替代方案」「先别动手」），"
         "必须调用 ask_user 把方案、改动范围和副作用讲清楚，等用户确认后再提交——"
         "不要在同一次回复里既解释又直接剪辑。"
+        "如果你发现用户的请求在现有 op 上根本表达不出来（比如想对某几个片段"
+        "单独控制某个能力而工具没有对应字段），必须调用 ask_user 给出 2-3 个"
+        "可表达的替代方案让用户选，禁止在文本里描述方案后自行决定提交。"
+        "文本提问不会生成选择卡片，用户看不到——凡是要问，一律走 ask_user 工具。"
     )
     return [{"role": "user", "content": body}]
 
@@ -988,26 +1005,30 @@ def plan_with_retry(task: str, project_root: str, invoke, emit,
     for attempt in range(max_retries + 1):
         emit({"type": "attempt", "n": attempt + 1, "max": max_retries + 1})
 
-        # ① 调模型（异常也转入统一的失败处理）
-        plan: dict | None = None
-        errors: list[str] | None = None
-        try:
-            result = invoke(messages)
-            # V12：draft 工具构建（submit() 提交）；模型仍调 submit_plan 时
-            # 走 legacy 一次性路径（select/workflow 宏）
-            plan = plan_tools.take_submitted()
-            if plan is None:
-                plan = extract_plan(result)
-            if plan is not None:
-                # probe 自动回填（「引用代替誊抄」）：真实探针覆盖模型手抄值
-                n_probe = _autofill_probe(plan, project_root, probe_fn)
-                if n_probe:
-                    emit({"type": "status",
-                          "text": f"已用真实探针回填 {n_probe} 个片段的 probe 字段。"})
-        except Exception as exc:
-            plan = None
-            errors = [f"调用模型失败（{type(exc).__name__}）：{str(exc)[:300]}"]
-            emit({"type": "error", "message": errors[0]})
+        # ① 调模型（异常也转入统一的失败处理）。埋点：每次 attempt 一条
+        # stage span（LLM 每次请求的 llm span 会嵌在里面，agent 内的
+        # analyze_media / ffmpeg 同理）
+        with perf_trace.span(f"agent_attempt#{attempt + 1}", kind="stage",
+                             attempt=attempt + 1):
+            plan: dict | None = None
+            errors: list[str] | None = None
+            try:
+                result = invoke(messages)
+                # V12：draft 工具构建（submit() 提交）；模型仍调 submit_plan 时
+                # 走 legacy 一次性路径（select/workflow 宏）
+                plan = plan_tools.take_submitted()
+                if plan is None:
+                    plan = extract_plan(result)
+                if plan is not None:
+                    # probe 自动回填（「引用代替誊抄」）：真实探针覆盖模型手抄值
+                    n_probe = _autofill_probe(plan, project_root, probe_fn)
+                    if n_probe:
+                        emit({"type": "status",
+                              "text": f"已用真实探针回填 {n_probe} 个片段的 probe 字段。"})
+            except Exception as exc:
+                plan = None
+                errors = [f"调用模型失败（{type(exc).__name__}）：{str(exc)[:300]}"]
+                emit({"type": "error", "message": errors[0]})
 
         # ② 三分流：ask_user / 素材不匹配 / 编译
         if errors is None:
@@ -1035,8 +1056,9 @@ def plan_with_retry(task: str, project_root: str, invoke, emit,
                 _guard_overwrite(plan, base_output, output_suffix, quality,
                                  emit, history_outputs=history_outputs)
                 # Preflight Tier 2：素材现实 × 计划要求（v3 走方言层降级）
-                mismatches = plan_dialect.check_material_fit_any(
-                    plan, project_root, probe_fn=probe_fn)
+                with perf_trace.span("preflight", kind="stage"):
+                    mismatches = plan_dialect.check_material_fit_any(
+                        plan, project_root, probe_fn=probe_fn)
                 for w in (m for m in mismatches if m.level == "warn"):
                     emit({"type": "hallucination", "level": "warn",
                           "signal": w.type, "evidence": w.message})

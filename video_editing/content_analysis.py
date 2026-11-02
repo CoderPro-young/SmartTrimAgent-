@@ -19,15 +19,19 @@
 from __future__ import annotations
 
 import base64
+import contextvars
 import hashlib
 import json
 import math
 import os
 import re
+import threading
+import time
 from collections import Counter
 from datetime import datetime
 
 import ffmpeg_exec
+import perf_trace      # 仓库根埋点（本模块已依赖根目录的 model，同一寻径前提）
 import signal_detection
 import transnet
 from model import get_vlm_model
@@ -465,7 +469,8 @@ def tag_shots(shots: list[dict], frames_b64: list[str], model, name: str = "",
 
     frames_b64 与 shots 一一对应。永远不抛异常——打标失败是降级不是错误。
     批次间并发（V7 性能优化，参考 FireRed 实测：串行 VLM 是最大瓶颈，
-    见其 docs/性能瓶颈分析与优化建议.md P0）：默认 4 路，环境变量
+    见其 docs/性能瓶颈分析与优化建议.md P0）：默认 2 路（V3，2026-11-01 起，
+    原默认 4 路在预热+任务内同跑时会撞 429），环境变量
     VLM_CONCURRENCY 可调；进度按批号上报（乱序完成时单调递增）。
     """
     from concurrent.futures import ThreadPoolExecutor
@@ -477,37 +482,60 @@ def tag_shots(shots: list[dict], frames_b64: list[str], model, name: str = "",
 
     def tag_batch(bi: int, idxs: list[int]):
         frames = [frames_b64[i] for i in idxs]
-        labels = _tag_once(model, frames)
+        labels = _tag_once_traced(model, frames, name, bi, 1)
         if labels is None:
-            labels = _tag_once(model, frames)       # 重试一次
+            labels = _tag_once_traced(model, frames, name, bi, 2)   # 重试一次
         return bi, idxs, labels
 
     try:
-        workers = max(1, int(os.environ.get("VLM_CONCURRENCY", "4")))
+        # 默认 2 路（perf 待办 V3，2026-11-01）：预热+任务内同跑时 4+4=8 路
+        # 必撞 SiliconFlow TPM（OpenAIRateLimitError 实录 ×2）；批内省下的
+        # 时间抵不过 429 整批重试。VLM_CONCURRENCY 可显式调回。
+        workers = max(1, int(os.environ.get("VLM_CONCURRENCY", "2")))
     except ValueError:
-        workers = 4
+        workers = 2
     workers = min(workers, max(1, len(batches)))
 
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        # as_completed：进度条按完成数递增（不受批间快慢影响）
-        pending = [ex.submit(tag_batch, bi, idxs)
-                   for bi, idxs in enumerate(batches)]
-        done = 0
-        by_batch: dict[int, tuple] = {}
-        for fut in _as_completed(pending):
-            bi, idxs, labels = fut.result()
-            by_batch[bi] = (idxs, labels)
-            done += 1
-            _report(stage="tag", file=name, done=done, total=len(batches))
-        for bi in sorted(by_batch):
-            idxs, labels = by_batch[bi]
-            if labels is None or len(labels) != len(idxs):
-                for i in idxs:
-                    shots[i]["tag_failed"] = True
-                continue
-            for k, i in enumerate(idxs):
-                shots[i]["label"] = sanitize_label(labels[k])
-    _report(stage="tag", file=name, done=len(batches), total=len(batches))
+    with perf_trace.span("vlm_tag_shots", kind="stage", file=name,
+                         n_shots=len(shots), batches=len(batches),
+                         workers=workers):
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            # as_completed：进度条按完成数递增（不受批间快慢影响）
+            # ThreadPoolExecutor 不继承 contextvars，显式拷贝传播——否则工作
+            # 线程里的 vlm/llm/ffmpeg span 会丢（埋点断链）
+            pending = []
+            for bi, idxs in enumerate(batches):
+                ctx = contextvars.copy_context()
+                pending.append(ex.submit(ctx.run, tag_batch, bi, idxs))
+            done = 0
+            by_batch: dict[int, tuple] = {}
+            for fut in _as_completed(pending):
+                bi, idxs, labels = fut.result()
+                by_batch[bi] = (idxs, labels)
+                done += 1
+                _report(stage="tag", file=name, done=done, total=len(batches))
+            for bi in sorted(by_batch):
+                idxs, labels = by_batch[bi]
+                if labels is None or len(labels) != len(idxs):
+                    for i in idxs:
+                        shots[i]["tag_failed"] = True
+                    continue
+                for k, i in enumerate(idxs):
+                    shots[i]["label"] = sanitize_label(labels[k])
+        _report(stage="tag", file=name, done=len(batches), total=len(batches))
+
+
+def _tag_once_traced(model, frames_b64: list[str], name: str,
+                     bi: int, attempt: int) -> list | None:
+    """_tag_once 的埋点壳：单批一条 vlm span（批号/帧数/第几次尝试/成败）。
+    VLM 客户端也是 StreamingChatOpenAI，模型层的 llm span 会嵌在本 span 内
+    （时长几乎相同属预期——打标请求就是一次 LLM 调用）。"""
+    with perf_trace.span(f"vlm_batch#{bi}", kind="vlm", file=name,
+                         n_frames=len(frames_b64), attempt=attempt) as s:
+        labels = _tag_once(model, frames_b64)
+        if s is not None:
+            s.meta["ok"] = labels is not None
+        return labels
 
 
 def _as_completed(futures):
@@ -546,6 +574,54 @@ def build_summary(shots: list[dict], duration, signals: dict | None = None) -> s
 
 # ----------------------------------------------------------- 编排入口 ---- #
 
+# ---- V2 双路去重（perf 待办，2026-11-01）：上传预热与任务内 analyze_media
+# 可能同时分析同一素材——两边各 4 路（现默认 2 路）VLM 并发撞 429，同一素材
+# 被完整烧两遍（63a156 实测：预热 1011s + 任务内重算 1457s）。分析注册表按
+# 绝对路径记「在途」，后来者等先到者收尾后重入——先到者成功则直接命中缓存，
+# 失败则自己成为新的 owner 重算（失败不传染）。
+_INFLIGHT_LOCK = threading.Lock()
+_INFLIGHT: dict[str, threading.Event] = {}
+_INFLIGHT_WAIT_TIMEOUT = float(os.environ.get("INFLIGHT_ANALYZE_TIMEOUT", "1500"))
+
+# ---- 感知层并发上限（A2 真因修复，2026-11-01）：agent 一轮并行调 6 个
+# analyze_media 时，6 路解码 + TransNet CPU 推理 + VLM 上传互相争抢，单笔
+# detect_av 从 ~1s 被放大到 104.7s（组 2 t0 实测，争抢系数 ~100）。本机
+# 2.5K HEVC 软解实测 555fps（8bit）/333fps（10bit）——瓶颈从来不是解码，
+# 是并行度。信号量把感知层重管线限到 2 路；总墙钟反而更短（串行求和 <
+# 争抢放大的并行），且 VLM 请求密度同步下降（429 压力随之缓解）。
+_ANALYZE_PARALLELISM = max(1, int(os.environ.get("ANALYZE_PARALLELISM", "2")))
+_ANALYZE_SEM = threading.Semaphore(_ANALYZE_PARALLELISM)
+
+
+def _inflight_key(path: str, project_root: str) -> str:
+    rel = (path or "").replace("\\", "/").strip()
+    return os.path.normcase(os.path.abspath(os.path.join(project_root, rel)))
+
+
+def _inflight_acquire(key: str) -> tuple[threading.Event, float]:
+    """阻塞直到拿到该素材的「分析权」。恒以 owner 身份返回（等待方醒来后
+    重抢锁），返回 (event, 等待秒数)——等待期间先到者已完成，重入 impl 会
+    先查 sidecar 缓存，命中即零成本返回。"""
+    waited0 = time.perf_counter()
+    while True:
+        with _INFLIGHT_LOCK:
+            ev = _INFLIGHT.get(key)
+            if ev is None:
+                ev = threading.Event()
+                _INFLIGHT[key] = ev
+                return ev, time.perf_counter() - waited0
+        # 已有在途分析：等它收尾（成功落盘/失败退出）再重抢，不并排重算。
+        # 超时兜底：对方挂死也不无限等，超时后照抢（最坏回到双路并行的旧行为）。
+        ev.wait(timeout=_INFLIGHT_WAIT_TIMEOUT)
+
+
+def _inflight_release(key: str, ev: threading.Event) -> None:
+    with _INFLIGHT_LOCK:
+        if _INFLIGHT.get(key) is ev:
+            del _INFLIGHT[key]
+    ev.set()                     # 唤醒所有等待者去重抢/读缓存
+
+
 def analyze_media(path: str, project_root: str, *, model=None, run_fn=None,
                   probe_fn=None, transnet_hook=None,
                   run_binary_fn=None) -> dict:
@@ -555,7 +631,41 @@ def analyze_media(path: str, project_root: str, *, model=None, run_fn=None,
     run_fn（假 ffmpeg）/ probe_fn（假 ffprobe）/ transnet_hook + run_binary_fn
     （假 TransNet 复核，V7.9）。失败从不抛出——返回 {"error": ...} 或带
     degradations 的降级卡片，保证 analyze_media 工具永远有结构化返回。
+
+    埋点壳：实现原样移入 _analyze_media_impl，这里只记一条 stage span
+    （src / cached / error_card / waited_inflight_s），观测不改行为。
+    V2：同素材并发分析在这里去重（等待方记录 waited_inflight_s）。
     """
+    key = _inflight_key(path, project_root)
+    ev, waited_s = _inflight_acquire(key)
+    sem0 = time.perf_counter()
+    _ANALYZE_SEM.acquire()           # 并发上限：等待期不占名额（先去重再排队）
+    sem_waited = time.perf_counter() - sem0
+    try:
+        with perf_trace.span("analyze_media", kind="stage",
+                             src=(path or "").rsplit("/", 1)[-1] or "?",
+                             **{k: round(v, 1) for k, v in
+                                (("waited_inflight_s", waited_s),
+                                 ("waited_sem_s", sem_waited)) if v >= 0.05}) as _s:
+            card = _analyze_media_impl(path, project_root, model=model,
+                                       run_fn=run_fn, probe_fn=probe_fn,
+                                       transnet_hook=transnet_hook,
+                                       run_binary_fn=run_binary_fn)
+            if _s is not None and isinstance(card, dict):
+                if card.get("error"):
+                    _s.meta["error_card"] = str(card["error"])[:120]
+                elif card.get("cached"):
+                    _s.meta["cached"] = True
+            return card
+    finally:
+        _ANALYZE_SEM.release()
+        _inflight_release(key, ev)
+
+
+def _analyze_media_impl(path: str, project_root: str, *, model=None,
+                        run_fn=None, probe_fn=None, transnet_hook=None,
+                        run_binary_fn=None) -> dict:
+    """analyze_media 的实现（埋点壳的内层），行为与原版完全一致。"""
     rel = (path or "").replace("\\", "/").strip()
     full = os.path.join(project_root, rel)
     name = rel.rsplit("/", 1)[-1]

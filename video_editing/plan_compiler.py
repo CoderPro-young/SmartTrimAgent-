@@ -12,6 +12,7 @@ LLM 只产出意图（计划 JSON），本模块把意图变成确定性的命�
 
 from __future__ import annotations
 
+import contextvars
 import copy
 import json
 import os
@@ -22,6 +23,16 @@ import ffmpeg_exec
 import signal_detection
 from plan_schema import clip_duration, time_scale_of, validate_plan
 from skills import is_prepass, is_vf, get_skill, original_mode
+
+try:
+    # 埋点模块在仓库根；sys.path 无仓库根的独立环境下静默降级为 no-op
+    import perf_trace
+except ImportError:         # pragma: no cover
+    from contextlib import nullcontext
+    import types as _types
+    perf_trace = _types.ModuleType("perf_trace")
+    perf_trace.current = lambda: None
+    perf_trace.span = lambda *a, **k: nullcontext()
 
 FONT_PATH = "C:/Windows/Fonts/msyh.ttc"
 # ffmpeg 的 filtergraph 用 ':' 分隔选项，Windows 路径里的盘符冒号必须转义，
@@ -1495,24 +1506,32 @@ def compile_plan(plan: dict, project_root: str, quality: str = "final") -> Compi
     """
     import plan_dialect
 
-    raw_plan = copy.deepcopy(plan)       # R11：提交语义快照（存档/修订底稿）
-    if plan_dialect.is_v3(plan):
-        plan = plan_dialect.to_internal(plan)
-    errors = validate_plan(plan, project_root)
-    if errors:
-        raise CompileError(plan_dialect._rewrite_msgs(errors)
-                           if plan_dialect.is_v3(raw_plan) else errors)
-    plan, expansions = _expand_plan(plan, project_root)
-    math = _derive(plan)
-    _apply_quality(math, quality)
-    _apply_captions(plan, math)          # smart_create 文案 → 字幕 overlay
-    norm_cmds, norm_sidecars, norm_paths = _normalize_commands(plan, math, project_root)
-    math["norm_paths"] = norm_paths      # 渲染段按内容寻址路径引用归一化产物
-
-    if _has_transition(plan):
-        render_cmds, render_sidecars = _render_with_transition(plan, math)
-    else:
-        render_cmds, render_sidecars = _render_no_transition(plan, math)
+    # 埋点：外层 compile_plan + 各子阶段。expand 内可能藏着旁白/文案/BGM 的
+    # LLM 调用（workflow 宏路径），它们作为 llm span 嵌在 compile_expand 里。
+    with perf_trace.span("compile_plan", kind="stage", quality=quality):
+        raw_plan = copy.deepcopy(plan)       # R11：提交语义快照（存档/修订底稿）
+        if plan_dialect.is_v3(plan):
+            plan = plan_dialect.to_internal(plan)
+        with perf_trace.span("compile_validate", kind="stage"):
+            errors = validate_plan(plan, project_root)
+            if errors:
+                raise CompileError(plan_dialect._rewrite_msgs(errors)
+                                   if plan_dialect.is_v3(raw_plan) else errors)
+        with perf_trace.span("compile_expand", kind="stage"):
+            plan, expansions = _expand_plan(plan, project_root)
+        with perf_trace.span("compile_derive", kind="stage"):
+            math = _derive(plan)
+            _apply_quality(math, quality)
+            _apply_captions(plan, math)          # smart_create 文案 → 字幕 overlay
+        with perf_trace.span("compile_norm_cmds", kind="stage"):
+            norm_cmds, norm_sidecars, norm_paths = _normalize_commands(
+                plan, math, project_root)
+            math["norm_paths"] = norm_paths      # 渲染段按内容寻址路径引用归一化产物
+        with perf_trace.span("compile_render_cmds", kind="stage"):
+            if _has_transition(plan):
+                render_cmds, render_sidecars = _render_with_transition(plan, math)
+            else:
+                render_cmds, render_sidecars = _render_no_transition(plan, math)
 
     sidecars = {**norm_sidecars, **render_sidecars}
     return CompileResult(
@@ -1732,7 +1751,17 @@ def execute(result: CompileResult, project_root: str, should_stop=None) -> Compi
     多片段任务不再串行逐条编码）；render 阶段依赖前序产物，保持串行。
     should_stop() 返回 True 时在命令边界抛 Cancelled（Web 取消按钮用；
     ffmpeg 进程本身由 ffmpeg_exec.kill_all() 硬终止，这里是软检查点）。
+
+    埋点壳：实现移入 _execute_impl（precheck 与三批命令各有子 span，
+    单条命令的耗时由 ffmpeg_exec 层的 ffmpeg span 承载）。
     """
+    with perf_trace.span("execute", kind="stage", n_cmds=len(result.commands)):
+        return _execute_impl(result, project_root, should_stop=should_stop)
+
+
+def _execute_impl(result: CompileResult, project_root: str,
+                  should_stop=None) -> CompileResult:
+    """execute 的实现（埋点壳的内层），行为与原版完全一致。"""
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     os.makedirs(os.path.join(project_root, "TMP", "norm"), exist_ok=True)
@@ -1740,7 +1769,8 @@ def execute(result: CompileResult, project_root: str, should_stop=None) -> Compi
         with open(os.path.join(project_root, path), "w", encoding="utf-8") as f:
             f.write(content)
     # drawtext 的 textfile 是 sidecar，所以预检必须在写完 sidecar 之后
-    precheck(result, project_root)  # 失败抛 CompileError，命令一条都不会真跑
+    with perf_trace.span("precheck", kind="stage"):
+        precheck(result, project_root)  # 失败抛 CompileError，命令一条都不会真跑
 
     def run_one(c: Command) -> dict:
         if should_stop is not None and should_stop():
@@ -1761,25 +1791,31 @@ def execute(result: CompileResult, project_root: str, should_stop=None) -> Compi
     def run_batch(batch: list[Command], offset: int) -> None:
         if not batch:
             return
-        with ThreadPoolExecutor(max_workers=min(2, len(batch))) as ex:
-            futures = {ex.submit(run_one, c): offset + i
-                       for i, c in enumerate(batch)}
-            cancelled: Cancelled | None = None
-            for fut in as_completed(futures):
-                i = futures[fut]
-                try:
-                    done[i] = fut.result()
-                except Cancelled as exc:
-                    cancelled = cancelled or exc
-            if cancelled is not None:
-                # 已完成的照常入账，再统一抛取消
-                result.executes = [done[i] for i in sorted(done)]
-                raise cancelled
+        label = "exec_detect" if offset == 0 else "exec_normalize"
+        with perf_trace.span(label, kind="stage", n=len(batch)):
+            with ThreadPoolExecutor(max_workers=min(2, len(batch))) as ex:
+                # 线程池不继承 contextvars，显式拷贝传播（埋点断链防护）
+                futures = {}
+                for i, c in enumerate(batch):
+                    ctx = contextvars.copy_context()
+                    futures[ex.submit(ctx.run, run_one, c)] = offset + i
+                cancelled: Cancelled | None = None
+                for fut in as_completed(futures):
+                    i = futures[fut]
+                    try:
+                        done[i] = fut.result()
+                    except Cancelled as exc:
+                        cancelled = cancelled or exc
+                if cancelled is not None:
+                    # 已完成的照常入账，再统一抛取消
+                    result.executes = [done[i] for i in sorted(done)]
+                    raise cancelled
 
     run_batch(detects, 0)
     run_batch(norms, len(detects))
-    for i, c in enumerate(renders):
-        done[len(detects) + len(norms) + i] = run_one(c)
+    with perf_trace.span("exec_render", kind="stage", n=len(renders)):
+        for i, c in enumerate(renders):
+            done[len(detects) + len(norms) + i] = run_one(c)
     result.executes = [done[i] for i in sorted(done)]
     return result
 

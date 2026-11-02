@@ -7,10 +7,21 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import shutil
 import subprocess
 import threading
+
+try:
+    # 埋点模块在仓库根；sys.path 无仓库根的独立环境下静默降级为 no-op
+    import perf_trace
+except ImportError:         # pragma: no cover
+    from contextlib import nullcontext
+    import types as _types
+    perf_trace = _types.ModuleType("perf_trace")
+    perf_trace.current = lambda: None
+    perf_trace.span = lambda *a, **k: nullcontext()
 
 FFMPEG_TIMEOUT = 600
 
@@ -40,7 +51,26 @@ def kill_all() -> int:
 def _run_tracked(argv: list[str], timeout: int, cwd: str | None,
                  text: bool = True) -> dict:
     """text=True 时 stdout/stderr 是 str（showinfo 解析等）；False 时 stdout 为
-    bytes（rawvideo 管道解码，transnet.py 用）。两者同样登记进 _PROCS。"""
+    bytes（rawvideo 管道解码，transnet.py 用）。两者同样登记进 _PROCS。
+
+    埋点：每条子进程一条 ffmpeg span（ffprobe 同类，name = 可执行文件名）。
+    run/run_binary/probe 全部收敛到这里，无需各自埋。"""
+    tr = perf_trace.current()
+    if tr is None:
+        return _run_tracked_raw(argv, timeout, cwd, text)
+    span = tr.span(os.path.basename(argv[0]) if argv else "?", kind="ffmpeg",
+                   cmd=" ".join(str(a) for a in argv)[:240])
+    with span as s:
+        res = _run_tracked_raw(argv, timeout, cwd, text)
+        if s is not None:
+            s.meta["ok"] = bool(res.get("ok"))
+            s.meta["rc"] = res.get("returncode")
+        return res
+
+
+def _run_tracked_raw(argv: list[str], timeout: int, cwd: str | None,
+                     text: bool = True) -> dict:
+    """原 _run_tracked 实现（埋点壳的内层）。"""
     proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             text=text, cwd=cwd)
     with _PROC_LOCK:

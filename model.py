@@ -13,6 +13,7 @@ Returns a LangChain `BaseChatModel` ready to pass to `create_deep_agent`.
 from __future__ import annotations
 
 import os
+import time
 from typing import Callable
 
 from dotenv import load_dotenv
@@ -23,6 +24,20 @@ from langchain_openai import ChatOpenAI
 # 加载项目根目录的 .env（AK / LangSmith 等配置，模板见 .env.example）。
 # 已存在的环境变量不会被覆盖，所以命令行 export 的值优先于 .env。
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+
+try:
+    # 埋点模块在仓库根；sys.path 无仓库根的独立环境下静默降级为 no-op
+    import perf_trace
+except ImportError:         # pragma: no cover
+    from contextlib import nullcontext
+    import types as _types
+    perf_trace = _types.ModuleType("perf_trace")
+    perf_trace.current = lambda: None
+    perf_trace.span = lambda *a, **k: nullcontext()
+    perf_trace.event = lambda *a, **k: None
+    perf_trace.start = lambda *a, **k: None
+    perf_trace.set_ctx = lambda **k: None
+    perf_trace.finish_current = lambda *a, **k: None
 
 # ------------------- 超时 / 重试 / 流式（2026-10-28 链测定性后收紧） -------- #
 # 历史：2026-10-11 加了单请求超时（180s）+ SDK 重试 2 次；2026-10-28 链测
@@ -53,8 +68,13 @@ VLM_RETRIES = int(os.environ.get("VLM_RETRIES", "1"))
 # 输出预算占满整个窗口 → 打标请求 100% 被 400 拒绝。显式设小后 prompt 才有
 # 可用空间。打标输出只是几百 token 的 JSON，8192 富余；主模型留更大余量给
 # 长计划 + 推理。注意在 load_dotenv 之后取值。
+_DISABLE_SET = {"0", "false", "off", "no", ""}
 MODEL_MAX_TOKENS = int(os.environ.get("MODEL_MAX_TOKENS", "16384"))
 VLM_MAX_TOKENS = int(os.environ.get("VLM_MAX_TOKENS", "8192"))
+# VLM thinking 开关（perf 待办 V1）。GLM-4.5V 这类混合推理模型默认开 thinking，
+# 打标请求实测会把 63k token 的思考预算烧满（961s/笔还失败，max_tokens 管不住）；
+# 打标只要几百 token 的结构化 JSON，默认关。VLM_THINKING=1 可改回开启对照。
+VLM_THINKING = os.environ.get("VLM_THINKING", "0") not in _DISABLE_SET
 
 
 # ----------------------- 流式客户端（L2 核心） ------------------------------ #
@@ -77,6 +97,27 @@ def add_stream_hook(fn: Callable[[], None]) -> Callable[[], None]:
     return _remove
 
 
+def _prompt_size(messages) -> tuple[int, int]:
+    """粗估请求体量：(文本字符数, 图片张数)。base64 图片不计入字符数——
+    计入会让 prompt_chars 虚高几个数量级，失去参考价值；张数单列。"""
+    chars = 0
+    images = 0
+    for m in messages or []:
+        c = getattr(m, "content", "")
+        if isinstance(c, str):
+            chars += len(c)
+        elif isinstance(c, list):
+            for b in c:
+                if isinstance(b, dict):
+                    if b.get("type") == "text":
+                        chars += len(b.get("text") or "")
+                    elif b.get("type") == "image_url":
+                        images += 1
+                elif isinstance(b, str):
+                    chars += len(b)
+    return chars, images
+
+
 class StreamingChatOpenAI(ChatOpenAI):
     """streaming=True 时让 invoke()/ainvoke() 内部也走流式 HTTP。
 
@@ -91,8 +132,25 @@ class StreamingChatOpenAI(ChatOpenAI):
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
         if not self.streaming:
-            return super()._generate(messages, stop=stop,
-                                     run_manager=run_manager, **kwargs)
+            tr = perf_trace.current()
+            if tr is None:
+                return super()._generate(messages, stop=stop,
+                                         run_manager=run_manager, **kwargs)
+            chars, images = _prompt_size(messages)
+            with tr.span("llm", kind="llm", streaming=False,
+                         model=getattr(self, "model_name", "") or "",
+                         prompt_chars=chars, n_images=images) as s:
+                res = super()._generate(messages, stop=stop,
+                                        run_manager=run_manager, **kwargs)
+                if s is not None:
+                    try:
+                        um = getattr(res.generations[0].message,
+                                     "usage_metadata", None)
+                        if um:
+                            s.meta["usage"] = um
+                    except (IndexError, AttributeError):
+                        pass
+                return res
         return generate_from_stream(iter(self._stream(
             messages, stop=stop, run_manager=run_manager, **kwargs)))
 
@@ -105,6 +163,53 @@ class StreamingChatOpenAI(ChatOpenAI):
         return generate_from_stream(iter(chunks))
 
     def _stream(self, messages, stop=None, run_manager=None, **kwargs):
+        """带埋点的流式：一条逻辑请求一条 llm span（TTFT/块数/输出量/usage）。
+
+        streaming=True 时 .invoke() 经 _generate → generate_from_stream 也走
+        这里，所以埋这一个生成器即覆盖全部同步路径。_agenerate/_astream 不埋
+        （生产链路全同步；异步调用时无 trace 侧画像，属可接受盲区）。
+        """
+        tr = perf_trace.current()
+        if tr is None:
+            yield from self._stream_untracked(messages, stop, run_manager,
+                                              **kwargs)
+            return
+        chars, images = _prompt_size(messages)
+        with tr.span("llm", kind="llm", streaming=True,
+                     model=getattr(self, "model_name", "") or "",
+                     prompt_chars=chars, n_images=images) as s:
+            n_chunks = 0
+            out_chars = 0
+            usage = None
+            try:
+                for chunk in self._stream_untracked(messages, stop, run_manager,
+                                                    **kwargs):
+                    if n_chunks == 0 and s is not None:
+                        # 首 chunk = TTFT（相对 span 起点即请求发起点）
+                        s.meta["ttft_s"] = round(time.perf_counter() - s.t0, 3)
+                    n_chunks += 1
+                    # 流式产出的是 ChatGenerationChunk，文本在 .message 上
+                    # （2026-11-01 实测：直接读 .content 会 AttributeError）
+                    msg = getattr(chunk, "message", None)
+                    c = getattr(msg, "content", "") or ""
+                    if isinstance(c, str):
+                        out_chars += len(c)
+                    elif isinstance(c, list):
+                        out_chars += sum(len(b.get("text") or "")
+                                         for b in c if isinstance(b, dict))
+                    um = getattr(msg, "usage_metadata", None)
+                    if um:
+                        usage = um
+                    yield chunk
+            finally:
+                if s is not None:
+                    s.meta["n_chunks"] = n_chunks
+                    s.meta["out_chars"] = out_chars
+                    if usage:
+                        s.meta["usage"] = usage
+
+    def _stream_untracked(self, messages, stop=None, run_manager=None, **kwargs):
+        """原 _stream 逻辑（首 chunk hook 链），埋点壳的内层。"""
         first = True
         for chunk in super()._stream(messages, stop=stop,
                                      run_manager=run_manager, **kwargs):
@@ -225,7 +330,8 @@ def get_vlm_model():
         streaming=MODEL_STREAMING,
         # 同 get_model：max_tokens 参数/model_kwargs 都会被改写成
         # max_completion_tokens，SiliconFlow 不认；extra_body 直接进请求体。
-        extra_body={"max_tokens": VLM_MAX_TOKENS},
+        # enable_thinking 走同一通道（perf 待办 V1：打标关 thinking）。
+        extra_body={"max_tokens": VLM_MAX_TOKENS, "enable_thinking": VLM_THINKING},
     )
     if base:
         kwargs["base_url"] = base

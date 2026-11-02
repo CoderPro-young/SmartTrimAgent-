@@ -5,14 +5,25 @@
 > 专项治理的全过程记录另立文档（如 [perf-llm-latency-optimization.md](perf-llm-latency-optimization.md)
 > ——LLM 请求层超时/流式治理，本文不重复其内容）。
 > 每节自带状态标记：**未修 / 进行中 / 已落地**。落地后在原节补结果，不另开新节。
+> 诊断定性的优化候选项归档到[性能优化待办清单](perf-optimization-backlog.md)（怎么修、值多少），本文不重复。
 
 基线参考（诊断时先排除主模型）：主规划模型 DeepSeek-V4-Flash 正常水平
 单笔 3~5s（工具轮大请求 30~80s 也算正常），流式输出 72~78 tok/s；
 超过这个量级的等待先怀疑下述各节，而不是「模型慢」。
 
+> 2026-11-01 起有全链路耗时埋点：每次任务/上传预热自动落盘 `TMP/perf/`
+> 报告（阶段耗时、LLM TTFT、VLM 批次、ffmpeg 明细），取证不再依赖开会话/
+> LangSmith。用法与解读见 [perf-instrumentation.md](perf-instrumentation.md)。
+
 ---
 
-## §1 VLM 打标 429 限流拖慢新任务（2026-10-30 晨）——**未修**
+## §1 VLM 打标 429 限流拖慢新任务（2026-10-30 晨）——**已落地（2026-11-01，待数据集回测）**
+
+> 落地：V1 打标关 thinking（`enable_thinking:false`，63k 烧穿两轮复现后修；
+> 真机冒烟 reasoning=0/output 212 tokens）+ V2 预热/任务内在途去重 +
+> V3 打标并发 4→2 + A2 感知层并发上限（定因修正：是 agent 并行调 6 路
+> analyze_media 的资源争抢，非解码慢，`-hwaccel` 方案同机实测否决）。
+> 明细见 [perf-optimization-backlog.md](perf-optimization-backlog.md) V1/V2/V3/A2。
 
 ### 现象
 

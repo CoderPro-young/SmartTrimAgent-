@@ -57,6 +57,7 @@ import content_analysis  # noqa: E402
 import culling  # noqa: E402
 import ffmpeg_exec  # noqa: E402
 import intent as intent_mod  # noqa: E402   V9.0 P3 意图分类车道
+import perf_trace  # noqa: E402            全链路耗时埋点（TMP/perf/ 落报告）
 import plan_compiler  # noqa: E402
 import plan_diff  # noqa: E402             V9.0 P1 计划差异 + 作用域闸门
 # plan_ops（V9 修订词表）已在 V12 退役：修订轮走 plan_tools diff 工具
@@ -348,11 +349,20 @@ def _bg_analyze(rel: str) -> None:
         if RUN_LOCK.locked():
             return                      # 任务一直没停，放弃本轮（下次刷新会再排）
         with _ANALYZE_SEM:
+            # 埋点：预热单独成 trace（origin=prewarm），与任务内 VLM 的时间轴
+            # 分开可见——双路挤兑（perf 台账 §1）的直接证据源。trace 在等待
+            # RUN_LOCK 结束、真正开工后才开，等待时间不计入。
+            perf_trace.start("prewarm", file=rel)
             dummy = lambda ev: None     # noqa: E731
             old_hook = content_analysis.set_progress_hook(dummy)
             try:
                 card = content_analysis.analyze_media(rel, PROJECT_ROOT)
+                if card.get("error"):
+                    tr = perf_trace.current()
+                    if tr is not None:
+                        tr.set_error(str(card["error"])[:200])
             finally:
+                perf_trace.finish_current()
                 # 只有钩子还是自己装的哑钩时才还原，避免误清正在运行任务的钩子
                 if content_analysis._hook is dummy:
                     content_analysis.set_progress_hook(old_hook)
@@ -663,7 +673,8 @@ def _run_pipeline(task: str, emit, session_id: str | None = None,
         emit({"type": "error", "message": "请先描述剪辑需求（可以先上传素材，再写一句需求）。"})
         return
 
-    materials = _list_materials()
+    with perf_trace.span("materials", kind="stage"):
+        materials = _list_materials()
     if not materials:
         emit({
             "type": "error",
@@ -675,7 +686,9 @@ def _run_pipeline(task: str, emit, session_id: str | None = None,
     mat_numbers = _material_numbers(materials)
     emit({"type": "materials", "names": materials, "numbers": mat_numbers})
 
-    session, _restored = _get_session(session_id, task)
+    with perf_trace.span("session_load", kind="stage"):
+        session, _restored = _get_session(session_id, task)
+    perf_trace.set_ctx(turn=session.get("turn") or 0)   # 报告文件名/摘要用
     if session.pop("_from_disk", False):
         emit({"type": "status",
               "text": f"已从磁盘恢复会话（第 {session.get('turn') or 0} 轮，"
@@ -690,13 +703,16 @@ def _run_pipeline(task: str, emit, session_id: str | None = None,
     # 修订要求走下面的正常路径
     pending_plan = session.pop("pending_plan", None)
     if pending_plan is not None:
-        if intent_mod.is_confirm(task):
+        with perf_trace.span("confirm_check", kind="stage"):
+            confirmed = intent_mod.is_confirm(task)
+        if confirmed:
             if _execute_compiled(pending_plan, emit, session):
                 _commit_compiled(session, task, pending_plan)
             return
 
     # 规则闸门（零成本拦「一眼没意图」；question 也是 pending_question）
-    gate = _intent_gate(task)
+    with perf_trace.span("intent_gate", kind="stage"):
+        gate = _intent_gate(task)
     if gate:
         emit(gate)
         session["pending_question"] = gate
@@ -712,7 +728,8 @@ def _run_pipeline(task: str, emit, session_id: str | None = None,
     has_ctx = bool(session.get("last_plan") or session.get("pending_question")
                    or (session.get("turn") or 0) > 0)
     if has_ctx and not session.get("pending_question"):
-        label, _basis = intent_mod.classify(task, has_session=True)
+        with perf_trace.span("intent_classify", kind="stage"):
+            label, _basis = intent_mod.classify(task, has_session=True)
         if label == "status_question":
             emit({"type": "status_answer",
                   "text": intent_mod.build_status_answer(session)})
@@ -736,21 +753,24 @@ def _run_pipeline(task: str, emit, session_id: str | None = None,
     if not pending:
         session.pop("pending_draft", None)
     if pending:
-        messages = build_answer_brief(
-            pending, task,
-            base_plan=session.get("last_plan"),
-            base_output=session.get("last_output"),
-            materials=["INPUT/" + m for m in materials],
-            session_task=session.get("task"))
+        with perf_trace.span("brief_build", kind="stage", brief="answer"):
+            messages = build_answer_brief(
+                pending, task,
+                base_plan=session.get("last_plan"),
+                base_output=session.get("last_output"),
+                materials=["INPUT/" + m for m in materials],
+                session_task=session.get("task"))
     elif base_plan is not None:
-        messages = build_revision_brief(
-            session["task"], base_plan, base_output,
-            ["INPUT/" + m for m in materials], task,
-        )
+        with perf_trace.span("brief_build", kind="stage", brief="revision"):
+            messages = build_revision_brief(
+                session["task"], base_plan, base_output,
+                ["INPUT/" + m for m in materials], task,
+            )
     else:
         messages = None          # plan_with_retry 内部用 task 单条
 
-    agent = build_video_agent_v2()
+    with perf_trace.span("agent_build", kind="stage"):
+        agent = build_video_agent_v2()
     seen: set = set()
     existing = set(materials)
 
@@ -781,25 +801,26 @@ def _run_pipeline(task: str, emit, session_id: str | None = None,
 
     # 重试闭环（含 Preflight 三分流）已下沉到 video_agent.plan_with_retry，
     # CLI 与 Web 共用同一套语义；这里只负责把事件转成 NDJSON。
-    try:
-        compiled, _result = plan_with_retry(
-            task,
-            PROJECT_ROOT,
-            invoke=lambda m: _stream_agent(agent, m, tracking_emit, seen,
-                                           on_llm=on_llm),
-            emit=tracking_emit,
-            max_retries=MAX_RETRIES,
-            messages=messages,
-            base_output=base_output,
-            output_suffix=suffix if base_output else None,
-            probe_fn=probe_fn,
-            quality="preview" if session.get("preview") else "final",
-            base_plan=base_plan,
-            draft_seed=draft_seed if isinstance(draft_seed, dict) else None,
-            history_outputs=[h.get("output") for h in session.get("history") or []],
-        )
-    finally:
-        unhook_first_token()
+    with perf_trace.span("agent_loop", kind="stage"):
+        try:
+            compiled, _result = plan_with_retry(
+                task,
+                PROJECT_ROOT,
+                invoke=lambda m: _stream_agent(agent, m, tracking_emit, seen,
+                                               on_llm=on_llm),
+                emit=tracking_emit,
+                max_retries=MAX_RETRIES,
+                messages=messages,
+                base_output=base_output,
+                output_suffix=suffix if base_output else None,
+                probe_fn=probe_fn,
+                quality="preview" if session.get("preview") else "final",
+                base_plan=base_plan,
+                draft_seed=draft_seed if isinstance(draft_seed, dict) else None,
+                history_outputs=[h.get("output") for h in session.get("history") or []],
+            )
+        finally:
+            unhook_first_token()
     if compiled is None:
         # question / 放弃类返回：事件已 emit，last_plan 不动；
         # 若本轮产生过 question，记为待答，等用户下一条消息接续
@@ -819,8 +840,9 @@ def _run_pipeline(task: str, emit, session_id: str | None = None,
     if base_plan is not None:
         # R11：同空间比较——base_plan 是 raw，新计划也取 raw（拿展开版比会
         # 产生字幕/子段 id 的假 diff 噪声）
-        diff = plan_diff.plan_diff(base_plan, getattr(compiled, "raw_plan", None)
-                                   or compiled.plan)
+        with perf_trace.span("plan_diff_compute", kind="stage"):
+            diff = plan_diff.plan_diff(base_plan, getattr(compiled, "raw_plan", None)
+                                       or compiled.plan)
         emit({"type": "plan_diff", **diff})
         # 无实质变化的提交（除 D4 自动改名外与上一版相同）直接执行——
         # 「无新改动」没有影响半径可言，闸门只会造成 global×local 死循环
@@ -830,9 +852,10 @@ def _run_pipeline(task: str, emit, session_id: str | None = None,
         if not substantive:
             emit({"type": "status", "text": "本次提交与上一版无实质变化，直接按当前计划渲染。"})
         else:
-            gate_q = plan_diff.check_scope(
-                task, diff, materials=["INPUT/" + m for m in materials],
-                scene_vocab=_scene_vocab(materials))
+            with perf_trace.span("scope_gate", kind="stage"):
+                gate_q = plan_diff.check_scope(
+                    task, diff, materials=["INPUT/" + m for m in materials],
+                    scene_vocab=_scene_vocab(materials))
             if gate_q:
                 emit(gate_q)
                 session["pending_plan"] = compiled     # 暂存：用户确认即执行
@@ -842,7 +865,8 @@ def _run_pipeline(task: str, emit, session_id: str | None = None,
     # 先执行后提交：渲染失败的计划不占「上一版」位（不回滚会让下一轮修订
     # brief 引用不存在的成片，agent 拿错误事实判断——2026-10-24 simtest5 实测）
     if _execute_compiled(compiled, tracking_emit, session):
-        _commit_compiled(session, task, compiled)
+        with perf_trace.span("commit", kind="stage"):
+            _commit_compiled(session, task, compiled)
 
 
 def _commit_compiled(session: dict, task: str, compiled) -> None:
@@ -974,7 +998,8 @@ def _execute_compiled(compiled, emit, session: dict | None) -> bool:
                   for e in failed[:3]) + "）：\n"
               + ((failed[0].get("stderr") or "")[-600:])})
 
-    plan_compiler.verify(compiled, PROJECT_ROOT)
+    with perf_trace.span("verify", kind="stage"):
+        plan_compiler.verify(compiled, PROJECT_ROOT)
     if session is not None:
         session["last_verify"] = compiled.verify
     emit({"type": "verify", "verify": compiled.verify})
@@ -985,12 +1010,13 @@ def _execute_compiled(compiled, emit, session: dict | None) -> bool:
     # V6 粗剪交付：成片之外顺手落 EDL/CSV（交给剪映/Premiere/Resolve 精剪）
     exports: list[dict] = []
     if not is_preview:
-        try:
-            for rel in timeline_export.export_files(compiled.plan, compiled.math, out):
-                exports.append({"file": rel,
-                                "url": "/media/" + rel.replace("\\", "/")})
-        except Exception as exc:  # noqa: BLE001 —— 导出失败不该影响成片交付
-            sys.stderr.write(f"[timeline-export] {type(exc).__name__}: {exc}\n")
+        with perf_trace.span("export_files", kind="stage"):
+            try:
+                for rel in timeline_export.export_files(compiled.plan, compiled.math, out):
+                    exports.append({"file": rel,
+                                    "url": "/media/" + rel.replace("\\", "/")})
+            except Exception as exc:  # noqa: BLE001 —— 导出失败不该影响成片交付
+                sys.stderr.write(f"[timeline-export] {type(exc).__name__}: {exc}\n")
     ok = bool((compiled.verify or {}).get("ok")) and not failed
     emit({
         "type": "done",
@@ -1030,6 +1056,20 @@ def _watch_emit(emit, kind: str, **ctx):
     return wrapped
 
 
+def _emit_perf_event(emit, rep: dict | None) -> None:
+    """把耗时报告摘要作为 perf 事件推给前端流（未知事件类型前端忽略；
+    TMP/_timed_run.py 会给它打上相对时间戳）。"""
+    if rep is None:
+        return
+    try:
+        emit({"type": "perf", "origin": rep.get("origin"),
+              "session_id": rep.get("session_id"),
+              "total_s": rep.get("total_s"),
+              "summary": rep.get("summary"), "file": rep.get("file")})
+    except Exception:       # noqa: BLE001 —— 观测不上报失败不影响收尾
+        pass
+
+
 def _safe_run(task: str, emit, session_id: str | None = None,
               preview: bool = False) -> None:
     """包一层异常兜底：任何未预期异常都要作为事件上报，不能让前端空等。"""
@@ -1041,12 +1081,19 @@ def _safe_run(task: str, emit, session_id: str | None = None,
         emit({"type": "error", "message": "已有任务正在运行，请等它结束再提交。"})
         emit(None)
         return
+    # 埋点：拿锁后开 trace，finally 里收尾落盘 TMP/perf/ 并发 perf 事件
+    perf_trace.start("run", session_id=session_id,
+                     task=(task or "")[:160], preview=preview)
     try:
         _run_pipeline(task, emit, session_id, preview=preview)
     except Exception as exc:  # noqa: BLE001
+        tr = perf_trace.current()
+        if tr is not None:
+            tr.set_error(f"{type(exc).__name__}: {exc}")
         emit({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
         emit({"type": "traceback", "text": traceback.format_exc()[-2000:]})
     finally:
+        _emit_perf_event(emit, perf_trace.finish_current())
         content_analysis.set_progress_hook(None)   # 感知层钩子不跨请求泄漏
         _save_session(session_id)                  # V9.0 P0：请求结束统一落盘
         RUN_LOCK.release()
@@ -1103,12 +1150,18 @@ def _safe_replan(plan: dict, emit, session_id: str | None = None,
         emit({"type": "error", "message": "已有任务正在运行，请等它结束再提交。"})
         emit(None)
         return
+    # 埋点：卡片回改也是一次完整「编译→执行」链路，单独成 trace（origin=replan）
+    perf_trace.start("replan", session_id=session_id, preview=preview)
     try:
         _run_replan(plan, emit, session_id, preview=preview)
     except Exception as exc:  # noqa: BLE001
+        tr = perf_trace.current()
+        if tr is not None:
+            tr.set_error(f"{type(exc).__name__}: {exc}")
         emit({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
         emit({"type": "traceback", "text": traceback.format_exc()[-2000:]})
     finally:
+        _emit_perf_event(emit, perf_trace.finish_current())
         _save_session(session_id)                  # V9.0 P0：请求结束统一落盘
         RUN_LOCK.release()
         emit(None)
