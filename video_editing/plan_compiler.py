@@ -414,6 +414,33 @@ def _norm_cache_path(project_root: str, clip: dict, src: str, vf: str,
     return f"TMP/norm/{h}.mp4"
 
 
+def _geometry_tail(effects: list, W: int, H: int) -> str:
+    """归一化链的几何段：默认缩进画布 + 黑边 pad；clip 带 blur_bg 时改毛玻璃底。
+
+    blur_bg 在注册表里没有 build（毛玻璃图需要目标分辨率，args 拼不出），
+    在这里特判：split 出前景/背景两路——背景放大铺满裁切后高斯模糊
+    （可轻微压暗），前景按比例缩进画布，居中叠回。单进单出，可直接并进 -vf。
+    """
+    bg_eff = next((e for e in effects
+                   if isinstance(e, dict) and e.get("name") == "blur_bg"), None)
+    if bg_eff is None:
+        return (f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
+                f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2")
+    a = bg_eff.get("args") or {}
+    sigma = float(a.get("sigma", 25))
+    dim = float(a.get("dim", 0.05))
+    blur = f"gblur=sigma={sigma:g}"
+    if dim > 0:
+        blur += f",eq=brightness=-{dim:g}"
+    return (
+        f"split[fg][bg];"
+        f"[bg]scale={W}:{H}:force_original_aspect_ratio=increase,"
+        f"crop={W}:{H},{blur}[bg];"
+        f"[fg]scale={W}:{H}:force_original_aspect_ratio=decrease[fg];"
+        f"[bg][fg]overlay=(W-w)/2:(H-h)/2"
+    )
+
+
 def _normalize_commands(plan: dict, math: dict,
                         project_root: str) -> tuple[list[Command], dict, dict]:
     """每个 clip 一条归一化命令（去重；产物内容寻址缓存命中则跳过）。
@@ -439,9 +466,8 @@ def _normalize_commands(plan: dict, math: dict,
         filter_effects = [e for e in effects if is_vf(e.get("name"))]
         kind = c["kind"]
         vf = _effects_to_vf(filter_effects)
-        vf += ("," if vf else "") + (
-            f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
-            f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2,fps={fps},format=yuv420p,setsar=1"
+        vf += ("," if vf else "") + _geometry_tail(filter_effects, W, H) + (
+            f",fps={fps},format=yuv420p,setsar=1"
         )
         # 音频效果（如 speed 的 atempo）：收集 abuild 拼一条 -af。
         # 音频在归一化阶段变速，下游 concat/xfade 用的都是已变速的 norm 文件。

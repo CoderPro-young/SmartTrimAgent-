@@ -320,13 +320,50 @@ SKILL_SPEED = Skill(
 
 
 # --------------------------------------------------------------------------- #
+# blur_bg（毛玻璃底：画幅不匹配时替代黑边）
+# --------------------------------------------------------------------------- #
+
+def _val_blur_bg(args: dict, tag: str, clip: dict) -> list[str]:
+    errors: list[str] = []
+    sigma = args.get("sigma")
+    if sigma is not None and (not _num(sigma) or not (5 <= sigma <= 60)):
+        errors.append(f"{tag}.args.sigma 必须是 5~60 的数字（背景模糊半径，默认 25）。")
+    dim = args.get("dim")
+    if dim is not None and (not _num(dim) or not (0 <= dim <= 0.5)):
+        errors.append(f"{tag}.args.dim 必须是 0~0.5 的数字（背景压暗幅度，默认 0.05，0 = 不压暗）。")
+    return errors
+
+
+SKILL_BLUR_BG = Skill(
+    name="blur_bg",
+    summary="frosted-glass background fill: fills the letterbox area around a "
+            "clip with a blurred, slightly darkened copy of its own frame "
+            "(portrait material on a landscape canvas gets frosted sides "
+            "instead of black bars).",
+    arg_keys=frozenset({"sigma", "dim"}),
+    validate=_val_blur_bg,
+    # build 留空：毛玻璃图需要目标分辨率 W/H，args 拼不出——
+    # 由 plan_compiler._geometry_tail 特判替换归一化尾巴
+    prompt_doc=(
+        "  Flat args: `sigma` (5..60, blur radius of the background, default 25),\n"
+        "  `dim` (0..0.5, darken the background, default 0.05, 0 = off).\n"
+        "  Use when the clip's aspect ratio differs from the canvas — most\n"
+        "  commonly VERTICAL video on a 16:9 timeline: the side bars become\n"
+        "  a blurred copy of the frame (frosted glass) instead of black.\n"
+        "  No visual change when the clip already matches the canvas.\n"
+        '  Example: {"type":"blur_bg","sigma":30}'
+    ),
+)
+
+
+# --------------------------------------------------------------------------- #
 # 注册表
 # --------------------------------------------------------------------------- #
 
 SKILLS: dict[str, Skill] = {
     s.name: s for s in (
         SKILL_HFLIP, SKILL_VFLIP, SKILL_TRANSPOSE, SKILL_EQ,
-        SKILL_DELOGO, SKILL_FACE_MOSAIC, SKILL_SPEED,
+        SKILL_DELOGO, SKILL_FACE_MOSAIC, SKILL_SPEED, SKILL_BLUR_BG,
     )
 }
 
