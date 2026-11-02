@@ -1,0 +1,288 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="drawio" version="26.0.0">
+  <diagram name="一键成片-端到端">
+    <mxGraphModel dx="1600" dy="1200" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1500" pageHeight="1360" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="sw1" value="① 入口：一句话 → NDJSON 事件流" style="swimlane;startSize=32;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;swimlaneFillColor=#f8fbff;fontStyle=1;fontSize=13;verticalAlign=middle;align=left;spacingLeft=12;" vertex="1" parent="1">
+          <mxGeometry x="60" y="30" width="1320" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="i1" value="点模板「一键成片·带旁白」&#xa;文案填入输入框，可再改" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="sw1">
+          <mxGeometry x="30" y="38" width="250" height="52" as="geometry" />
+        </mxCell>
+        <mxCell id="i2" value="POST /api/run&#xa;（响应是 NDJSON 事件流）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="sw1">
+          <mxGeometry x="310" y="38" width="230" height="52" as="geometry" />
+        </mxCell>
+        <mxCell id="i3" value="materials 事件&#xa;[N] 编号 ＋ 文件名清单" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="sw1">
+          <mxGeometry x="570" y="38" width="250" height="52" as="geometry" />
+        </mxCell>
+        <mxCell id="i4" value="会话恢复 / 闲聊闸门 / 意图分类&#xa;（多轮才生效；不确定一律放行）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="sw1">
+          <mxGeometry x="850" y="38" width="250" height="52" as="geometry" />
+        </mxCell>
+        <mxCell id="i5" value="构造 brief&#xa;（编号素材清单）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="sw1">
+          <mxGeometry x="1130" y="38" width="170" height="52" as="geometry" />
+        </mxCell>
+
+        <mxCell id="sw2" value="② Agent（模型）：感知 → 判断 → 用工具构建 draft（唯一写入口）" style="swimlane;startSize=32;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;swimlaneFillColor=#faf7fc;fontStyle=1;fontSize=13;verticalAlign=middle;align=left;spacingLeft=12;" vertex="1" parent="1">
+          <mxGeometry x="60" y="190" width="1320" height="450" as="geometry" />
+        </mxCell>
+        <mxCell id="a1" value="list_materials&#xa;编号清单 [N]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;fontStyle=1;" vertex="1" parent="sw2">
+          <mxGeometry x="20" y="45" width="190" height="58" as="geometry" />
+        </mxCell>
+        <mxCell id="a2" value="probe_media&#xa;时长 / 分辨率 / 音轨" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;" vertex="1" parent="sw2">
+          <mxGeometry x="230" y="45" width="200" height="58" as="geometry" />
+        </mxCell>
+        <mxCell id="a3" value="analyze_media&#xa;内容卡（缺卡才跑，通常上传即建）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;" vertex="1" parent="sw2">
+          <mxGeometry x="450" y="45" width="210" height="58" as="geometry" />
+        </mxCell>
+        <mxCell id="a4" value="list_shots&#xa;跨素材全量镜头池（⚠ 只标注不粗筛）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;fontStyle=1;" vertex="1" parent="sw2">
+          <mxGeometry x="720" y="45" width="250" height="58" as="geometry" />
+        </mxCell>
+        <mxCell id="a5" value="list_music&#xa;曲库候选 ＋ 情绪标签" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;" vertex="1" parent="sw2">
+          <mxGeometry x="990" y="45" width="210" height="58" as="geometry" />
+        </mxCell>
+
+        <mxCell id="b1" value="筛选（模型判断）&#xa;池 ≤5 不删；否则保留 &gt;80% 且 ≥5&#xa;近似重复留 aes_score 高者" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;" vertex="1" parent="sw2">
+          <mxGeometry x="20" y="150" width="280" height="58" as="geometry" />
+        </mxCell>
+        <mxCell id="b2" value="叙事分组&#xa;Hook → Core → Vibe → End&#xa;同场景聚合，每组 2~4 镜" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;" vertex="1" parent="sw2">
+          <mxGeometry x="320" y="150" width="250" height="58" as="geometry" />
+        </mxCell>
+        <mxCell id="b3" value="写整段旁白 ＋ 标题&#xa;第一人称；组时长 × 3~5 字/秒" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;" vertex="1" parent="sw2">
+          <mxGeometry x="590" y="150" width="280" height="58" as="geometry" />
+        </mxCell>
+        <mxCell id="b4" value="选 1 首 BGM&#xa;（可选节拍卡点）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;" vertex="1" parent="sw2">
+          <mxGeometry x="890" y="150" width="230" height="58" as="geometry" />
+        </mxCell>
+
+        <mxCell id="c1" value="set_project&#xa;输出规格" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;" vertex="1" parent="sw2">
+          <mxGeometry x="20" y="255" width="150" height="58" as="geometry" />
+        </mxCell>
+        <mxCell id="c2" value="clip_diff（一次批量）&#xa;insert [{shot:N}, …]&#xa;宿主从内容卡取精确边界" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;fontStyle=1;" vertex="1" parent="sw2">
+          <mxGeometry x="190" y="255" width="290" height="58" as="geometry" />
+        </mxCell>
+        <mxCell id="c3" value="timeline_diff&#xa;fade 转场 / move" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;" vertex="1" parent="sw2">
+          <mxGeometry x="500" y="255" width="240" height="58" as="geometry" />
+        </mxCell>
+        <mxCell id="c4" value="audio_diff&#xa;BGM 块" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;" vertex="1" parent="sw2">
+          <mxGeometry x="760" y="255" width="200" height="58" as="geometry" />
+        </mxCell>
+        <mxCell id="c5" value="set_narration / set_captions&#xa;写 _narration 组（互斥）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;" vertex="1" parent="sw2">
+          <mxGeometry x="980" y="255" width="260" height="58" as="geometry" />
+        </mxCell>
+
+        <mxCell id="d1" value="validate_plan&#xa;全量试算（不改 draft）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;" vertex="1" parent="sw2">
+          <mxGeometry x="760" y="350" width="200" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="d2" value="submit()&#xa;提交 draft（v3）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;fontStyle=1;" vertex="1" parent="sw2">
+          <mxGeometry x="980" y="350" width="260" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="n2" value="写工具共用一条通路：扁平 op → action 信封 → plan_actions（批内原子）→ draft；每次调用都返回「操作结果 ＋ 完整 draft 摘要」，错误就地可见——反馈回路是单步，不是整份重写。" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#faf7fc;strokeColor=#9673a6;fontSize=11;dashed=1;fontColor=#6b4f7a;align=left;spacingLeft=8;" vertex="1" parent="sw2">
+          <mxGeometry x="20" y="350" width="700" height="55" as="geometry" />
+        </mxCell>
+
+        <mxCell id="sw3" value="③ 宿主编排 plan_with_retry：取走 draft → 回填 → Preflight → 编译" style="swimlane;startSize=32;html=1;fillColor=#fff2cc;strokeColor=#d6b656;swimlaneFillColor=#fffdf5;fontStyle=1;fontSize=13;verticalAlign=middle;align=left;spacingLeft=12;" vertex="1" parent="1">
+          <mxGeometry x="60" y="680" width="1320" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="h1" value="take_submitted()&#xa;消费式取出 draft" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;" vertex="1" parent="sw3">
+          <mxGeometry x="20" y="48" width="230" height="58" as="geometry" />
+        </mxCell>
+        <mxCell id="h2" value="_autofill_probe&#xa;视频片段用真实探针覆盖" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;" vertex="1" parent="sw3">
+          <mxGeometry x="280" y="48" width="250" height="58" as="geometry" />
+        </mxCell>
+        <mxCell id="h3" value="Preflight 素材匹配&#xa;warn 提示 / block 反问" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;" vertex="1" parent="sw3">
+          <mxGeometry x="560" y="48" width="240" height="58" as="geometry" />
+        </mxCell>
+        <mxCell id="h4" value="plan 事件 → compile_plan&#xa;（此后 LLM 不再参与）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;fontStyle=1;" vertex="1" parent="sw3">
+          <mxGeometry x="830" y="48" width="230" height="58" as="geometry" />
+        </mxCell>
+        <mxCell id="h5" value="失败分流&#xa;模型可修 → 回传重出 ≤2 次&#xa;用户可决 → ask_user" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=12;" vertex="1" parent="sw3">
+          <mxGeometry x="1090" y="48" width="210" height="58" as="geometry" />
+        </mxCell>
+
+        <mxCell id="sw4" value="④ 编译器：计划 → 确定性命令（LLM 完全退出）" style="swimlane;startSize=32;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;swimlaneFillColor=#fffaf5;fontStyle=1;fontSize=13;verticalAlign=middle;align=left;spacingLeft=12;" vertex="1" parent="1">
+          <mxGeometry x="60" y="870" width="1320" height="210" as="geometry" />
+        </mxCell>
+        <mxCell id="g1" value="方言降级&#xa;v3 → 内部 v2" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" vertex="1" parent="sw4">
+          <mxGeometry x="20" y="42" width="200" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="g2" value="校验&#xa;白名单 ＋ 语义规则" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" vertex="1" parent="sw4">
+          <mxGeometry x="250" y="42" width="190" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="g3" value="展开 _expand_plan&#xa;shot 解析 · 宏 / select&#xa;cut_silence 展开 · 节拍吸附" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;fontStyle=1;" vertex="1" parent="sw4">
+          <mxGeometry x="470" y="42" width="280" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="g4" value="时间轴数学 _derive&#xa;→ 文案铺轴 _apply_captions&#xa;时长 / 起点 / 总长 / overlay 绝对时间" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" vertex="1" parent="sw4">
+          <mxGeometry x="780" y="42" width="250" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="g5" value="命令生成&#xa;detect / normalize / render" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" vertex="1" parent="sw4">
+          <mxGeometry x="1060" y="42" width="240" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="g6" value="R11 双存：raw_plan = 提交语义快照（v3，供修订底稿 / plan_diff）；展开版只服务本次渲染" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fffaf5;strokeColor=#d79b00;fontSize=11;dashed=1;fontColor=#8a6d1f;" vertex="1" parent="sw4">
+          <mxGeometry x="470" y="125" width="830" height="50" as="geometry" />
+        </mxCell>
+
+        <mxCell id="sw5" value="⑤ 执行与回验：命令 → 成品" style="swimlane;startSize=32;html=1;fillColor=#d5e8d4;strokeColor=#82b366;swimlaneFillColor=#f8fdf7;fontStyle=1;fontSize=13;verticalAlign=middle;align=left;spacingLeft=12;" vertex="1" parent="1">
+          <mxGeometry x="60" y="1120" width="1320" height="190" as="geometry" />
+        </mxCell>
+        <mxCell id="f1" value="dry-run 预检&#xa;0.5s 合成素材试跑滤镜链" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;" vertex="1" parent="sw5">
+          <mxGeometry x="20" y="42" width="230" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="f2" value="执行&#xa;detect ＋ normalize 并行&#xa;（内容寻址缓存）→ render" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;fontStyle=1;" vertex="1" parent="sw5">
+          <mxGeometry x="280" y="42" width="300" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="f3" value="ffprobe 回验&#xa;实际时长 vs 预期" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;" vertex="1" parent="sw5">
+          <mxGeometry x="610" y="42" width="200" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="f4" value="EDL / CSV&#xa;（正式档导出）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;" vertex="1" parent="sw5">
+          <mxGeometry x="840" y="42" width="200" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="f5" value="done 事件&#xa;成品卡 ＋ 审阅报告" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;fontStyle=1;" vertex="1" parent="sw5">
+          <mxGeometry x="1070" y="42" width="210" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="f6" value="会话提交：last_plan = raw_plan（下一轮修订 reset_draft 在上一版上改）· history 记输出名 · turn＋1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8fdf7;strokeColor=#82b366;fontSize=11;dashed=1;fontColor=#3d6b32;" vertex="1" parent="sw5">
+          <mxGeometry x="20" y="120" width="1260" height="50" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_i1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="i1" target="i2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_i2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="i2" target="i3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_i3" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="i3" target="i4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_i4" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="i4" target="i5">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_a1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="a1" target="a2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_a2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="a2" target="a3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_a3" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;fontSize=11;fontColor=#9673a6;" edge="1" parent="1" source="a3" target="a4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_a4" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="a4" target="a5">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_a5b1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="a5" target="b1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1155" y="315" />
+              <mxPoint x="220" y="315" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_b1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="b1" target="b2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_b2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="b2" target="b3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_b3" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="b3" target="b4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_b4c1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="b4" target="c1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1065" y="429" />
+              <mxPoint x="155" y="429" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_c1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="c1" target="c2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_c2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="c2" target="c3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_c3" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="c3" target="c4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_c4" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="c4" target="c5">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_c5d1" value="自查" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;fontSize=11;fontColor=#b8860b;" edge="1" parent="1" source="c5" target="d1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1170" y="521" />
+              <mxPoint x="920" y="521" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_d1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="d1" target="d2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_h1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="h1" target="h2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_h2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="h2" target="h3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_h3" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="h3" target="h4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_h4" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;dashed=1;strokeColor=#b85450;fontColor=#b85450;fontSize=11;" edge="1" parent="1" source="h4" target="h5">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_g1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="g1" target="g2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_g2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="g2" target="g3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_g3" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="g3" target="g4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_g4" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="g4" target="g5">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_f1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="f1" target="f2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_f2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="f2" target="f3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_f3" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="f3" target="f4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_f4" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="f4" target="f5">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_sw1_sw2" value="需求 ＋ 素材编号" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;fontSize=11;strokeWidth=2;verticalAlign=bottom;" edge="1" parent="1" source="sw1" target="sw2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_sw2_sw3" value="submit() 后的 draft（v3）" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;fontSize=11;strokeWidth=2;verticalAlign=bottom;" edge="1" parent="1" source="sw2" target="sw3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_sw3_sw4" value="通过校验的计划（v3 原样）" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;fontSize=11;strokeWidth=2;verticalAlign=bottom;" edge="1" parent="1" source="sw3" target="sw4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_sw4_sw5" value="命令序列" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;fontSize=11;strokeWidth=2;verticalAlign=bottom;" edge="1" parent="1" source="sw4" target="sw5">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_retry" value="错误回传" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.12;entryDx=0;entryDy=0;dashed=1;strokeColor=#b85450;fontColor=#b85450;fontSize=11;strokeWidth=1.5;" edge="1" parent="1" source="h5" target="sw2">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1420" y="757" />
+              <mxPoint x="1420" y="244" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

@@ -1,0 +1,206 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="drawio" version="26.0.0">
+  <diagram name="一键成片-工具契约">
+    <mxGraphModel dx="1600" dy="1200" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1500" pageHeight="930" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="hdr1" value="来源（输入 / 缓存）" style="text;html=1;align=center;verticalAlign=middle;fontSize=12;fontStyle=1;fontColor=#555555;" vertex="1" parent="1">
+          <mxGeometry x="50" y="26" width="200" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="hdr2" value="工具（模型唯一写入口）" style="text;html=1;align=center;verticalAlign=middle;fontSize=12;fontStyle=1;fontColor=#555555;" vertex="1" parent="1">
+          <mxGeometry x="280" y="26" width="240" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="hdr3" value="契约数据（工具产物）" style="text;html=1;align=center;verticalAlign=middle;fontSize=12;fontStyle=1;fontColor=#555555;" vertex="1" parent="1">
+          <mxGeometry x="550" y="26" width="290" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="hdr4" value="下游消费者" style="text;html=1;align=center;verticalAlign=middle;fontSize=12;fontStyle=1;fontColor=#555555;" vertex="1" parent="1">
+          <mxGeometry x="870" y="26" width="250" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="hdr5" value="落点 / 副作用" style="text;html=1;align=center;verticalAlign=middle;fontSize=12;fontStyle=1;fontColor=#555555;" vertex="1" parent="1">
+          <mxGeometry x="1150" y="26" width="270" height="24" as="geometry" />
+        </mxCell>
+
+        <mxCell id="r1" value="① 编号通道 —— 「第 N 个素材」的唯一锚点" style="swimlane;startSize=30;html=1;fillColor=#f5f5f5;strokeColor=#999999;swimlaneFillColor=#fcfcfc;fontStyle=1;fontSize=12;verticalAlign=middle;align=left;spacingLeft=10;" vertex="1" parent="1">
+          <mxGeometry x="40" y="60" width="1400" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="a1s" value="INPUT/ 文件名序&#xa;（＝界面素材库顺序）" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="r1">
+          <mxGeometry x="10" y="40" width="200" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="a1t" value="list_materials" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;fontStyle=1;" vertex="1" parent="r1">
+          <mxGeometry x="240" y="40" width="240" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="a1d" value="[N] INPUT/xxx.mp4&#xa;编号 ↔ 文件名 一一对应" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="r1">
+          <mxGeometry x="510" y="40" width="290" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="a1c" value="agent 决策 / brief 素材清单&#xa;/ plan_diff 指代解析" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="r1">
+          <mxGeometry x="830" y="40" width="250" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="a1e" value="四方同源：界面徽标 · 工具输出 ·&#xa;brief · 闸门，同一编号不错位" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="r1">
+          <mxGeometry x="1110" y="40" width="270" height="55" as="geometry" />
+        </mxCell>
+
+        <mxCell id="r2" value="② 事实通道 —— 计划能不能落地" style="swimlane;startSize=30;html=1;fillColor=#f5f5f5;strokeColor=#999999;swimlaneFillColor=#fcfcfc;fontStyle=1;fontSize=12;verticalAlign=middle;align=left;spacingLeft=10;" vertex="1" parent="1">
+          <mxGeometry x="40" y="180" width="1400" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="a2s" value="ffprobe 元数据" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="r2">
+          <mxGeometry x="10" y="40" width="200" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="a2t" value="probe_media" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;fontStyle=1;" vertex="1" parent="r2">
+          <mxGeometry x="240" y="40" width="240" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="a2d" value="duration / width / height / has_audio" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="r2">
+          <mxGeometry x="510" y="40" width="290" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="a2c" value="可行性自检：素材够不够长、&#xa;有没有音轨可配乐" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="r2">
+          <mxGeometry x="830" y="40" width="250" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="a2e" value="宿主 _autofill_probe 用真实探针&#xa;覆盖手抄值（模型不必写 probe）" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="r2">
+          <mxGeometry x="1110" y="40" width="270" height="55" as="geometry" />
+        </mxCell>
+
+        <mxCell id="r3" value="③ 内容通道 —— 镜头级语义索引（一键成片的核心）" style="swimlane;startSize=30;html=1;fillColor=#f5f5f5;strokeColor=#999999;swimlaneFillColor=#fcfcfc;fontStyle=1;fontSize=12;verticalAlign=middle;align=left;spacingLeft=10;" vertex="1" parent="1">
+          <mxGeometry x="40" y="300" width="1400" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="a3s" value="场景切分 ＋ VLM 打标&#xa;上传即索引，sidecar 缓存" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="r3">
+          <mxGeometry x="10" y="40" width="200" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="a3t" value="analyze_media → list_shots" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;fontStyle=1;" vertex="1" parent="r3">
+          <mxGeometry x="240" y="40" width="240" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="a3d" value="内容卡 shots[{start, end, label, aes}]&#xa;→ 每行「[N] src#03 4.2-9.0s …」" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="r3">
+          <mxGeometry x="510" y="40" width="290" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="a3c" value="筛选 / 分组 / clip_diff" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="r3">
+          <mxGeometry x="830" y="40" width="250" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="a3e" value="clip_diff {shot:3} 由宿主取卡上边界&#xa;→ 时间戳誊抄从结构上消失" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="r3">
+          <mxGeometry x="1110" y="40" width="270" height="55" as="geometry" />
+        </mxCell>
+
+        <mxCell id="r4" value="④ 音乐通道 —— 配乐不是硬依赖（选不出就回退）" style="swimlane;startSize=30;html=1;fillColor=#f5f5f5;strokeColor=#999999;swimlaneFillColor=#fcfcfc;fontStyle=1;fontSize=12;verticalAlign=middle;align=left;spacingLeft=10;" vertex="1" parent="1">
+          <mxGeometry x="40" y="420" width="1400" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="a4s" value="MUSIC/ ＋ meta.json&#xa;＋ INPUT/ 纯音频" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="r4">
+          <mxGeometry x="10" y="40" width="200" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="a4t" value="list_music" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;fontStyle=1;" vertex="1" parent="r4">
+          <mxGeometry x="240" y="40" width="240" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="a4d" value="曲目路径 / 时长 / 曲风 / 情绪标签" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="r4">
+          <mxGeometry x="510" y="40" width="290" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="a4c" value="audio_diff {op:set, source, volume}" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="r4">
+          <mxGeometry x="830" y="40" width="250" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="a4e" value="draft.audio → 编译器 _mix_bgm&#xa;原声默认静音；可 snap_beats" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="r4">
+          <mxGeometry x="1110" y="40" width="270" height="55" as="geometry" />
+        </mxCell>
+
+        <mxCell id="r5" value="⑤ 文案通道 —— 旁白制：模型写字，编译器铺轴" style="swimlane;startSize=30;html=1;fillColor=#f5f5f5;strokeColor=#999999;swimlaneFillColor=#fcfcfc;fontStyle=1;fontSize=12;verticalAlign=middle;align=left;spacingLeft=10;" vertex="1" parent="1">
+          <mxGeometry x="40" y="540" width="1400" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="a5s" value="LLM 按叙事组写整段旁白" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="r5">
+          <mxGeometry x="10" y="40" width="200" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="a5t" value="set_narration / set_captions" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;fontStyle=1;" vertex="1" parent="r5">
+          <mxGeometry x="240" y="40" width="240" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="a5d" value="_narration [{clip_ids, text, units}]&#xa;（与 _captions 一镜一句互斥）" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="r5">
+          <mxGeometry x="510" y="40" width="290" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="a5c" value="编译器 _apply_narration" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="r5">
+          <mxGeometry x="830" y="40" width="250" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="a5e" value="按字数加权铺轴 → text overlays&#xa;一句可跨剪辑点，模型不写时间戳" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="r5">
+          <mxGeometry x="1110" y="40" width="270" height="55" as="geometry" />
+        </mxCell>
+
+        <mxCell id="r6" value="⑥ 结构通道 —— 构建 → 自检 → 提交（所有写工具汇到同一个 draft）" style="swimlane;startSize=30;html=1;fillColor=#f5f5f5;strokeColor=#999999;swimlaneFillColor=#fcfcfc;fontStyle=1;fontSize=12;verticalAlign=middle;align=left;spacingLeft=10;" vertex="1" parent="1">
+          <mxGeometry x="40" y="660" width="1400" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="a6s" value="LLM 判断顺序 / 转场 / 变速" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="r6">
+          <mxGeometry x="10" y="40" width="200" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="a6t" value="set_project → clip_diff →&#xa;timeline_diff / effect_diff / overlay_diff" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;fontStyle=1;" vertex="1" parent="r6">
+          <mxGeometry x="240" y="40" width="240" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="a6d" value="draft v3（plan_tools._STATE 单例）&#xa;信封原子应用，每次返回摘要" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="r6">
+          <mxGeometry x="510" y="40" width="290" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="a6c" value="validate_plan（shot 解析＋probe&#xa;回填副本全量试算）→ submit()" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="r6">
+          <mxGeometry x="830" y="40" width="250" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="a6e" value="take_submitted → Preflight →&#xa;compile_plan（v3→v2 降级）" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="r6">
+          <mxGeometry x="1110" y="40" width="270" height="55" as="geometry" />
+        </mxCell>
+
+        <mxCell id="note" value="共同约定：① 写工具只收扁平 op，内部组装 action 信封，批内原子（一条错整批拒）；② 每次调用返回「结果 ＋ 完整 draft 摘要」，模型永远只面对小 op 与当前状态；③ draft 在宿主内存，submit 之前无任何副作用。" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fafafa;strokeColor=#999999;fontSize=11;dashed=1;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="40" y="800" width="1000" height="55" as="geometry" />
+        </mxCell>
+
+        <mxCell id="lg" value="图例" style="rounded=0;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#999999;verticalAlign=top;fontStyle=1;fontSize=11;align=left;spacingLeft=6;" vertex="1" parent="1">
+          <mxGeometry x="1080" y="800" width="360" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="lg1" value="" style="rounded=1;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;" vertex="1" parent="lg">
+          <mxGeometry x="10" y="30" width="34" height="16" as="geometry" />
+        </mxCell>
+        <mxCell id="lg1t" value="工具（模型调用）" style="text;html=1;align=left;verticalAlign=middle;fontSize=10;" vertex="1" parent="lg">
+          <mxGeometry x="52" y="28" width="160" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="lg2" value="" style="rounded=0;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="lg">
+          <mxGeometry x="10" y="54" width="34" height="16" as="geometry" />
+        </mxCell>
+        <mxCell id="lg2t" value="契约数据（给下游消费）" style="text;html=1;align=left;verticalAlign=middle;fontSize=10;" vertex="1" parent="lg">
+          <mxGeometry x="52" y="52" width="180" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="lg3" value="" style="rounded=0;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;" vertex="1" parent="lg">
+          <mxGeometry x="10" y="78" width="34" height="16" as="geometry" />
+        </mxCell>
+        <mxCell id="lg3t" value="来源 / 消费者 / 落点" style="text;html=1;align=left;verticalAlign=middle;fontSize=10;" vertex="1" parent="lg">
+          <mxGeometry x="52" y="76" width="180" height="20" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e1a" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="a1s" target="a1t"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e1b" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="a1t" target="a1d"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e1c" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="a1d" target="a1c"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e1d" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="a1c" target="a1e"><mxGeometry relative="1" as="geometry" /></mxCell>
+
+        <mxCell id="e2a" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="a2s" target="a2t"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e2b" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="a2t" target="a2d"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e2c" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="a2d" target="a2c"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e2d" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="a2c" target="a2e"><mxGeometry relative="1" as="geometry" /></mxCell>
+
+        <mxCell id="e3a" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="a3s" target="a3t"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e3b" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;fontSize=10;fontColor=#9673a6;" edge="1" parent="1" source="a3t" target="a3d"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e3c" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="a3d" target="a3c"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e3d" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="a3c" target="a3e"><mxGeometry relative="1" as="geometry" /></mxCell>
+
+        <mxCell id="e4a" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="a4s" target="a4t"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e4b" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="a4t" target="a4d"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e4c" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="a4d" target="a4c"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e4d" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="a4c" target="a4e"><mxGeometry relative="1" as="geometry" /></mxCell>
+
+        <mxCell id="e5a" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="a5s" target="a5t"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e5b" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="a5t" target="a5d"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e5c" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="a5d" target="a5c"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e5d" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="a5c" target="a5e"><mxGeometry relative="1" as="geometry" /></mxCell>
+
+        <mxCell id="e6a" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="a6s" target="a6t"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e6b" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;fontSize=10;fontColor=#9673a6;" edge="1" parent="1" source="a6t" target="a6d"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e6c" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="a6d" target="a6c"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e6d" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="a6c" target="a6e"><mxGeometry relative="1" as="geometry" /></mxCell>
+
+        <mxCell id="e_fb" value="错误清单 → 就地修正" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;dashed=1;strokeColor=#b85450;fontColor=#b85450;fontSize=10;" edge="1" parent="1" source="a6c" target="a6t">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="955" y="770" />
+              <mxPoint x="400" y="770" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

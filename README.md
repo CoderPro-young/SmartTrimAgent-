@@ -296,6 +296,7 @@ pip install transnetv2_pytorch==1.0.5   # MIT，包内自带权重，CPU 可跑
 
 ## 技术文档
 
+- [docs/v12.1-oneclick-pipeline.md](docs/v12.1-oneclick-pipeline.md) —— V12.1 一键成片全链路（入口 → 19 个工具协作 → 编译；含[端到端链路](docs/oneclick-pipeline-flow.drawio.png)、[工具契约六通道](docs/oneclick-tool-contracts.drawio.png)、[宏兜底路径](docs/oneclick-macro-fallback.drawio.png)三张图）
 - [docs/v9.0-understanding-layer.md](docs/v9.0-understanding-layer.md) —— V9.0 理解层五层防线（会话落盘 / 修订即操作 edit_plan(ops) / plan_diff+作用域闸门 / 意图分类车道；含 [防线总览图](docs/v9-defense-layers.drawio.png) 与 [修订数据流图](docs/v9-revision-flow.drawio.png)）
 - [docs/v8.1-registry-beats-aes.md](docs/v8.1-registry-beats-aes.md) —— V8.1–V8.3 创作流注册表化（general/travel/food 多模板）/ BGM 节拍卡点（audio.snap_beats，±0.35s 边界吸附）/ aes_score 美学分
 - [docs/v8.0-agent-workflow.md](docs/v8.0-agent-workflow.md) —— V8.0 创作流 agent 化（list_shots/list_music 工具 / FireRed 筛选分组规则进提示词 / _narration 手写键 / 取消粗筛 / 宏降位兜底）

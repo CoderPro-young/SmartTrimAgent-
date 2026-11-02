@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="drawio" version="26.0.0">
+  <diagram name="宏兜底路径">
+    <mxGraphModel dx="1600" dy="1200" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1180" pageHeight="830" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="title" value="宏兜底路径：submit_plan({&quot;workflow&quot;:{&quot;name&quot;:&quot;smart_create&quot;}}) —— 确定性选材 ＋ 回喂模型写文案 / 选曲" style="text;html=1;align=left;verticalAlign=middle;fontSize=13;fontStyle=1;fontColor=#444444;" vertex="1" parent="1">
+          <mxGeometry x="40" y="14" width="1100" height="26" as="geometry" />
+        </mxCell>
+
+        <mxCell id="m1" value="agent 选择宏路径：不逐个插片段，只交一个 workflow 块&#xa;（budget_seconds / keyword / bgm / subtitle_style）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="380" y="60" width="400" height="66" as="geometry" />
+        </mxCell>
+        <mxCell id="m2" value="_expand_workflow：宏注册表分发&#xa;＋ _gather_ctx（内容卡 / 探针 / 曲库候选）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="380" y="150" width="400" height="66" as="geometry" />
+        </mxCell>
+        <mxCell id="m3" value="shot_select.select_shots&#xa;quality good/ok · 静音比 &lt;0.8 · 时长 ≥1.5s · 可选关键词" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="380" y="240" width="400" height="66" as="geometry" />
+        </mxCell>
+        <mxCell id="m4" value="（仅 credits ＋ 自带文案 ＋ 未给 budget 时）&#xa;_fit_duration_to_captions：片长由文案行数决定" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="380" y="330" width="400" height="66" as="geometry" />
+        </mxCell>
+        <mxCell id="m5" value="文案：旁白制 _write_narration（按叙事组）&#xa;失败静默回退 一镜一句 _write_captions → labels 兜底" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="380" y="420" width="400" height="66" as="geometry" />
+        </mxCell>
+        <mxCell id="m6" value="挂 fade 转场（每个边界）&#xa;timeline[i&gt;0].transition = {type, duration}" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="380" y="510" width="400" height="66" as="geometry" />
+        </mxCell>
+        <mxCell id="m7" value="_attach_bgm：候选 → LLM 终选一首&#xa;原声默认 mute，音乐循环铺满；失败回退第一首" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="380" y="600" width="400" height="66" as="geometry" />
+        </mxCell>
+        <mxCell id="m8" value="产出普通计划（clips / timeline / _narration）&#xa;→ 与 agent 主导路径汇合：同一套校验 · 时间轴 · 渲染" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="380" y="690" width="400" height="66" as="geometry" />
+        </mxCell>
+
+        <mxCell id="l1" value="纯函数、零 LLM：条件过滤 ＋ 预算贪心（best_first）&#xa;＋ 跨素材轮转装填——每个素材都出镜" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8fdf7;strokeColor=#82b366;fontSize=11;dashed=1;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="40" y="240" width="300" height="66" as="geometry" />
+        </mxCell>
+        <mxCell id="l2" value="纯函数：转场与拼接只改 timeline 结构，&#xa;时长 / 起点仍由编译器 _derive 推导" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8fdf7;strokeColor=#82b366;fontSize=11;dashed=1;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="40" y="510" width="300" height="66" as="geometry" />
+        </mxCell>
+
+        <mxCell id="r1" value="回喂模型 1 次：整片按叙事组写旁白&#xa;（文案坏不卡出片，逐级降级）" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#faf7fc;strokeColor=#9673a6;fontSize=11;dashed=1;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="840" y="420" width="300" height="66" as="geometry" />
+        </mxCell>
+        <mxCell id="r2" value="回喂模型 1 次：在候选里终选一首&#xa;（解析不出 / 无人选 → 第一候选）" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#faf7fc;strokeColor=#9673a6;fontSize=11;dashed=1;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="840" y="600" width="300" height="66" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_m1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="m1" target="m2"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e_m2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="m2" target="m3"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e_m3" value="可选" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;dashed=1;fontSize=10;" edge="1" parent="1" source="m3" target="m4"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e_m4" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="m4" target="m5"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e_m5" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="m5" target="m6"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e_m6" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="m6" target="m7"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e_m7" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeWidth=2;" edge="1" parent="1" source="m7" target="m8"><mxGeometry relative="1" as="geometry" /></mxCell>
+
+        <mxCell id="e_l1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;dashed=1;strokeColor=#82b366;endArrow=none;" edge="1" parent="1" source="l1" target="m3"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e_l2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;dashed=1;strokeColor=#82b366;endArrow=none;" edge="1" parent="1" source="l2" target="m6"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e_r1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;dashed=1;strokeColor=#9673a6;" edge="1" parent="1" source="m5" target="r1"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e_r2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;dashed=1;strokeColor=#9673a6;" edge="1" parent="1" source="m7" target="r2"><mxGeometry relative="1" as="geometry" /></mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
