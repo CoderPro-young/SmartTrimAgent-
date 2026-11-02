@@ -31,7 +31,23 @@ MUSIC/*
 
 # ZCode 会话数据（本地脚本 / 运行痕迹）
 .zcode/
--
 
 # V9.0 会话落盘（含 last_plan / expansions，本机私有）
 web/.sessions/
+
+# 测试数据集素材仓（同 INPUT/ 理由：大文件不入库；用例清单见 tests/test_dataset.md）
+tests/dataset_materials/*
+!tests/dataset_materials/.gitkeep
+
+# 数据集重放产物（run-*.json 报告）
+tests/results/
+
+# 会话导出 / 备份（同 web/.sessions/ 理由，本机私有）
+conversation_history/
+web/.sessions.backup-*/
+
+# 插件运行时痕迹
+.video_agent/
+
+# 效果验证用临时截图（_verify_* 目录）
+_verify_*/
