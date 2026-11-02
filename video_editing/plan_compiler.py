@@ -583,14 +583,36 @@ def _original_mode(audio: dict) -> str:
     return original_mode(audio)
 
 
+def _bgm_holes(plan: dict, math: dict) -> list[tuple[float, float]]:
+    """audio.bgm:false 的片段 → 时间线绝对区间（V12.2 逐段排 BGM）。
+
+    区间语义与 _overlay_abs 一致：S_i 起、d_i 长（含 speed 折算与转场重叠）。
+    返回空表 = 无排 BGM 片段，混音链保持原样。
+    """
+    holes: list[tuple[float, float]] = []
+    for c in plan.get("clips") or []:
+        if not ((c.get("audio") or {}).get("bgm") is False):
+            continue
+        cid = c.get("id")
+        s = math["starts"].get(cid)
+        d = math["durations"].get(cid)
+        if s is None or not d:
+            continue
+        holes.append((_round2(s), _round2(s + d)))
+    return holes
+
+
 def _mix_bgm(filters: list[str], voice: str, audio: dict,
-             bgm_idx: int, D: float) -> str:
+             bgm_idx: int, D: float,
+             holes: list[tuple[float, float]] | None = None) -> str:
     """把 BGM 混到人声轨上，返回混音后的标签。
 
     voice  —— 已对齐到 D 的原始音频标签，如 "[0:a]" / "[acat]"
     bgm_idx—— BGM 在 -i 输入里的下标
+    holes  —— BGM 静音区间（audio.bgm:false 的片段，时间线绝对时间）
 
-    处理顺序：裁到 D → 音量 → 淡入淡出 → (可选)侧链闪避 → amix。
+    处理顺序：裁到 D → 音量 → 淡入淡出 → (可选)片段静音洞 → (可选)侧链闪避
+    → amix。静音洞放闪避之后：显式排 BGM 的区间无论闪避状态一律无声。
     """
     vol = audio.get("volume", 0.3)
     fade_in = audio.get("fade_in") or 0
@@ -604,6 +626,11 @@ def _mix_bgm(filters: list[str], voice: str, audio: dict,
     if fade_out:
         st = _round2(max(0.0, D - fade_out))
         chain.append(f"afade=t=out:st={st}:d={fade_out}")
+    if holes:
+        # V12.2：audio.bgm:false 的片段不混 BGM——用音量自动化在对应时间线
+        # 区间把 BGM 压到 0（enable 表达式与 overlay 的 between 同语义）。
+        expr = "+".join(f"between(t,{s},{e})" for s, e in holes)
+        chain.append(f"volume=0:enable='{expr}'")
     filters.append(f"[{bgm_idx}:a]" + ",".join(chain) + "[bg]")
 
     if _original_mode(audio) == "mute":
@@ -725,7 +752,8 @@ def _render_no_transition(plan: dict, math: dict) -> tuple[list[Command], dict]:
     if audio:
         bgm_idx = pip_idx  # pip 之后的第一个输入
         inputs += _bgm_input_args(audio)
-        amap = _mix_bgm(filters, "[0:a]", audio, bgm_idx, math["D"])
+        amap = _mix_bgm(filters, "[0:a]", audio, bgm_idx, math["D"],
+                        holes=_bgm_holes(plan, math))
         acodec = ["-c:a", "aac"]
     else:
         amap, acodec = "0:a", ["-c:a", "copy"]
@@ -843,7 +871,8 @@ def _render_with_transition(plan: dict, math: dict) -> tuple[list[Command], dict
 
     if audio:
         inputs += _bgm_input_args(audio)
-        amap = _mix_bgm(filters, "[avoice]", audio, pip_i, math["D"])
+        amap = _mix_bgm(filters, "[avoice]", audio, pip_i, math["D"],
+                        holes=_bgm_holes(plan, math))
 
     argv = ["ffmpeg", "-y"] + inputs + ["-filter_complex", ";".join(filters),
                      "-map", vout, "-map", amap,

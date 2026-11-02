@@ -277,12 +277,16 @@ def _validate_clip_audio(ca, tag: str, project_root: str) -> list[str]:
     if not isinstance(ca, dict):
         return [f"{tag} 必须是对象（{{\"mute\": true}} 或 {{\"source\": ...}}）。"]
     errors = _unknown_keys(
-        ca, {"mute", "source", "volume", "fade_in", "fade_out", "loop"}, tag)
+        ca, {"mute", "source", "volume", "fade_in", "fade_out", "loop", "bgm"},
+        tag)
 
     mute = ca.get("mute")
     src = ca.get("source")
     if mute is not None and not isinstance(mute, bool):
         errors.append(f"{tag}.mute 必须是 true/false。")
+    if "bgm" in ca and not isinstance(ca["bgm"], bool):
+        errors.append(f"{tag}.bgm 必须是 true/false"
+                      f"（false = 该片段不混全局 BGM，原声照常）。")
     if src is not None:
         if not isinstance(src, str) or not src.startswith(("INPUT/", "MUSIC/")):
             errors.append(f"{tag}.source 必须以 INPUT/ 或 MUSIC/ 开头。")

@@ -210,8 +210,9 @@ def _summary(plan: dict) -> str:
         speed = f" speed={c['speed']:g}" if c.get("speed") is not None else ""
         vol = f" vol={c['volume']:g}" if c.get("volume") is not None else ""
         mute = " [静音]" if (c.get("audio") or {}).get("mute") else ""
+        nobg = " [无BGM]" if (c.get("audio") or {}).get("bgm") is False else ""
         lines.append(f"  {c.get('id')}  {src_s} {ref}  {dur}  转场:{tr_s}"
-                     f"  效果:{eff}{speed}{vol}{mute}")
+                     f"  效果:{eff}{speed}{vol}{mute}{nobg}")
     n_trans = sum(1 for t in (plan.get("timeline") or [])
                   if t.get("transition"))
     lines.append(f"共 {len(plan.get('clips') or [])} 片段 / 约 {round(total, 1)}s"
@@ -309,8 +310,10 @@ def clip_diff(ops: list) -> str:
       {"op": "delete", "id": "c3"}       ← also removes overlays attached to c3
 
     Optional per-clip fields: "speed" (0.25..4), "volume" (0..1], "audio":
-    {"mute": true} or {"source": "INPUT/…", "fade_in": …, "loop": …},
-    "effects": [{"type": "Brightness", "brightness": 0.2}, …], "cut_silence".
+    {"mute": true} / {"source": "INPUT/…", "fade_in": …, "loop": …} /
+    {"bgm": false} (exclude the GLOBAL BGM from this clip — its original sound
+    keeps playing; only meaningful when a global BGM exists), "effects":
+    [{"type": "Brightness", "brightness": 0.2}, …], "cut_silence".
     Do NOT write "probe" — the host fills it. kind is auto-detected from the
     file extension.
     """
@@ -645,7 +648,8 @@ clip_diff(ops)   片段增删改
   新增（after 省略=追加到末尾；shot 编号引用 list_shots 的镜头，或写 start/end 自定义裁剪，二选一）
 - {"op":"update","id":"c2","end":9.0}      只改传入字段；"start":null 表示清除该字段
 - {"op":"delete","id":"c3"}                删除（连它挂载的文字/画中画一起清）
-  片段可选字段：speed(0.25~4)/volume((0,1])/audio:{"mute":true}/cut_silence
+  片段可选字段：speed(0.25~4)/volume((0,1])/cut_silence
+  audio:{"mute":true}=静音该片段原声；audio:{"bgm":false}=该片段不混全局BGM（原声照常，仅全局有BGM时有意义）
 effect_diff(ops) 效果（Brightness/Saturation/hflip/vflip/transpose/delogo/face_mosaic）
 - {"op":"insert","clip":"c2","type":"Brightness","brightness":0.15}
 - {"op":"update","id":"e1","brightness":0.25}   / {"op":"delete","id":"e1"}
