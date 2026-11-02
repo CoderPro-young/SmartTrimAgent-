@@ -5,6 +5,10 @@
 > 与[性能优化台账](perf-optimization-ledger.md)（只记诊断）分工：这里记「怎么修、值多少」。
 > 每项带：分类 / 优先级（P0 立刻做，P1 下批，P2 有余力）/ 预期收益 / 状态。
 > 动工后原地更新状态并回填实测结果；数据集重放（tests/test_dataset.md）做前后对比。
+>
+> **首批回测（2026-11-02）**：V1/V2/V3/A2 落地后全量重放三组，总墙钟
+> 3231s → **1522s（-53%）**。逐项与分项证据见
+> [perf-dataset-analysis-2026-11-01.md](perf-dataset-analysis-2026-11-01.md) §回测。
 
 ---
 
@@ -33,7 +37,9 @@
 - **落地**：`content_analysis` 模块级信号量 `ANALYZE_PARALLELISM`（默认 2）包住
   analyze_media 重管线；span 记 `waited_sem_s`。总墙钟反而更短（串行求和 <
   争抢放大的并行），VLM 请求密度同步下降。
-- **回测**：待数据集重放对比。
+- **回测（2026-11-02）**：组2 该文件 analyze 229.9 → 169.9s（去争抢）；注意真实 2.5K
+  微信素材单遍解码本体就要 ~97s（合成素材 555fps 的基准高估了软解能力），
+  本项收益是「去争抢」而非数量级削减。
 
 ## VLM 感知层
 
@@ -45,7 +51,8 @@
 - **落地**：`model.get_vlm_model` 的 extra_body 加 `enable_thinking: VLM_THINKING`
   （默认 False，`VLM_THINKING=1` 可开回对照）。真机冒烟：6 帧请求
   `reasoning: 0`、output 212 tokens（对比失控批次 63k）。
-- **回测**：待数据集重放（预期创建轮 1463s → ~300s）。
+- **回测（2026-11-02）**：组3 创建轮 1463.3 → **394.2s（-73%）**；曾烧 716s/63,371 chunks
+  的 63a156 素材 4 批全成功（6.6~10.0s/批），零 429 零失败批。超预期落地。
 
 ### V2｜预热与任务内共享在途分析（双路挤兑去重）—— P0｜**已落地**（2026-11-01）
 
@@ -53,14 +60,14 @@
 - **落地**：`content_analysis` 模块级在途注册表（按绝对路径），后来者等先到者收尾后
   重入——成功则命中缓存、失败则自己重算（失败不传染）；超时兜底
   `INFLIGHT_ANALYZE_TIMEOUT`（默认 1500s）。span 记 `waited_inflight_s`。
-- **回测**：单测 test_v2_inflight_dedup_same_file（并发只跑一遍管线）通过；数据集待重放。
+- **回测**：单测 test_v2_inflight_dedup_same_file（并发只跑一遍管线）通过；重放全程零 error span、无 429（基线组3 有 2 个失败批）。
 
 ### V3｜打标并发 4→2 —— P1｜**已落地**（2026-11-01）
 
 - **证据**：预热 4 路 + 任务内 4 路 = 8 路 `OpenAIRateLimitError` 实录 ×2。
 - **落地**：`VLM_CONCURRENCY` 默认 2（可显式调回）；配合 A2 的感知层并发上限，
   VLM 请求密度整体受控。
-- **回测**：单测 test_v3_tag_shots_default_two_workers 通过；数据集待重放。
+- **回测**：单测 test_v3_tag_shots_default_two_workers 通过；重放全程零 error span、无 429（基线组3 有 2 个失败批）。
 
 ### V4｜TransNetV2 CPU 推理热点 —— P2｜未动工
 
