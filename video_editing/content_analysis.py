@@ -152,18 +152,22 @@ def _probe_meta(full_path: str) -> dict:
         "width": video.get("width"),
         "height": video.get("height"),
         "has_audio": audio is not None,
+        "codec": (video.get("codec_name") or "").lower(),   # A3：hevc → 硬解判定
     }
 
 
 # --------------------------------------------------------- ⓪ 信号检测 ------ #
 
-def _signals_block(run, full: str, duration, has_audio: bool) -> dict | None:
+def _signals_block(run, full: str, duration, has_audio: bool,
+                   hwaccel: bool = False) -> dict | None:
     """T10 静音/黑场检测 → 卡片的 signals 块；失败降级为 None（不影响镜头数据）。
 
     单次解码同时跑 blackdetect + silencedetect；末尾静音用总时长补闭合。
+    hwaccel：A3 HEVC 硬解（调用方按 codec 判定）。
     """
     res = signal_detection.detect_av(
-        full, has_audio=has_audio, total_duration=duration, run_fn=run)
+        full, has_audio=has_audio, total_duration=duration,
+        hwaccel=hwaccel, run_fn=run)
     if not res.get("ok"):
         return None
     audio = None
@@ -217,7 +221,8 @@ def _avg_shot_span(times: list[float], duration) -> float:
 
 
 def _detect_boundaries(run, full: str, duration, budget: int,
-                       transnet_fn=None, run_binary=None) -> tuple[list[float], str]:
+                       transnet_fn=None, run_binary=None,
+                       hwaccel: bool = False) -> tuple[list[float], str]:
     """场景切分（V7.10：TransNetV2 主切分优先；未装依赖/模型失败回退
     select=gt(scene,0.3) + showinfo 启发式阶梯，过碎先模型复核再升阈值，
     仍碎取最粗）。
@@ -247,7 +252,9 @@ def _detect_boundaries(run, full: str, duration, budget: int,
         transnet_fn = None
     for i, th in enumerate((SCENE_THRESHOLD, 0.45, 0.6)):
         res = run(
-            ["ffmpeg", "-nostdin", "-loglevel", "info", "-i", full,
+            ["ffmpeg", "-nostdin", "-loglevel", "info",
+             *(["-hwaccel", "d3d11va"] if hwaccel else []),   # A3：HEVC 硬解
+             "-i", full,
              "-vf", f"select='eq(n,0)+gt(scene,{th})',showinfo",
              "-f", "null", "-"],
             timeout=DETECT_TIMEOUT,
@@ -592,6 +599,10 @@ _INFLIGHT_WAIT_TIMEOUT = float(os.environ.get("INFLIGHT_ANALYZE_TIMEOUT", "1500"
 _ANALYZE_PARALLELISM = max(1, int(os.environ.get("ANALYZE_PARALLELISM", "2")))
 _ANALYZE_SEM = threading.Semaphore(_ANALYZE_PARALLELISM)
 
+# A3：HEVC 素材感知层解码走 d3d11va 硬解（默认开；=0 关闭回软解对照）
+_HEVC_HWACCEL = os.environ.get("HEVC_HWACCEL", "1").strip().lower() not in (
+    "0", "false", "off", "no", "")
+
 
 def _inflight_key(path: str, project_root: str) -> str:
     rel = (path or "").replace("\\", "/").strip()
@@ -696,12 +707,17 @@ def _analyze_media_impl(path: str, project_root: str, *, model=None,
     _report(stage="start", file=name, kind=meta.get("kind"))
     degradations: list[str] = []
     duration = meta.get("duration")
+    # A3（2026-11-03）：HEVC 素材的两遍全解（信号检测 + 镜头切分）走 d3d11va
+    # 硬解——真实 2.5K HEVC10 实测软解 47s vs 硬解 20s；H.264 反而变慢
+    # （19.8s vs 27.2s），所以严格按 codec 判定。HEVC_HWACCEL=0 关闭。
+    hw = _HEVC_HWACCEL and meta.get("codec") == "hevc"
 
     # ⓪ A/V 信号（T10）：静音/黑场区间——确定性、与镜头切分并行独立，
     #    失败只记降级不阻塞（镜头/标签仍是可用索引）
     signals = None
     if meta.get("kind") == "video":
-        signals = _signals_block(run, full, duration, bool(meta.get("has_audio")))
+        signals = _signals_block(run, full, duration, bool(meta.get("has_audio")),
+                                 hwaccel=hw)
         if signals is None:
             degradations.append("signals_failed")
 
@@ -713,11 +729,15 @@ def _analyze_media_impl(path: str, project_root: str, *, model=None,
     else:
         transnet_fn = None
         if transnet.enabled():            # TRANSNET_RESCUE=0 → 复核整体不接线
-            transnet_fn = (transnet_hook if transnet_hook is not None
-                           else transnet.detect)
+            if transnet_hook is not None:
+                transnet_fn = transnet_hook
+            elif hw:
+                transnet_fn = lambda r, f, d: transnet.detect(r, f, d, hwaccel=True)  # noqa: E731
+            else:
+                transnet_fn = transnet.detect
         boundaries, how = _detect_boundaries(
             run, full, duration, budget,
-            transnet_fn=transnet_fn, run_binary=run_binary_fn)
+            transnet_fn=transnet_fn, run_binary=run_binary_fn, hwaccel=hw)
         if how == "uniform":
             degradations.append("uniform_fallback")
         shots = downsample(build_shots(boundaries, duration), budget)

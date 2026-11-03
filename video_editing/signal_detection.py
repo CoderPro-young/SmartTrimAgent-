@@ -187,16 +187,23 @@ def detect_av(src: str, *, has_audio: bool = True,
               min_silence: float = DEFAULT_MIN_SILENCE,
               black_min_duration: float = DEFAULT_BLACK_MIN_DUR,
               total_duration: float | None = None,
+              hwaccel: bool = False,
               run_fn=None, cwd: str | None = None) -> dict:
     """单次解码同时检测静音 + 黑场（内容卡片建立索引时用，省一遍解码）。
 
+    hwaccel=True 时输入侧加 `-hwaccel d3d11va`（A3，2026-11-03：真实 2.5K
+    HEVC10 素材实测软解 47s vs 硬解 20s；d3d11va 初始化失败时 ffmpeg 自动
+    回退软解，无 GPU 机器零行为变化）。仅对 HEVC 开——H.264 硬解反而慢。
     返回 {"ok", "silences", "blacks", "error"}。失败返回 ok=False 且带
     error——调用方按降级处理，绝不影响卡片里已有的镜头/标签数据。
     """
     run = run_fn or ffmpeg_exec.run
-    argv = ["ffmpeg", "-nostdin", "-hide_banner", "-i", src,
-            "-map", "0:v:0", "-vf",
-            f"blackdetect=d={black_min_duration:g}:pic_th=0.98:pix_th=0.10"]
+    argv = ["ffmpeg", "-nostdin", "-hide_banner"]
+    if hwaccel:
+        argv += ["-hwaccel", "d3d11va"]
+    argv += ["-i", src,
+             "-map", "0:v:0", "-vf",
+             f"blackdetect=d={black_min_duration:g}:pic_th=0.98:pix_th=0.10"]
     if has_audio:
         argv += ["-map", "0:a:0", "-af",
                  f"silencedetect=noise={noise_db:g}dB:d={min_silence:g}"]

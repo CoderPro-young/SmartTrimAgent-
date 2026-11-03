@@ -181,6 +181,63 @@ def test_a2_analyze_parallelism_capped():
 
 
 # --------------------------------------------------------------------------- #
+# A3：HEVC 素材感知层解码走 d3d11va（按 codec 条件启用）
+# --------------------------------------------------------------------------- #
+
+def _has_hw(argv: list) -> bool:
+    return ("-hwaccel" in argv and argv[argv.index("-hwaccel") + 1] == "d3d11va"
+            and argv.index("-hwaccel") < argv.index("-i"))
+
+
+def test_a3_detect_av_hwaccel_flag():
+    import signal_detection
+    seen: list[list] = []
+
+    def fake_run(argv, timeout=None, cwd=None):
+        seen.append(list(argv))
+        return {"ok": True, "returncode": 0, "stdout": "", "stderr": "", "command": argv}
+
+    signal_detection.detect_av("x.mp4", hwaccel=True, run_fn=fake_run)
+    signal_detection.detect_av("x.mp4", hwaccel=False, run_fn=fake_run)
+    assert _has_hw(seen[0]) and not _has_hw(seen[1]), seen
+
+
+def test_a3_analyze_wires_hwaccel_by_codec():
+    for codec, expect in (("hevc", True), ("h264", False)):
+        tmp = tempfile.mkdtemp(prefix=f"a3_{codec}_")
+        _make_env(tmp, "a3.mp4")
+        seen_run: list[list] = []
+        seen_bin: list[list] = []
+
+        def fake_run(argv, timeout=None, cwd=None):
+            a = list(argv)
+            seen_run.append(a)
+            if "-f" in a and "null" in a:
+                return {"ok": False, "returncode": 1, "stdout": "",
+                        "stderr": "fake", "command": a}
+            with open(a[-1], "wb") as f:
+                f.write(b"\xff\xd8FAKEJPEG")
+            return {"ok": True, "returncode": 0, "stdout": "", "stderr": "", "command": a}
+
+        def fake_bin(argv, timeout=None, cwd=None):
+            seen_bin.append(list(argv))
+            return {"ok": False, "returncode": 1, "stdout": b"", "stderr": "",
+                    "command": argv}
+
+        def probe(full, _c=codec):
+            return {"ok": True, "kind": "video", "duration": 3.0, "has_audio": True,
+                    "width": 640, "height": 360, "codec": _c}
+
+        ca.analyze_media("INPUT/a3.mp4", tmp, model=False, run_fn=fake_run,
+                         probe_fn=probe, run_binary_fn=fake_bin)
+        null_cmds = [a for a in seen_run if "-f" in a and "null" in a]
+        assert null_cmds, "信号检测/切分阶梯应发出全解命令"
+        assert all(_has_hw(a) == expect for a in null_cmds), (codec, null_cmds)
+        if seen_bin:                       # TransNet 管道（装了 torch 才会走到）
+            assert _has_hw(seen_bin[0]) == expect, (codec, seen_bin[0])
+
+
+# --------------------------------------------------------------------------- #
 # 手动 runner
 # --------------------------------------------------------------------------- #
 

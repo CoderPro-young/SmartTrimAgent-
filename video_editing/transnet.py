@@ -83,12 +83,14 @@ def scenes_to_boundaries(scenes) -> list:
     return sorted(set(pts))
 
 
-def detect(run, full: str, duration) -> list | None:
+def detect(run, full: str, duration, hwaccel: bool = False) -> list | None:
     """TransNetV2 重切镜头边界；任何失败返回 None（调用方回退升阈值阶梯）。
 
     run 为 ffmpeg_exec.run_binary 形态的执行器（stdout 是 bytes）。解码
     argv 与 OpenStoryline read_video_frames_as_rgb24 一致：fps+scale 到
     48×27 rgb24 经 rawvideo 管道输出，内存占用每帧约 3.8KB。
+    hwaccel=True（A3，仅 HEVC 素材）：解码走 d3d11va——缩到 48×27 省的只是
+    管道体积，解码本身是大头（2.5K HEVC10 实测 47s→20s）；初始化失败自动回退软解。
     """
     try:
         import numpy as np
@@ -96,6 +98,7 @@ def detect(run, full: str, duration) -> list | None:
 
         res = run(
             ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
+             *(["-hwaccel", "d3d11va"] if hwaccel else []),
              "-i", full, "-an",
              "-vf", f"fps={FPS},scale={INPUT_W}:{INPUT_H}:flags={SCALE_FLAGS}",
              "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1"],
