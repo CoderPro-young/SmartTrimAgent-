@@ -71,6 +71,12 @@ VLM_RETRIES = int(os.environ.get("VLM_RETRIES", "1"))
 _DISABLE_SET = {"0", "false", "off", "no", ""}
 MODEL_MAX_TOKENS = int(os.environ.get("MODEL_MAX_TOKENS", "16384"))
 VLM_MAX_TOKENS = int(os.environ.get("VLM_MAX_TOKENS", "8192"))
+# 主模型 thinking 开关（2026-11-03 实测定案，默认关）。DeepSeek-V4-Flash 是
+# 混合推理模型，不显式关时生产流量 70/128 笔烧了 28,220 reasoning tokens
+# （占输出 34%，≈310s 纯思考；探针同题关思考快 34%）。真机验证：关掉
+# reasoning=0 且正文正常；想开回对照设 MODEL_THINKING=1（预算封顶方案
+# thinking_budget=256 已验证被遵守，需要时再加）。VLM_THINKING 同款见下。
+MODEL_THINKING = os.environ.get("MODEL_THINKING", "0") not in _DISABLE_SET
 # VLM thinking 开关（perf 待办 V1）。GLM-4.5V 这类混合推理模型默认开 thinking，
 # 打标请求实测会把 63k token 的思考预算烧满（961s/笔还失败，max_tokens 管不住）；
 # 打标只要几百 token 的结构化 JSON，默认关。VLM_THINKING=1 可改回开启对照。
@@ -255,8 +261,10 @@ def get_model() -> BaseChatModel:
             # 都会被 langchain-openai 改写成 max_completion_tokens 发出，而
             # SiliconFlow 不认后者（静默忽略、仍按模型上限填 max_tokens → 400）。
             # extra_body 走 openai SDK 层直接合并进请求体，绕过参数改写
-            # （2026-10-26 事故，真机验证）。
-            extra_body={"max_tokens": MODEL_MAX_TOKENS},
+            # （2026-10-26 事故，真机验证）。enable_thinking 同通道（关思考，
+            # 2026-11-03；仅 SiliconFlow 路径——通用 OpenAI 端点不认此参数）。
+            extra_body={"max_tokens": MODEL_MAX_TOKENS,
+                        "enable_thinking": MODEL_THINKING},
         )
 
     # 3) 任意 OpenAI 兼容端点（OpenAI / DeepSeek / 本地 vLLM 等）

@@ -106,6 +106,21 @@
   0.4~2.6s——供应商排队抖动/前缀缓存未命中，与请求大小无关。
 - **方向**：先靠埋点观察发生率；若高频，考虑 TTFT 超阈值（如 >8s）断开重发的兜底杠杆。
 
+### L5｜主模型关闭 thinking（enable_thinking:false）—— P0｜**已落地**（2026-11-03）
+
+- **证据（怎么看出开着思考的）**：埋点 llm span 的 `meta.usage.output_token_details
+  .reasoning`——后测 128 笔主模型调用里 **70 笔带 reasoning，合计 28,220 tok（占
+  输出 34% ≈ 310s）**；典型签名：一笔 27.8s 调用 out=3066、reasoning=2851、正文
+  仅 415 字符（思考不进正文但时间照烧）。TTFT 仅占 15%（均 1.2s），慢的全在生成。
+- **真机探针（末块 usage 口径）**：默认开（reasoning=467）；`enable_thinking=false`
+  有效（reasoning=0，同题快 34%）；`thinking_budget=256` 被遵守（reasoning=252）。
+- **落地**：`model.get_model` SiliconFlow 路径 extra_body 加
+  `enable_thinking: MODEL_THINKING`（默认 False，`MODEL_THINKING=1` 开回对照；
+  通用 OpenAI 路径不带——非标参数）。生产路径复测 reasoning=0、正文正常。
+- **预期/回测**：按 34% 占比，三组 LLM 生成 ~903s → ~600s；**待数据集重放确认
+  耗时与成片质量**（关思考后计划质量是否受损是唯一风险点；budget 封顶方案已
+  验证可用，质量降级时的备胎）。
+
 ### L4｜结构性修订触发旁白/文案全量重生成 —— P1｜未动工
 
 - **证据**：组 1 t1「时长改为50s」15 笔 LLM/252.5s，其中 **~5 笔 ×15~24s（约 90s）是

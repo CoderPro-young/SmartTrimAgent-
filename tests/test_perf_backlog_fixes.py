@@ -58,6 +58,21 @@ def test_v1_vlm_disables_thinking():
     assert body.get("max_tokens") == model.VLM_MAX_TOKENS
 
 
+def test_main_model_disables_thinking():
+    """主模型默认关思考（2026-11-03 定案）；MODEL_THINKING=1 可开回。"""
+    m = model.get_model()
+    body = getattr(m, "extra_body", None) or {}
+    assert body.get("enable_thinking") is False, f"extra_body={body}"
+    assert model.MODEL_THINKING is False
+    # 开关翻转生效（get_model 读模块级常量，可运行时覆盖）
+    old = model.MODEL_THINKING
+    try:
+        model.MODEL_THINKING = True
+        assert model.get_model().extra_body.get("enable_thinking") is True
+    finally:
+        model.MODEL_THINKING = old
+
+
 # --------------------------------------------------------------------------- #
 # V3
 # --------------------------------------------------------------------------- #
